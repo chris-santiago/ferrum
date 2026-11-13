@@ -14,7 +14,7 @@
 #[cfg(test)]
 use crate::layout::Rect;
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, EmptyReason, MetadataColumns, PaintChannels};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, EmptyReason, MetadataColumns, PaintChannels};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader, DashColumns};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
@@ -387,10 +387,10 @@ fn build_ordinal(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    // Use col_as_positional_category_str so integer-typed ordinal x columns (e.g.
-    // Int64 year values) stringify consistently with the ordinal domain, and a
-    // null x category lands in its own band (FA-9), matching the positional domain.
-    let x_strs = match col_as_positional_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
+    // Use col_as_ordinal_category_str so integer-typed ordinal x columns (e.g.
+    // Int64 year values) stringify consistently with the ordinal domain; a null
+    // x category has no band and places no bar.
+    let x_strs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
     let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     if x_strs.len() != ys.len() { return empty_result(); }
 
@@ -516,10 +516,10 @@ fn build_ordinal_y(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let spec = ctx.spec;
     let xf = match x_field(ctx, spec) { Some(f) => f, None => return empty_result() };
     let yf = match y_field(ctx, spec) { Some(f) => f, None => return empty_result() };
-    // Use col_as_positional_category_str so integer-typed ordinal y columns
-    // stringify consistently with the ordinal domain, and a null y category gets
-    // its own band (FA-9).
-    let y_strs = match col_as_positional_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
+    // Use col_as_ordinal_category_str so integer-typed ordinal y columns
+    // stringify consistently with the ordinal domain; a null y category has no
+    // band and places no bar.
+    let y_strs = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty_result() };
     let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty_result() };
     if y_strs.len() != xs.len() { return empty_result(); }
 

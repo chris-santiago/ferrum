@@ -27,7 +27,7 @@
 //! When neither `y2` nor `x2` is bound the drawer skips — ribbon requires a
 //! band channel.
 
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries, SeriesPartition};
 use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
@@ -91,7 +91,7 @@ fn resolve_shared_pixels(
     // because col_as_f64 succeeds on integer columns, but to_pixel_f64 returns
     // None for ordinal scales, producing all-None pixels.
     if matches!(scale, ScaleKind::Ordinal(_)) {
-        if let Ok(xs_s) = col_as_positional_category_str(ctx.batch, field) {
+        if let Ok(xs_s) = col_as_ordinal_category_str(ctx.batch, field) {
             let pixels: Vec<Option<f64>> = xs_s
                 .into_iter()
                 .take(n)

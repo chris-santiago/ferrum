@@ -352,7 +352,7 @@ mod tests {
             metric: DistanceMetric::Euclidean,
             axis: LinkageAxis::Rows,
             z_score: None,
-            standard_scale: None,
+            standard_scale: None, labels: None,
             name: Some("link".into()),
         });
         let reorder = TransformSpec::Reorder(ReorderSpec {

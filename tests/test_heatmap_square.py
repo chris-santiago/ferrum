@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import warnings
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -21,6 +22,7 @@ import pytest
 import ferrum as fm
 from ferrum.coord import CoordCartesian, CoordFixed
 from tests._svg_rects import data_bar_rects, mark_layer, plot_rect, svg_elements
+from tests.test_null_group_warning import _null_key_dropped_message, _render_capturing
 
 _WIDE = pl.DataFrame(
     {
@@ -124,12 +126,18 @@ class TestHeatmapSquareSizing:
         # every drawn cell is square is asserted here, not the overdraw.
         _assert_cells_square(svg, count=6)
 
-    def test_null_row_label_nan_and_null_cells_square(self):
+    @pytest.mark.parametrize("masked", [False, True], ids=["unmasked", "melted-by-mask"])
+    def test_null_row_label_is_dropped_and_the_other_cells_stay_square(self, masked):
+        """The null row label's two cells belong to no row: they are dropped and counted once, the
+        grid is the two rows drawn (not the three the table holds), and its cells, a null value
+        among them, are square. A null column label cannot occur: a column's label is its name."""
         df = pl.DataFrame(
             {"row": ["r1", None, "r3"], "a": [1.0, float("nan"), None], "b": [4.0, 5.0, 6.0]}
         )
-        svg = fm.heatmap(df, annot=False, square=True).to_svg()
-        _assert_cells_square(svg, count=6)
+        extra: dict[str, Any] = {"mask": np.zeros((3, 2), dtype=bool)} if masked else {}
+        svg, shown = _render_capturing(fm.heatmap(df, annot=False, square=True, **extra).to_svg)
+        assert shown == [_null_key_dropped_message("heatmap", 2, "row")]
+        _assert_cells_square(svg, count=4)
 
     def test_properties_dict_width_height_honored_and_square(self):
         svg = fm.heatmap(

@@ -26,6 +26,7 @@ from ferrum import (
 )
 from ferrum._coerce import to_polars
 from ferrum._core import validate_bin_rule
+from ferrum._levels import distinct_non_null_levels
 from ferrum._desugar import (
     _explicit_positional_scale,
     _propagate_layer_axis,
@@ -173,7 +174,7 @@ def _count_facet_levels(data: Any, field: str) -> int:
         df = to_polars(data)
         if field not in df.columns:
             return 1
-        return df[field].n_unique()
+        return len(distinct_non_null_levels(df[field]))
     except Exception:
         return 1
 
@@ -386,8 +387,8 @@ def _apply_facet_sizing(
         # violates seaborn semantics where aspect governs per-panel width.
         w = per_panel_h * aspect if aspect is not None else None
         props: dict = {}
-        # An empty frame has no row levels, so no panel height to total:
-        # leave the height unset and let the chart render as empty.
+        # A frame with no row level (no row, or a facet column that is null on every row) has no
+        # panel height to total: leave the height unset and let the chart render as empty.
         if total_h > 0:
             props["height"] = total_h
         if w is not None:

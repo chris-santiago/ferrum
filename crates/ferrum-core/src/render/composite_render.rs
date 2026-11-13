@@ -366,11 +366,17 @@ fn reprepare_log_overlay_members(
 
     let mut groups: Vec<(Vec<usize>, Channel, crate::spec::encoding::ScaleSpec)> = Vec::new();
     {
+        // Each leaf's spec with the routes its prepare recorded (a layer the
+        // null-key drop gave rows of its own), so the shared resolve reads
+        // the rows every layer draws.
+        let routed: Vec<std::borrow::Cow<'_, ChartSpec>> =
+            leaves.iter().zip(prepared.iter()).map(|(leaf, prep)| prep.routed_spec(leaf.spec)).collect();
         let views: Vec<LeafResolveInput<'_>> = leaves
             .iter()
             .zip(prepared.iter())
-            .map(|(leaf, prep)| LeafResolveInput {
-                spec: leaf.spec,
+            .zip(&routed)
+            .map(|((leaf, prep), spec)| LeafResolveInput {
+                spec,
                 encoding: prep.rendering_encoding(),
                 final_batch: prep.final_batch(),
                 transform_outputs: &prep.transform_outputs,
@@ -582,11 +588,14 @@ pub(crate) fn render_composite_scene(
     // statistic, re-prepares nothing (`reprepare_log_overlay_members`
     // returns `Ok(())` with `prepared` untouched).
     reprepare_log_overlay_members(tree, leaves, &pass_one, &mut prepared, &leaf_refusal)?;
+    let routed: Vec<std::borrow::Cow<'_, ChartSpec>> =
+        leaves.iter().zip(&prepared).map(|(leaf, prep)| prep.routed_spec(leaf.spec)).collect();
     let resolve_inputs: Vec<LeafResolveInput<'_>> = leaves
         .iter()
         .zip(&prepared)
-        .map(|(leaf, prep)| LeafResolveInput {
-            spec: leaf.spec,
+        .zip(&routed)
+        .map(|((leaf, prep), spec)| LeafResolveInput {
+            spec,
             encoding: prep.rendering_encoding(),
             final_batch: prep.final_batch(),
             transform_outputs: &prep.transform_outputs,
@@ -12666,5 +12675,59 @@ mod tests {
             assert_eq!(overlay.legend, merged.legend, "{mark}");
             assert_eq!(mark_nodes(&overlay), mark_nodes(&merged), "{mark}");
         }
+    }
+
+    /// A leaf whose layer the null-key drop gave rows of its own contributes
+    /// those rows to the composite's shared domain: with a shared y across
+    /// two leaves, the dropped row's `w` of 1000 reaches no tick.
+    #[test]
+    fn a_composite_leafs_shared_resolve_spans_the_moved_layers_kept_rows() {
+        use arrow::array::{Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"}}},{"mark":"line","encoding":{"y":{"field":"w"},"color":{"field":"h","type":"nominal"}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(json).unwrap();
+        let batch = RecordBatch::try_new(
+            std::sync::Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Float64, true),
+                Field::new("v", DataType::Float64, true),
+                Field::new("w", DataType::Float64, true),
+                Field::new("h", DataType::Utf8, true),
+            ])),
+            vec![
+                std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                std::sync::Arc::new(Float64Array::from(vec![1.0, 2.0, 1000.0])),
+                std::sync::Arc::new(StringArray::from(vec![Some("a"), Some("a"), None])),
+            ],
+        )
+        .unwrap();
+        let other = scatter_spec();
+        let holds = [
+            color_hold_with(spec.clone(), batch, ThemeInputs::default()),
+            LeafHold { spec: other.clone(), ..hold() },
+        ];
+        let mut tree = composite(CompositeLayout::Hconcat, vec![leaf_node_with(spec, 0), leaf_node_with(other, 1)]);
+        // A shared y: the resolve reads each leaf's spec, so a leaf's moved
+        // layer must reach it through the routed spec.
+        if let CompositeNode::Composite { resolve, .. } = &mut tree {
+            *resolve = shared_xy();
+        }
+        let leaves: Vec<_> = holds.iter().map(|h| leaf_input(h, 300.0, 200.0)).collect();
+        let (scene, _) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+        fn numbers(nodes: &[SceneNode], out: &mut Vec<f64>) {
+            for node in nodes {
+                match node {
+                    SceneNode::Text { content, .. } => out.extend(content.parse::<f64>().ok()),
+                    SceneNode::Group { children, .. } => numbers(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut ticks = Vec::new();
+        for panel in &scene.panels {
+            numbers(&panel.axes, &mut ticks);
+        }
+        assert!(!ticks.is_empty());
+        assert!(ticks.iter().all(|tick| *tick < 500.0), "the dropped row's 1000 reaches no tick: {ticks:?}");
     }
 }

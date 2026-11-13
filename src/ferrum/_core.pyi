@@ -742,6 +742,7 @@ class Linkage:
         z_score: str | None = None,
         standard_scale: str | None = None,
         name: str | None = None,
+        labels: str | None = None,
     ) -> None: ...
 
 class Reorder:

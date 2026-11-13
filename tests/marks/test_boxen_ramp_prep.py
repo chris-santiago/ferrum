@@ -2,7 +2,7 @@
 ``letter_value.rs``-mirrored row counting, and a suite-guard sweep over
 ``_k_for_depth``'s four strategies.
 
-Quality-review REVISE, cycle 3 (all findings from the cycle-2 ramp fix):
+What this module pins:
 
 1. **Grouping mechanism**: the prep estimates depth over
    the groups ``desugar_boxen``'s ``LetterValue`` really computes: its
@@ -12,19 +12,17 @@ Quality-review REVISE, cycle 3 (all findings from the cycle-2 ramp fix):
    a chart-level color encoding (groups the letter values, so the ramp
    reads its groups), the ``color_field=`` mark kwarg (must be honored),
    and ``palette=`` (must skip the prep entirely).
-2. **`_k_for_depth` suite guard** (S3): a parametrized sweep -- the same
-   4-strategy x 10-``n`` grid the spec reviewer ran by hand in cycle 2 --
-   now lives in the suite instead of a one-off manual check, comparing the
+2. **`_k_for_depth` suite guard**: a parametrized sweep -- a
+   4-strategy x 10-``n`` grid -- comparing the
    Python mirror against the REAL rendered band count for every point.
-3. **NaN/null counting** (S1): ``letter_value::extract_values`` drops a row
-   when its VALUE is null or NaN, but keeps a null GROUP as its own group.
-   The estimator now mirrors both directions exactly (was: dropped
-   null-group rows via a plain ``drop_nulls()`` over both columns, and kept
-   NaN values since ``drop_nulls()`` doesn't touch NaN).
-4. **`materialized_depth is None` fallback** (S2, test gap): pinned so the
+3. **NaN/null counting**: ``letter_value::extract_values`` drops a row
+   when its VALUE is null or NaN, and a row with a null GROUP key belongs to no
+   group and is dropped too (a NaN key is not null and stays a group). The
+   estimator mirrors both exactly.
+4. **`materialized_depth is None` fallback**: pinned so the
    documented degrade-to-full-cap path is proven, not assumed.
 
-The coordinator's north-star (expose the depth computation from Rust via
+The north star (expose the depth computation from Rust via
 PyO3 so Python calls the single source instead of mirroring it) is filed as
 a follow-up at batch close, not built here -- this module's sweep is the
 interim drift guard for the mirror that ships today.
@@ -221,19 +219,23 @@ def test_boxen_materialized_depth_drops_nan_values_like_extract_values():
     assert len(_rendered_opacities(svg)) == 4
 
 
-def test_boxen_materialized_depth_keeps_a_null_group_as_its_own_group():
-    """A null value in the GROUP column is its own group in
-    `letter_value.rs` (`BTreeMap<Option<String>, ...>` keyed on
-    `Option<String>`), not a dropped row -- the estimator must count it the
-    same way, not exclude it via a blanket `drop_nulls()` over both
-    columns."""
-    values = [float(i) for i in range(50)]
-    df = pl.DataFrame({"g": [None] * 50, "v": values})
-    estimated = _boxen_materialized_depth(
-        df, value_field="v", group_field="g", k_depth="tukey", k_proportion=0.007
-    )
-    # tukey depth for n=50 (the null group's own size) is 2, guarded floor.
-    assert estimated == 2
+def test_boxen_materialized_depth_does_not_count_a_null_group():
+    """A null in the GROUP column belongs to no group (`letter_value.rs` drops the row), so the
+    estimator counts only the groups the statistic draws: a large run of null-group rows does not
+    deepen it, and a column that is null on every row has no group, so no depth."""
+    values = [float(i) for i in range(40)] + [1.0] * 4000
+    df = pl.DataFrame({"g": ["a"] * 40 + [None] * 4000, "v": values})
+
+    def depth(frame: pl.DataFrame) -> int | None:
+        return _boxen_materialized_depth(
+            frame, value_field="v", group_field="g", k_depth="tukey", k_proportion=0.007
+        )
+
+    # tukey depth for n=40 (group a's own size) is 2, the guarded floor; counting the null
+    # group's 4000 rows would give 8.
+    assert depth(df) == 2
+    all_null = pl.DataFrame({"g": pl.Series([None] * 50, dtype=pl.Utf8), "v": values[:50]})
+    assert depth(all_null) is None
 
 
 # ---------------------------------------------------------------------------

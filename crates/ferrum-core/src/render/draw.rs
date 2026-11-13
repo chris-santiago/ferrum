@@ -156,19 +156,9 @@ impl DrawCtx<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PlacementRead {
     /// An `Ordinal` scale's own reading: `col_as_ordinal_category_str` then
-    /// [`ScaleKind::to_pixel_str`]. A null category reads as the drawn
-    /// position every banded builder's own positional reader
-    /// (`col_as_positional_category_str`) places it at: drawn, in the
-    /// scale's null band, whenever the scale places one (FA-9) — absent
-    /// only when it does not.
+    /// [`ScaleKind::to_pixel_str`]. A null category belongs to no category,
+    /// so it places no pixel and is absent on this read.
     Category,
-    /// Polygon's own string axis read (`col_as_str`, never
-    /// `col_as_positional_category_str`): a null category is never placed,
-    /// whether or not the scale has a null band, because `build` never
-    /// looks one up for this read. Named apart from [`Self::Category`] so
-    /// the absent read's null-band exception applies only where a builder
-    /// actually takes it.
-    CategoryNullSkipped,
     /// A continuous scale read directly, never through [`DrawCtx::to_pixel`]:
     /// `col_as_f64` then [`ScaleKind::to_pixel_f64`]. Every builder but
     /// `line`/`area`/`ribbon` reads this way, so `clip=false` never changes
@@ -464,7 +454,7 @@ pub(crate) struct StatisticVoice {
 fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
     let scale = channel_scale(ctx, placement.channel);
     match placement.read {
-        PlacementRead::Category | PlacementRead::CategoryNullSkipped => {
+        PlacementRead::Category => {
             let mut columns = Vec::with_capacity(placement.columns.len());
             for col in &placement.columns {
                 match col_as_ordinal_category_str(ctx.batch, col) {
@@ -520,13 +510,8 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
 /// classified instead by the domain census (on-side) or the log tally
 /// (off-side); every other kind admits only finite values, so null,
 /// `NaN`, `+inf` and `-inf` are all absent there. `Category`: a row
-/// counts when every column's category is null AND the axis has no null
-/// band for it (`scale.to_pixel_str(NULL_CATEGORY)` is `None`) — a null
-/// category the axis places (FA-9's own rule; every banded builder's
-/// `col_as_positional_category_str` read maps a null into that band) is
-/// drawn, not absent. `CategoryNullSkipped` (polygon's own string read):
-/// a row counts when every column's category is null, with no null-band
-/// exception — that read never places one regardless of the axis.
+/// counts when every column's category is null: a null category belongs to
+/// no category and the axis places no band for it.
 ///
 /// The three reads classify a value at exactly one of "present and
 /// admitted" (drawn), "present and excluded"
@@ -538,16 +523,7 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
 fn placement_absent_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
     let scale = channel_scale(ctx, placement.channel);
     match placement.read {
-        PlacementRead::Category | PlacementRead::CategoryNullSkipped => {
-            // A null-band lookup is only meaningful for `Category`'s own
-            // builders (`col_as_positional_category_str`'s own rule);
-            // `CategoryNullSkipped` never places a null row at all, so
-            // its own band — occupied or not — never rescues one.
-            if placement.read == PlacementRead::Category
-                && scale.to_pixel_str(super::arrow_cast::NULL_CATEGORY).is_some()
-            {
-                return Ok(Default::default());
-            }
+        PlacementRead::Category => {
             let mut columns = Vec::with_capacity(placement.columns.len());
             for col in &placement.columns {
                 match col_as_ordinal_category_str(ctx.batch, col) {
@@ -667,7 +643,7 @@ pub(crate) fn domain_left_out_counts(
                 channel: placement.channel.as_str().to_string(),
                 field: Some(enc.field.clone()),
                 rows: rows.len(),
-                categorical: matches!(placement.read, PlacementRead::Category | PlacementRead::CategoryNullSkipped),
+                categorical: matches!(placement.read, PlacementRead::Category),
                 entry: None,
                 cut: false,
             });
@@ -695,7 +671,7 @@ pub(crate) fn domain_left_out_counts(
         axes.push(AxisLeftOut {
             axis,
             field: crate::layout::axis::resolve_axis_title(enc.title.as_deref(), Some(enc.field.clone())),
-            categorical: matches!(first.read, PlacementRead::Category | PlacementRead::CategoryNullSkipped),
+            categorical: matches!(first.read, PlacementRead::Category),
             rows,
         });
     }
@@ -786,8 +762,8 @@ pub(crate) struct GroupWithNoPosition {
 /// slot shares its one group with the slots that draw; the slot is the unit
 /// a reader sees empty. `channel` is the positional channel whose axis the
 /// slot is on, `column` the layer column that axis is read from, and
-/// `category` the slot's text as the axis's scale knows it
-/// (`arrow_cast::NULL_CATEGORY` for a null category).
+/// `category` the slot's text as the axis's scale knows it. A null category
+/// is never a slot.
 struct SlotGroup {
     channel: PositionalChannel,
     column: String,
@@ -798,8 +774,7 @@ struct SlotGroup {
 impl SlotGroup {
     /// Whether the axis holds a band for this category, so a reader sees an
     /// (empty) slot at all. A category an explicit domain leaves off the
-    /// axis has no slot, and a null category has one only where the axis
-    /// places a null band for it.
+    /// axis has no slot.
     fn has_band(&self, ctx: &DrawCtx) -> bool {
         channel_scale(ctx, self.channel).to_pixel_str(&self.category).is_some()
     }
@@ -819,10 +794,9 @@ impl SlotGroup {
 /// Every band slot this layer's mark places by: for each placement
 /// [`dispatch_mark_placements`] returns on a channel whose resolved scale is
 /// `Ordinal`, the layer's rows bucketed by that placement's category value
-/// ([`col_as_positional_category_str`], the reader every banded builder
-/// places a row by, so a null category is its own
-/// [`crate::render::arrow_cast::NULL_CATEGORY`] slot), in first-appearance
-/// order. The key is the scale, not the
+/// ([`col_as_ordinal_category_str`], the reader every banded builder
+/// places a row by; a null category places nothing and is no slot), in
+/// first-appearance order. The key is the scale, not the
 /// placement's [`PlacementRead`], so a mark that reads a band channel as
 /// `Strict` or `ClipAware` (`area`, `label`) is partitioned the same way.
 /// A placement over several columns (a raster image's extent pair) names no
@@ -841,7 +815,7 @@ fn band_slot_groups(ctx: &DrawCtx, placements: &[Placement]) -> Result<Vec<SlotG
             continue;
         }
         partitioned.push(column);
-        let categories = match col_as_positional_category_str(ctx.batch, column) {
+        let categories = match col_as_ordinal_category_str(ctx.batch, column) {
             Ok(categories) => categories,
             Err(RenderError::UnsupportedDtype { .. }) => continue,
             Err(e) => return Err(e),
@@ -849,7 +823,7 @@ fn band_slot_groups(ctx: &DrawCtx, placements: &[Placement]) -> Result<Vec<SlotG
         let mut slot_of: HashMap<&str, usize> = HashMap::new();
         let mut slots: Vec<SlotGroup> = Vec::new();
         for (row, category) in categories.iter().enumerate() {
-            let category = category.as_deref().unwrap_or(super::arrow_cast::NULL_CATEGORY);
+            let Some(category) = category.as_deref() else { continue };
             let slot = *slot_of.entry(category).or_insert_with(|| {
                 slots.push(SlotGroup {
                     channel: placement.channel,
@@ -1683,7 +1657,7 @@ pub fn resolve_mark_style(
 }
 
 pub(crate) use super::arrow_cast::{
-    col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, col_as_str,
+    col_as_f64, col_as_ordinal_category_str, col_as_str,
 };
 
 /// The tooltip entries a chart's field selections add to a layer's own
@@ -4924,8 +4898,8 @@ mod tests {
     /// A slot is a unit a reader sees empty, so it is named only where the
     /// axis holds a band for its category. A category the axis omits (an
     /// explicit domain that leaves it out) has none: the domain census owns
-    /// it. A null category has a band only where the axis places a null band
-    /// for it.
+    /// it. A null category is never a slot: it belongs to no category, even
+    /// where the axis holds a band spelled `null` for a literal `"null"`.
     #[test]
     fn a_slot_is_named_only_where_the_axis_holds_its_band() {
         use crate::spec::encoding::Encoding;
@@ -4937,10 +4911,10 @@ mod tests {
 
         let null_rows = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "p"), (None, Some(f64::NAN), "p"), (None, Some(f64::NAN), "p")]);
         let no_null_band = SlotFixture::new(Mark::Point, encoding.clone(), null_rows.clone(), PositionalChannel::X, &["a"]);
-        assert_eq!(no_null_band.found(), Vec::new(), "no null band on the axis");
+        assert_eq!(no_null_band.found(), Vec::new(), "no slot for a null category");
 
-        let null_band = SlotFixture::new(Mark::Point, encoding, null_rows, PositionalChannel::X, &["a", "null"]);
-        assert_eq!(null_band.found(), vec![slot_report("c=null", &["y"], &[2, 3])]);
+        let literal_null_band = SlotFixture::new(Mark::Point, encoding, null_rows, PositionalChannel::X, &["a", "null"]);
+        assert_eq!(literal_null_band.found(), Vec::new(), "a true null is never keyed into a literal \"null\" band");
     }
 
     /// A zero-row batch has no slot to name, whatever categories the axis
@@ -5295,12 +5269,11 @@ mod tests {
         assert_eq!(groups_with_no_position(&ctx).unwrap(), Vec::new());
     }
 
-    /// A null category on an Ordinal axis is absent only when the axis's
-    /// own resolved scale places no null band — the same lookup a banded
-    /// builder itself makes ([`crate::render::arrow_cast::NULL_CATEGORY`]),
-    /// not a standing "a null category is always absent" rule.
+    /// A null category on an Ordinal axis is absent on every read: it belongs
+    /// to no category, so it places no pixel whether or not the axis holds a
+    /// band spelled `null` for a literal `"null"` category.
     #[test]
-    fn a_null_category_is_absent_only_where_the_axis_places_no_null_band() {
+    fn a_null_category_is_absent_on_every_axis() {
         use crate::layout::{PanelLayout, Rect};
         use crate::render::scale_resolve::ResolvedScales;
         use crate::scale::discrete::DiscreteLayout;
@@ -5333,8 +5306,8 @@ mod tests {
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &with_null_band, batch: &batch, mark_style: &mark_style };
         assert_eq!(
             placement_absent_rows(&ctx, &placement).unwrap(),
-            std::collections::BTreeSet::new(),
-            "the axis places a null band, so the null category is not absent"
+            std::collections::BTreeSet::from([0]),
+            "a literal \"null\" band does not rescue a true null"
         );
 
         let without_null_band = ResolvedScales { x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["a".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)), ..with_null_band };
@@ -5342,7 +5315,7 @@ mod tests {
         assert_eq!(
             placement_absent_rows(&ctx, &placement).unwrap(),
             std::collections::BTreeSet::from([0]),
-            "the axis's scale places no null band, so the null category is absent"
+            "no band at all, so the null category is absent"
         );
     }
 
@@ -5459,13 +5432,9 @@ mod tests {
     }
 
     /// A bare `fm.Layer(mark="polygon")` with a Utf8 x column names a ring
-    /// whose x is null even when the x axis's own resolved scale places a
-    /// null band — `CategoryNullSkipped`'s own case: polygon's `col_as_str`
-    /// read never places a null the way every other banded builder's
-    /// `col_as_positional_category_str` does, so the null band's mere
-    /// existence does not save this ring. Fails if `polygon_read` returned
-    /// `Category` instead, since that would trigger
-    /// the null-band short-circuit and blank this ring silently.
+    /// whose x is null even when the x axis's own resolved scale holds a
+    /// band spelled `null` (a literal `"null"` category): a null category
+    /// belongs to no category, so that band never rescues the ring.
     #[test]
     fn a_polygon_string_axis_null_ring_is_found() {
         use crate::layout::{PanelLayout, Rect};
@@ -5502,8 +5471,8 @@ mod tests {
         ]).unwrap();
         let theme = ThemeInputs::default();
         let panel = PanelLayout { plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, facet_key: None, row: 0, col: 0, strip_title: None, row_strip_title: None, row_facet_key: None };
-        // The x axis's own Ordinal scale places a null band: "null" is in
-        // its domain.
+        // The x axis's own Ordinal scale holds a band spelled "null" (a
+        // literal category): a true null never joins it.
         let scales = ResolvedScales {
             x: ScaleKind::Ordinal(OrdinalScale::new_internal(vec!["p".into(), "q".into(), "null".into()], vec![0.0, 100.0], DiscreteLayout::UNPADDED)),
             y: ScaleKind::Linear(LinearScale::new_internal(vec![0.0, 10.0], vec![100.0, 0.0], false, false)),

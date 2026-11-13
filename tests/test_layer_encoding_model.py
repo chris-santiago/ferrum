@@ -65,6 +65,8 @@ from tests.test_null_group_warning import (
     _all_keys_null_fallback_message,
     _all_keys_null_message,
     _facet_key_dropped_message,
+    _not_drawn,
+    _null_key_dropped_message,
     _panel_key_fallback_message,
 )
 from tests._wire_steps import all_steps, operand_branches
@@ -8076,13 +8078,6 @@ def test_a_raster_after_a_few_points_draws_what_the_reverse_order_draws():
     assert axis_titles(after) == ["y", "v"]
 
 
-def _not_drawn(entry: str, channel: str, field: str, mark: str) -> str:
-    return (
-        f"{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} "
-        f"(this {mark} mark does not), so it gets no scale and no legend; it was ignored"
-    )
-
-
 # A channel bound where no layer's mark draws it: the bound chart, the same
 # chart without the binding, and the one warning.
 _UNDRAWN_CHANNELS: dict[str, tuple[Callable[[], Any], Callable[[], Any], str]] = {
@@ -13925,8 +13920,9 @@ def test_a_null_key_drop_that_empties_every_panel_draws_a_boxen_empty_as_a_densi
     """Every hue null: the boxen keeps its chart, as ``Kde`` does, and says the grouped output is empty.
 
     Unfaceted the chart then reports it has no rows to draw; faceted every panel is drawn
-    empty. The null-key count warning is not repeated beside the empty-split sentence. The empty
-    frame itself (axes, plot area, no band, no legend) is pinned per door in
+    empty. The null-key count warning is not repeated beside the empty-split sentence, which
+    names every key column the boxen splits by (the category and the hue), as ``BoxStats`` does.
+    The empty frame itself (axes, plot area, no band, no legend) is pinned per door in
     ``tests/marks/test_boxen_null_keys.py``; this pins the facet-fixture outcome alone.
     """
     all_null = _NULL_PANEL.with_columns(pl.lit(None, dtype=pl.Utf8).alias("h"))
@@ -13936,7 +13932,7 @@ def test_a_null_key_drop_that_empties_every_panel_draws_a_boxen_empty_as_a_densi
         warnings.simplefilter("always")
         svg = chart.to_svg()
     shown = [str(w.message) for w in caught]
-    assert shown == [_all_keys_null_message("LetterValue", "h")] + (
+    assert shown == [_all_keys_null_message("LetterValue", "cat, h")] + (
         [] if facet else [_NO_ROWS_TO_DRAW]
     )
     panels = panel_census(svg)
@@ -14035,7 +14031,8 @@ def _drop_labels(build: Callable[[], Any], output: str) -> list[str]:
     ]
 
 
-#: Per case: the chart, and the lowering(s) its own null-key drop reports, in order.
+#: Per case: the chart, and the speaker of each null-key drop it reports, in order: a statistic
+#: for each lowering it runs, and the mark's entry for each raw-row layer that draws the colour.
 _LOWERING_REPORT_CASES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
     "boxplot": (_h_box, ["BoxStats"]),
     "default-violin": (_h_violin, ["Violin"]),
@@ -14051,7 +14048,7 @@ _LOWERING_REPORT_CASES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
     ),
     "boxplot+plain-layer": (
         lambda: _h_box().layer(fm.Layer(mark="tick", encoding={"x": "g", "y": "y"})),
-        ["BoxStats"],
+        ["BoxStats", "mark_tick"],
     ),
     "boxplot+violin": (lambda: _h_box() + _h_violin(), ["BoxStats", "Violin"]),
     "layer-chart(boxplot,violin)": (
@@ -14082,7 +14079,7 @@ _LOWERING_REPORT_CASES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
                 fm.Layer(mark="point", encoding={"y": "mean(y)"}),
             )
         ),
-        ["Aggregate", "Aggregate"],
+        ["Aggregate", "Aggregate", "mark_point"],
     ),
     "boxplot+layer-mean": (
         lambda: _h_box().layer(fm.Layer(mark="point", encoding={"x": "g", "y": "mean(y)"})),
@@ -14095,7 +14092,7 @@ _LOWERING_REPORT_CASES: dict[str, tuple[Callable[[], fm.Chart], list[str]]] = {
     ),
     "bar-mean+secondary-y": (
         lambda: _h_bar_mean() + fm.SecondaryY("v", mark="line"),
-        ["Aggregate"],
+        ["Aggregate", "mark_line"],
     ),
 }
 
@@ -14108,13 +14105,29 @@ def test_each_lowering_reports_its_own_null_key_drop_apart_from_every_others(cas
     Rejects collapsing two lowerings that read the same rows under the same
     groupby into one report (a ``+`` operand's statistic swallowing the
     other's, a ``Chart.layer`` statistic sharing the host mark's report):
-    two lowerings report twice, whichever door stacks them, and a single
-    lowering (a plain boxplot, a plain layer added beside it, a mark beside
-    a ``SecondaryY`` layer drawing no statistic of its own) still reports
-    once.
+    two lowerings report twice, whichever door stacks them. A raw-row layer
+    that draws the colour (a plain layer added beside a boxplot, the host
+    point beside two mean layers, a ``SecondaryY`` line) reports its own
+    drop of the same rows under its own entry, once.
     """
-    build, expected = _LOWERING_REPORT_CASES[case]
-    assert _drop_labels(build, output) == expected
+    build, speakers = _LOWERING_REPORT_CASES[case]
+    assert _drop_labels(build, output) == speakers
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", ["boxplot+plain-layer", "layer-two-means", "bar-mean+secondary-y"])
+def test_a_raw_row_layer_beside_a_statistic_reports_its_own_drop_after_the_statistics(case, output):
+    """The whole ordered list: each statistic counts the ten null-``h`` rows once, then the raw-row
+    layer that draws the colour counts the same ten rows under its own entry, and nothing else is
+    said."""
+    build, speakers = _LOWERING_REPORT_CASES[case]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        chart = build()
+        chart.to_svg() if output == "static" else chart.interactive().scene_json
+    assert [str(w.message) for w in caught] == [
+        _null_key_dropped_message(speaker, 10, "h") for speaker in speakers
+    ]
 
 
 @pytest.mark.parametrize(

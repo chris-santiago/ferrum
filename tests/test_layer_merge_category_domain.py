@@ -13,13 +13,13 @@ The sibling module for `#247`A (the numeric union) is
 domain because the two halves of `#247` have different mechanisms and only one
 of them is bar-specific.
 
-**The banding policy is not what this pins against.** The campaign's standing
-rule is that a genuine null ordinal-anchor row bands at its own `null`
-category (`arrow_cast::distinct_positional_categories`, FA-9), and stage 3 of
-this wave deliberately strengthened it. `genuine_null_category_still_bands_*`
-are the controls for that: a fix that stopped banding nulls, or that stripped
-nulls from the column wholesale, passes every phantom test here and fails
-those two.
+**A genuine null category belongs to no band either.** A null the caller
+supplied, carrying a value, is dropped and counted by its layer, never drawn in
+a `null` band. `a_null_category_is_dropped_and_counted_*` and
+`composite_overlay_counts_a_genuine_null_category` are the controls for that
+and for the other half of the distinction: the drop reads a row the caller
+wrote, so a fix that stripped nulls from the merged column wholesale would also
+count the merge's padding, and the phantom tests above fail it.
 """
 
 from __future__ import annotations
@@ -31,8 +31,9 @@ import pytest
 
 import ferrum as fm
 
-from _svg_extents import axis_tick_dash_label_pairs, axis_tick_labels, tick_along
+from _svg_extents import axis_tick_dash_label_pairs, axis_tick_labels, text_runs, tick_along
 from _svg_rects import data_bar_rects, mark_layer, plot_rect
+from tests.test_null_group_warning import _null_key_dropped_message, _render_capturing
 
 #: Two frames' worth of the same three categories, each with its own value
 #: column scale, so a layer clipped out of view is visible as a missing mark
@@ -163,21 +164,26 @@ def test_row_null_in_both_positional_channels_claims_no_band_unmerged():
     assert axis_tick_labels(svg, axis="x") == ["a", "b", "c"]
 
 
-def test_genuine_null_category_still_bands_unlayered():
-    """Control: the standing FA-9 policy, unlayered. A null the user supplied bands."""
+def test_a_null_category_is_dropped_and_counted_unlayered():
+    """A null the user supplied, carrying a value, belongs to no band: its row is dropped and
+    counted, and no `null` band is drawn."""
     frame = pl.DataFrame({"cat": ["a", None, "c"], "val": [1.0, 2.0, 3.0]})
-    svg = fm.Chart(frame).mark_point().encode(x=fm.X("cat", type_="N"), y="val").to_svg()
+    chart = fm.Chart(frame).mark_point().encode(x=fm.X("cat", type_="N"), y="val")
+    svg, messages = _render_capturing(chart.to_svg)
 
-    assert axis_tick_labels(svg, axis="x") == ["a", "c", "null"]
+    assert messages == [_null_key_dropped_message("mark_point", 1, "cat")]
+    assert {"a", "c"} <= set(text_runs(svg))
+    assert "null" not in text_runs(svg)
+    assert circle_count(svg) == 2
 
 
-def test_genuine_null_category_still_bands_inside_a_merge():
-    """Control: the policy holds *through* the merge, which is the whole distinction.
+def test_a_null_category_is_dropped_and_counted_inside_a_merge():
+    """The drop holds *through* the merge, which is the whole distinction.
 
-    The left frame supplies a real null category carrying a real value. It
-    bands, and the merge's own padding does not -- so "no phantom" cannot be
-    satisfied by dropping nulls from the column, only by distinguishing a null
-    a mark occupies from one manufactured to square off the batch.
+    The left frame supplies a real null category carrying a real value. It is dropped
+    and counted on that layer, and the merge's own padding is neither drawn nor counted --
+    so "no phantom" cannot be satisfied by counting every null of the column, only by
+    distinguishing a null a caller wrote from one manufactured to square off the batch.
     """
     nullish = pl.DataFrame({"cat": ["a", None, "c"], "val": [1.0, 2.0, 3.0]})
     # The right frame's categories are a SUBSET of the left's real ones, so no
@@ -185,19 +191,18 @@ def test_genuine_null_category_still_bands_inside_a_merge():
     # ordinal domain is read off the chart-level column alone and never unions
     # the other layer's categories in (a separate defect, reported alongside
     # this one). Keeping that out of this control's way is what makes the mark
-    # count below a statement about the null band.
+    # count below a statement about the null category.
     right = pl.DataFrame({"cat": ["a", "c"], "val": [40.0, 60.0]})
     merged = fm.Chart(nullish).mark_point().encode(x=fm.X("cat", type_="N"), y="val") + fm.Chart(
         right
     ).mark_point().encode(x=fm.X("cat", type_="N"), y="val")
-    svg = merged.to_svg()
+    svg, messages = _render_capturing(merged.to_svg)
 
-    assert axis_tick_labels(svg, axis="x") == ["a", "c", "null"]
-    # Five marks at three bands: the left layer draws all three of its rows
-    # (including the null-category one, at the null band -- that is the
-    # policy), the right layer draws its two, and the merge's own padded rows
-    # draw nothing. The null band is occupied, not phantom.
-    assert circle_count(svg) == 5
+    assert messages == [_null_key_dropped_message("mark_point", 1, "cat")]
+    assert "null" not in text_runs(svg)
+    # Four marks: the left layer's two real rows, the right layer's two, and none for the
+    # dropped null-category row or the merge's padded rows.
+    assert circle_count(svg) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -206,8 +211,9 @@ def test_genuine_null_category_still_bands_inside_a_merge():
 # `composite::leaf_positional_domain`, a different arm from the flat `a + b`
 # merge above. The two arms pick the paired positional channel independently,
 # so a fix to one is not a fix to the other and an x/y mix-up in either is
-# silent: it would either keep every phantom band or drop every genuine one.
-# Both outcomes are pinned, which is what makes the pair discriminating.
+# silent: it would either keep every phantom band or count a row the caller
+# never wrote as a dropped null category. Both outcomes are pinned, which is
+# what makes the pair discriminating.
 # ---------------------------------------------------------------------------
 
 BOTH_NULL = pl.DataFrame({"cat": ["a", "b", "c", None], "val": [1.0, 2.0, 3.0, None]})
@@ -230,21 +236,19 @@ def test_composite_overlay_drops_an_unoccupied_null_band():
     assert circle_count(svg) == 6
 
 
-def test_composite_overlay_keeps_a_genuine_null_band():
-    """Control: the FA-9 policy holds through the composite arm too.
+def test_composite_overlay_counts_a_genuine_null_category():
+    """The drop holds through the composite arm too: the left leaf's null-category row carries a
+    real value, so that leaf drops and counts it, and the shared domain holds no `null` band.
 
     Order is not asserted: the shared ordinal domain is a cross-leaf union whose
-    ordering is `#247`A's concern, not this one. Membership is the property under
-    test, and a paired-channel mix-up in `leaf_positional_domain` would empty the
-    null band out of it.
+    ordering is `#247`A's concern, not this one. Membership is the property under test.
     """
-    svg = overlay_svg(GENUINE_NULL, LOW)
+    svg, messages = _render_capturing(lambda: overlay_svg(GENUINE_NULL, LOW))
 
-    labels = axis_tick_labels(svg, axis="x")
-    assert sorted(labels) == ["a", "b", "c", "null"]
-    # Three marks per leaf again -- the left leaf's null-category row draws, at
-    # the null band, because it carries a real value.
-    assert circle_count(svg) == 6
+    assert messages == [_null_key_dropped_message("mark_point", 1, "cat")]
+    assert sorted(axis_tick_labels(svg, axis="x")) == ["a", "b", "c"]
+    # Two marks from the left leaf (its null-category row is dropped) and three from the right.
+    assert circle_count(svg) == 5
 
 
 # ---------------------------------------------------------------------------

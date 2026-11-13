@@ -46,6 +46,7 @@ from typing import Any
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
 from ferrum._coerce import to_polars
 from ferrum._core import numeric_columns, secondary_key
+from ferrum._levels import distinct_non_null_levels
 from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum._validate import (
     coerce_finite_real,
@@ -727,6 +728,18 @@ def heatmap(
     )
 
 
+def _rows_with_label(tbl: Any, id_col: str) -> Any:
+    """Return the rows of *tbl* whose *id_col* label is not null: the rows a matrix mark draws.
+
+    A row with a null label belongs to no band, so the mark drops it (and counts it in its own
+    warning). Anything that reads the cells to size the colour domain reads these rows, so the
+    scale spans what is drawn.
+    """
+    import pyarrow.compute as pc
+
+    return tbl.filter(pc.is_valid(tbl[id_col]))
+
+
 def _heatmap_finite_values(tbl: Any, value_cols: list[str]) -> Any:
     """Flatten ``heatmap``'s numeric value columns to a finite-valued 1-D array.
 
@@ -773,6 +786,9 @@ def _heatmap_resolve_color_domain(
     vmin: float | None,
     vmax: float | None,
     center: float | None,
+    *,
+    all_rows: Any,
+    id_col: str,
 ) -> tuple[float | None, float | None]:
     """Resolve ``heatmap``'s color-domain endpoints and emit every
     domain-related ``UserWarning``, so :func:`_heatmap_build` only has to
@@ -787,8 +803,9 @@ def _heatmap_resolve_color_domain(
       ``vmin``/``vmax`` sections), so a lone bound still produces a full
       2-element domain.
     - **Fill failure.** When there is no finite data anywhere to fill from
-      (e.g. an all-NaN value column), the one-sided bound cannot be
-      completed: warn naming the reason and drop it (return ``(None,
+      (e.g. an all-NaN value column, or finite values that all sit on rows whose
+      ``id_col`` label is null, which the heatmap does not draw), the one-sided
+      bound cannot be completed: warn naming the reason and drop it (return ``(None,
       None)``) rather than silently discarding the user's explicit bound
       into an inert half-domain.
     - **Inverted-domain warning.** When the filled domain comes out inverted
@@ -802,6 +819,16 @@ def _heatmap_resolve_color_domain(
       outside the effective ``[vmin, vmax]`` -- explicit/filled when known,
       else the data-derived extent -- warn that the diverging ramp collapses
       to a one-sided compressed ramp; render is unaffected.
+
+    Parameters
+    ----------
+    tbl
+        The rows the heatmap draws (a null-labelled row is not one of them).
+    all_rows
+        The whole table, null labels included: it only tells the fill-failure
+        warning whether finite values exist on rows that are not drawn.
+    id_col
+        The row-label column, named in that warning.
 
     Returns
     -------
@@ -834,10 +861,15 @@ def _heatmap_resolve_color_domain(
                     stacklevel=user_stacklevel(),
                 )
         else:
+            reason = (
+                f"every finite value sits on a row whose '{id_col}' label is null"
+                if _heatmap_finite_values(all_rows, value_cols).size
+                else "the heatmap's numeric columns have no finite values"
+            )
             warnings.warn(
                 f"heatmap: {given_name}={given_value} was given but {missing_name} "
-                "could not be filled from the data extent (the heatmap's numeric "
-                "columns have no finite values); the color-domain override is dropped.",
+                f"could not be filled from the data extent ({reason}); "
+                "the color-domain override is dropped.",
                 UserWarning,
                 stacklevel=user_stacklevel(),
             )
@@ -891,11 +923,15 @@ def _heatmap_build(
     """
     from ferrum import Unpivot
 
+    # The rows the mark draws: a null-labelled row is dropped (and counted) by the mark, so the
+    # colour domain and the grid's shape are read from the rows that remain.
+    drawn_tbl = _rows_with_label(tbl, id_col)
+
     # robust=True: compute vmin/vmax from 2nd/98th percentiles in Python.
     if robust:
         import numpy as np
 
-        arr = _heatmap_finite_values(tbl, value_cols)
+        arr = _heatmap_finite_values(drawn_tbl, value_cols)
         if vmin is None and arr.size:
             vmin = float(np.percentile(arr, 2.0))
         if vmax is None and arr.size:
@@ -982,7 +1018,9 @@ def _heatmap_build(
     # out-of-domain warning are all owned by _heatmap_resolve_color_domain;
     # this block only assembles the wire kwargs from its result.
     if vmin is not None or vmax is not None or center is not None or cmap is not None:
-        vmin, vmax = _heatmap_resolve_color_domain(tbl, value_cols, vmin, vmax, center)
+        vmin, vmax = _heatmap_resolve_color_domain(
+            drawn_tbl, value_cols, vmin, vmax, center, all_rows=tbl, id_col=id_col
+        )
 
         # center= selects a Diverging scale (midpoint = center, scheme =
         # cmap); no new wire field — `domainMid` is the existing Diverging
@@ -1051,18 +1089,18 @@ def _heatmap_build(
     # or columns shrink the grid, and an empty-schema `melted_data` from a
     # mask that keeps no cell counts 0 of each); the unmasked path counts
     # the drawn value columns -- 0 at zero rows, since no band is drawn --
-    # and the distinct (duplicate- and null-collapsing) id values, with
-    # `max(..., 1)` keeping the ratio defined (and the empty panel square)
-    # whenever either count is 0.
+    # and the distinct non-null id values (a null label belongs to no band:
+    # the mark drops its cells), with `max(..., 1)` keeping the ratio defined
+    # (and the empty panel square) whenever either count is 0.
     if square:
         from ferrum.coord import CoordFixed
 
         if melted_data is not None:
-            n_cols_drawn = len(set(melted_data["column"].to_list()))
-            n_rows_drawn = len(set(melted_data[id_col].to_list()))
+            n_cols_drawn = len(distinct_non_null_levels(melted_data["column"]))
+            n_rows_drawn = len(distinct_non_null_levels(melted_data[id_col]))
         else:
-            n_cols_drawn = len(value_cols) if tbl.num_rows else 0
-            n_rows_drawn = len(set(tbl[id_col].to_pylist()))
+            n_cols_drawn = len(value_cols) if drawn_tbl.num_rows else 0
+            n_rows_drawn = len(distinct_non_null_levels(drawn_tbl[id_col]))
         chart = chart.coord(CoordFixed(ratio=max(n_cols_drawn, 1) / max(n_rows_drawn, 1)))
 
     from ferrum.title import Title
@@ -1329,6 +1367,10 @@ def _clustermap_build(
         Unpivot,
     )
 
+    # A null-labelled row belongs to no band: the linkages skip it (and count it at render), the
+    # center heatmap drops it, and the dendrogram is sized over the rows that remain.
+    n_labelled = max(_rows_with_label(tbl, id_col).num_rows, 1)  # a leaf axis needs a span
+
     def _leaf_scale(n: int, *, reverse: bool = False) -> LinearScale:
         """Return the heatmap band scale's continuous image over ``n`` cells."""
         return LinearScale(domain=[-0.5, n - 0.5], reverse=reverse)
@@ -1346,6 +1388,7 @@ def _clustermap_build(
         z_score=z_score,
         standard_scale=standard_scale,
         name=row_link_name,
+        labels=id_col,
     )
     col_link = Linkage(
         method=method,
@@ -1354,6 +1397,7 @@ def _clustermap_build(
         z_score=z_score,
         standard_scale=standard_scale,
         name=col_link_name,
+        labels=id_col,
     )
 
     # The dendrogram panels and the row/column `Reorder`s all read `linkage`'s
@@ -1469,7 +1513,7 @@ def _clustermap_build(
             # draws data x upward, and the heatmap's first row is at the top.
             # The distance axis is reversed too, so the leaves face the heatmap
             # on the right, as the column tree's face it below.
-            "x": _X(_segment_cols["x"], scale=_leaf_scale(tbl.num_rows, reverse=True)),
+            "x": _X(_segment_cols["x"], scale=_leaf_scale(n_labelled, reverse=True)),
             "y": _Y(_segment_cols["y"], scale=LinearScale(reverse=True)),
             "x2": _segment_cols["x2"],
             "y2": _segment_cols["y2"],

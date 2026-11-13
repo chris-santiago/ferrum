@@ -23,7 +23,7 @@ use super::domain::{
     LayerUnion, SortContext,
 };
 use super::{
-    column_min_max_f64, distinct_positional_categories, infer_spec_type, ScaleKind, SharedDomain,
+    column_min_max_f64, distinct_values_in_order, infer_spec_type, ScaleKind, SharedDomain,
 };
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
@@ -35,32 +35,6 @@ use crate::transform::core::FINAL_OUTPUT_KEY;
 pub(in crate::render) struct PositionalFields<'a> {
     pub(in crate::render) x: Option<&'a str>,
     pub(in crate::render) y: Option<&'a str>,
-}
-
-impl<'a> PositionalFields<'a> {
-    /// The field bound on the **opposite** positional channel from `channel`:
-    /// `y` for `"x"`, `x` for `"y"`.
-    ///
-    /// This is the "paired positional channel" of `#247`B's null-band occupancy
-    /// rule (`arrow_cast::null_category_band_is_occupied`) — the second
-    /// coordinate a mark needs before it can be placed at all — and NOT
-    /// `build_axis_scale`'s `paired_enc`, which is the `x2`/`y2` span partner.
-    /// Both sides are the RENDERED (post-`CoordFlip`) channels, like the struct's
-    /// own fields, so the pairing is the one the marks actually draw with.
-    ///
-    /// `None` for any other channel token: only x and y have an opposite, and an
-    /// auxiliary channel asking would be a caller bug rather than a domain whose
-    /// null band should quietly vanish.
-    fn paired_positional(self, channel: &str) -> Option<&'a str> {
-        match channel {
-            "x" => self.y,
-            "y" => self.x,
-            _ => {
-                debug_assert!(false, "paired_positional called with non-positional channel {channel:?}");
-                None
-            }
-        }
-    }
 }
 
 // The padding-inset constants and `inset_pixel_range` now live in
@@ -468,12 +442,8 @@ pub(in crate::render) fn build_axis_scale(
             })?;
             Ok((extent, tally))
         };
-        // `#247`B: the null band is decided against the opposite positional
-        // field the sort reads, so the categories and their sort agree on
-        // which channel pairs with this one.
-        let paired_positional = PositionalFields { x: rows.x_field, y: rows.y_field }.paired_positional(channel);
         let data_categories = || {
-            establishing_categories(channel, &enc.field, paired_positional, spec, primary_batch, transform_outputs, include_final)
+            establishing_categories(channel, &enc.field, spec, primary_batch, transform_outputs, include_final)
         };
         // `channel` here is the RESOLVED (post-`CoordFlip`) token
         // `build_from_scale_spec` validated against, same as every other
@@ -537,7 +507,6 @@ pub(in crate::render) fn build_axis_scale(
             let mut domain = positional_category_union(
                 channel,
                 &enc.field,
-                positional_fields.paired_positional(channel),
                 primary_batch,
                 transform_outputs,
                 spec,
@@ -688,7 +657,7 @@ pub(in crate::render) fn imposed_axis_scale(
             )
         }),
     };
-    let data_categories = || distinct_positional_categories(&batch, &binding.field, None);
+    let data_categories = || distinct_values_in_order(&batch, &binding.field);
     // An imposed member draws nothing of its own on this channel (see the
     // `shared_domain_axis_scale` call above), so it contributes no text
     // rows either, and it names no statistic field of its own: the
@@ -804,14 +773,11 @@ pub(in crate::render) fn data_pixel_y(scale: &ScaleKind, plot_area: &Rect, d: f6
 /// `data_extent` answers what a continuous scale stating no `domain` spans; it
 /// is asked only then, so a categorical scale on a non-numeric column never
 /// reads it. `data_categories` answers the same for an Ordinal, Band or Point
-/// scale stating no `domain`: the categories it enumerates, null band
-/// included by the `#247`B occupancy rule against the caller's opposite
-/// positional field.
+/// scale stating no `domain`: the categories it enumerates, none of them null.
 ///
 /// `channel` (`"x"`/`"y"`) names the axis in the #152 explicit-domain/range shape
 /// refusal below — the same field `apply_axis_domain_config`'s sibling refusal on
-/// this type already carries — and picks the opposite positional channel for the
-/// discrete arms' null-band occupancy rule (`#247`B).
+/// this type already carries.
 ///
 /// `data_extent` answers a `Log` channel's sided extent (the `LogSide` its
 /// resolved domain maps, or every finite value under `None`) — the `Log`
@@ -2103,7 +2069,7 @@ mod tests {
                 )
             })
         };
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, false, &data_extent, &|| super::distinct_positional_categories(&batch, "cat", None), &Default::default(), None, &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, false, &data_extent, &|| super::distinct_values_in_order(&batch, "cat"), &Default::default(), None, &mut warnings)
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -2604,7 +2570,7 @@ mod tests {
         // This harness has no lineage to ask, so it names the axis exactly
         // as a primitive (non-statistic) layer does: the raw field.
         let axis_name = super::log_axis_name(&enc, None);
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, false, &data_extent, &|| super::distinct_positional_categories(batch, field, None), &Default::default(), axis_name.as_deref(), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, false, &data_extent, &|| super::distinct_values_in_order(batch, field), &Default::default(), axis_name.as_deref(), &mut warnings)
     }
 
     fn resolve_scale(

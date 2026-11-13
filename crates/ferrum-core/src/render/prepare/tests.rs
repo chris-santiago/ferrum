@@ -3347,6 +3347,7 @@ fn refuse_malformed_sort_specs_valid_forms_at_every_location_prepare() {
             coord: None,
             entry: None,
             flip_by_call: false,
+            own_rows: None,
         }]),
         ..Default::default()
     };
@@ -21224,4 +21225,555 @@ fn a_log_y_on_a_non_residplot_chart_is_not_refused() {
         None,
     )
     .expect("an ordinary log-y chart renders");
+}
+
+// ── D10 impute after the null-key drop: the series are keyed by every
+//    grouping binding the mark draws, and the step never sees a row it
+//    synthesised or a row the drop removed ──
+
+fn impute_spec(mark: Mark, detail: Option<&str>, shape: Option<&str>) -> ChartSpec {
+    ChartSpec {
+        mark,
+        encoding: Encoding {
+            x: Some(EncodingSpec { field: "t".into(), ..Default::default() }),
+            y: Some(EncodingSpec { field: "v".into(), impute: Some(serde_json::json!({"value": 0.0})), ..Default::default() }),
+            color: Some(EncodingSpec { field: "h".into(), ..Default::default() }),
+            shape: shape.map(|field| EncodingSpec { field: field.into(), ..Default::default() }),
+            ..Default::default()
+        },
+        mark_style: detail.map(|d| crate::spec::mark_style::MarkKwargsSpec { detail: Some(d.to_string()), ..Default::default() }),
+        ..Default::default()
+    }
+}
+
+fn impute_batch(rows: &[(f64, Option<&str>, Option<&str>)]) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+            Field::new("d", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(rows.iter().map(|r| Some(r.0)).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(rows.iter().map(|_| Some(1.0)).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(rows.iter().map(|r| r.1).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>())),
+        ],
+    )
+    .unwrap()
+}
+
+fn rows_of(batch: &RecordBatch) -> Vec<(f64, Option<String>, Option<String>, Option<f64>)> {
+    let t = batch.column_by_name("t").unwrap().as_any().downcast_ref::<Float64Array>().unwrap();
+    let v = batch.column_by_name("v").unwrap().as_any().downcast_ref::<Float64Array>().unwrap();
+    let h = batch.column_by_name("h").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+    let d = batch.column_by_name("d").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+    (0..batch.num_rows())
+        .map(|i| {
+            (
+                t.value(i),
+                h.is_valid(i).then(|| h.value(i).to_string()),
+                d.is_valid(i).then(|| d.value(i).to_string()),
+                v.is_valid(i).then(|| v.value(i)),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn impute_with_colour_and_detail_completes_every_series_with_both_keys() {
+    let batch = impute_batch(&[
+        (1.0, Some("x"), Some("p")),
+        (1.0, Some("x"), Some("q")),
+        (2.0, Some("x"), Some("p")),
+        (2.0, Some("x"), Some("q")),
+        (1.0, Some("y"), Some("p")),
+        (1.0, Some("y"), Some("q")),
+    ]);
+    let out = apply_impute(&batch, &impute_spec(Mark::Line, Some("d"), None));
+    let appended: Vec<_> = rows_of(&out)[6..].to_vec();
+    assert_eq!(
+        appended,
+        vec![
+            (2.0, Some("y".to_string()), Some("p".to_string()), Some(0.0)),
+            (2.0, Some("y".to_string()), Some("q".to_string()), Some(0.0)),
+        ],
+        "each series the colour and detail form gets its own completed point, carrying both keys"
+    );
+}
+
+#[test]
+fn impute_with_colour_and_shape_keys_a_point_by_both() {
+    let batch = impute_batch(&[
+        (1.0, Some("x"), Some("p")),
+        (2.0, Some("x"), Some("p")),
+        (1.0, Some("y"), Some("q")),
+    ]);
+    let out = apply_impute(&batch, &impute_spec(Mark::Point, None, Some("d")));
+    let appended: Vec<_> = rows_of(&out)[3..].to_vec();
+    assert_eq!(appended, vec![(2.0, Some("y".to_string()), Some("q".to_string()), Some(0.0))]);
+}
+
+#[test]
+fn impute_ignores_a_row_with_a_null_series_key() {
+    let batch = impute_batch(&[
+        (1.0, Some("x"), Some("p")),
+        (1.0, Some("y"), Some("p")),
+        (2.0, Some("x"), Some("p")),
+        (3.0, None, Some("p")),
+        (4.0, Some("y"), None),
+    ]);
+    let out = apply_impute(&batch, &impute_spec(Mark::Line, Some("d"), None));
+    let appended: Vec<_> = rows_of(&out)[5..].to_vec();
+    assert_eq!(
+        appended,
+        vec![(2.0, Some("y".to_string()), Some("p".to_string()), Some(0.0))],
+        "the null-key rows form no series and add no x (3, 4) to complete"
+    );
+}
+
+#[test]
+fn impute_with_colour_alone_appends_in_x_then_group_order() {
+    let batch = impute_batch(&[(1.0, Some("b"), None), (2.0, Some("a"), None), (1.0, Some("a"), None)]);
+    let out = apply_impute(&batch, &impute_spec(Mark::Line, None, None));
+    assert_eq!(
+        rows_of(&out)[3..].to_vec(),
+        vec![(2.0, Some("b".to_string()), None, Some(0.0))],
+        "colour alone is the (x, colour) completion: one row per missing pair, every other column null"
+    );
+}
+
+/// Layer 0 draws the chart's colour with the impute; layer 1 also keys `d`,
+/// which the chart-level mark's series do not carry, so it must not draw the
+/// imputed row (null on `d`).
+fn impute_with_a_sibling_keying_d(batch: &RecordBatch) -> PreparedInputs {
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.layers = Some(vec![
+        crate::spec::layer::Layer { mark: Mark::Line, encoding: spec.encoding.clone(), ..Default::default() },
+        crate::spec::layer::Layer {
+            mark: Mark::Line,
+            encoding: spec.encoding.clone(),
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec { detail: Some("d".to_string()), ..Default::default() }),
+            ..Default::default()
+        },
+    ]);
+    prep(&spec, batch)
+}
+
+#[test]
+fn a_sibling_keying_a_field_the_impute_series_lack_reads_the_pre_impute_rows() {
+    // No null anywhere: the sibling moves because of the impute alone.
+    let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), Some("q")), (1.0, Some("y"), Some("p"))]);
+    let prep = impute_with_a_sibling_keying_d(&batch);
+    assert_eq!(prep.final_batch().num_rows(), 4, "the tail is imputed: (2, y) completes colour y");
+    assert_eq!(prep.layer_routes.len(), 1, "{:?}", prep.layer_routes);
+    assert_eq!(prep.layer_routes[0].0, 1);
+    let own = &prep.transform_outputs[&prep.layer_routes[0].1];
+    assert_eq!(own.num_rows(), 3, "the sibling reads the rows from before the impute");
+    assert!(rows_of(own).iter().all(|(_, _, d, _)| d.is_some()), "no synthetic row, which is null on d");
+    assert!(prep.warnings.is_empty(), "nothing is counted: {:?}", prep.warnings);
+}
+
+#[test]
+fn a_sibling_keying_a_field_the_impute_series_lack_counts_only_the_callers_null_row() {
+    let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), None), (1.0, Some("y"), Some("p"))]);
+    let prep = impute_with_a_sibling_keying_d(&batch);
+    assert_eq!(prep.layer_routes.len(), 1, "{:?}", prep.layer_routes);
+    let own = &prep.transform_outputs[&prep.layer_routes[0].1];
+    assert!(rows_of(own).iter().all(|(_, _, d, _)| d.is_some()), "the sibling draws no row null on its key");
+    let texts: Vec<String> = prep
+        .warnings
+        .iter()
+        .filter_map(|w| match w {
+            RenderWarning::Transform(t) => Some(t.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        ["mark_line: 1 row has a null 'd' and belongs to no group, so it was dropped; fill or filter the nulls in 'd'"],
+        "the warning counts the caller's row and never the synthetic one"
+    );
+}
+
+#[test]
+fn a_chart_with_no_impute_and_no_null_key_touches_no_batch_and_borrows_its_spec() {
+    let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), Some("q")), (1.0, Some("y"), Some("p"))]);
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.encoding.y.as_mut().unwrap().impute = None;
+    spec.layers = Some(vec![
+        crate::spec::layer::Layer { mark: Mark::Line, encoding: spec.encoding.clone(), ..Default::default() },
+        crate::spec::layer::Layer {
+            mark: Mark::Line,
+            encoding: spec.encoding.clone(),
+            mark_style: Some(crate::spec::mark_style::MarkKwargsSpec { detail: Some("d".to_string()), ..Default::default() }),
+            ..Default::default()
+        },
+    ]);
+    let prep = prep(&spec, &batch);
+    assert!(prep.layer_routes.is_empty());
+    assert!(matches!(prep.routed_spec(&spec), std::borrow::Cow::Borrowed(_)));
+    assert_eq!(prep.final_batch().num_rows(), 3);
+}
+
+#[test]
+fn a_faceted_impute_completes_each_partition_and_writes_its_facet_value() {
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.facet = Some(crate::layout::FacetSpec {
+        field: "d".into(),
+        row: None,
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        repeat: Vec::new(),
+        mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: crate::layout::facet::FacetResolve::default(),
+    });
+    let batch = impute_batch(&[
+        (1.0, Some("x"), Some("P")),
+        (2.0, Some("x"), Some("P")),
+        (1.0, Some("y"), Some("P")),
+        (1.0, Some("x"), Some("Q")),
+        (1.0, Some("y"), Some("Q")),
+        (2.0, Some("y"), Some("Q")),
+    ]);
+    let out = prep(&spec, &batch);
+    let rows = rows_of(out.final_batch());
+    assert_eq!(rows.len(), 8, "one completed point per panel: {rows:?}");
+    let in_panel = |panel: &str| rows.iter().filter(|r| r.2.as_deref() == Some(panel)).count();
+    assert_eq!((in_panel("P"), in_panel("Q")), (4, 4), "each imputed row carries its panel's facet value");
+    assert!(rows.iter().all(|r| r.2.is_some()), "no row is left in no panel");
+}
+
+// ── a faceted impute gives each imputed row its panel's facet value in the
+//    facet column's own dtype ──
+
+/// The facet column `dtype_name` names, holding panel `0` or `1` per row.
+fn facet_column_of(dtype_name: &str, panels: &[usize]) -> arrow::array::ArrayRef {
+    use arrow::array::{
+        BooleanArray, DictionaryArray, Date32Array, Float64Array, Int32Array, Int64Array, LargeStringArray, StringViewArray,
+    };
+    let pick = |names: [&'static str; 2]| -> Vec<&'static str> { panels.iter().map(|p| names[*p]).collect() };
+    match dtype_name {
+        "utf8" => Arc::new(StringArray::from(pick(["P", "Q"]))),
+        "large_utf8" => Arc::new(LargeStringArray::from(pick(["P", "Q"]))),
+        "utf8_view" => Arc::new(StringViewArray::from(pick(["P", "Q"]))),
+        "dictionary" => Arc::new(pick(["P", "Q"]).into_iter().collect::<DictionaryArray<arrow::datatypes::Int8Type>>()),
+        "int64" => Arc::new(Int64Array::from(panels.iter().map(|p| 2000 + *p as i64).collect::<Vec<_>>())),
+        "int32" => Arc::new(Int32Array::from(panels.iter().map(|p| 2000 + *p as i32).collect::<Vec<_>>())),
+        "float64" => Arc::new(Float64Array::from(panels.iter().map(|p| 0.5 + *p as f64).collect::<Vec<_>>())),
+        "boolean" => Arc::new(BooleanArray::from(panels.iter().map(|p| *p == 1).collect::<Vec<_>>())),
+        "date32" => Arc::new(Date32Array::from(panels.iter().map(|p| 19000 + *p as i32).collect::<Vec<_>>())),
+        other => panic!("no facet column for {other}"),
+    }
+}
+
+/// Rows of panel `0` (`P`) and `1` (`Q`): `P` lacks `(t=2, h=y)` and `Q`
+/// lacks `(t=2, h=x)`.
+fn facet_impute_batch(col_dtype: &str, row_dtype: Option<&str>) -> RecordBatch {
+    let panels = [0, 0, 0, 1, 1, 1];
+    let mut fields = vec![
+        Field::new("t", DataType::Float64, true),
+        Field::new("v", DataType::Float64, true),
+        Field::new("h", DataType::Utf8, true),
+    ];
+    let col = facet_column_of(col_dtype, &panels);
+    fields.push(Field::new("f", col.data_type().clone(), false));
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 1.0, 2.0, 1.0])),
+        Arc::new(Float64Array::from(vec![1.0; 6])),
+        Arc::new(StringArray::from(vec!["x", "x", "y", "x", "y", "y"])),
+        col,
+    ];
+    if let Some(row_dtype) = row_dtype {
+        let row = facet_column_of(row_dtype, &panels);
+        fields.push(Field::new("g", row.data_type().clone(), false));
+        columns.push(row);
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+}
+
+fn facet_impute_spec(row: bool, impute: bool) -> ChartSpec {
+    let mut spec = impute_spec(Mark::Point, None, None);
+    if !impute {
+        spec.encoding.y.as_mut().unwrap().impute = None;
+    }
+    spec.facet = Some(crate::layout::FacetSpec {
+        field: "f".into(),
+        row: row.then(|| "g".to_string()),
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        repeat: Vec::new(),
+        mode: if row { crate::layout::FacetMode::Grid { nrows: 2, ncols: 2 } } else { crate::layout::FacetMode::Wrap { ncols: 2 } },
+        spacing: None,
+        resolve: crate::layout::facet::FacetResolve::default(),
+    });
+    spec
+}
+
+const FACET_DTYPES: [&str; 9] = ["utf8", "large_utf8", "utf8_view", "dictionary", "int64", "int32", "float64", "boolean", "date32"];
+
+fn try_prep(spec: &ChartSpec, batch: &RecordBatch) -> Result<PreparedInputs, RenderError> {
+    prepare_render_inputs(
+        spec,
+        batch,
+        &crate::layout::ThemeInputs::default(),
+        crate::layout::Viewport { width: 600.0, height: 400.0 },
+        &crate::render::chart_config::ChartConfig::default(),
+        None,
+    )
+}
+
+#[test]
+fn a_faceted_impute_renders_for_every_facet_dtype_the_partition_reads() {
+    for dtype in FACET_DTYPES {
+        let batch = facet_impute_batch(dtype, None);
+        let baseline = try_prep(&facet_impute_spec(false, false), &batch);
+        let imputed = try_prep(&facet_impute_spec(false, true), &batch);
+        match baseline {
+            Err(_) => assert!(imputed.is_err(), "{dtype}: the facet column is refused with or without impute"),
+            Ok(_) => {
+                let prep = imputed.unwrap_or_else(|e| panic!("{dtype}: a faceted impute must render: {e}"));
+                assert_eq!(prep.final_batch().num_rows(), 8, "{dtype}: one completed point per panel");
+                let column = prep.final_batch().column_by_name("f").unwrap();
+                assert_eq!(
+                    column.data_type(),
+                    baseline.as_ref().unwrap().final_batch().column_by_name("f").unwrap().data_type(),
+                    "{dtype}: the facet column keeps the dtype the pipeline gives it"
+                );
+                assert_eq!(column.null_count(), 0, "{dtype}: every imputed row sits in a panel");
+                assert_eq!(prep.facet_groups.len(), 2, "{dtype}: both panels draw");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_faceted_impute_renders_for_two_facet_fields_of_any_dtype_pair() {
+    for (col, row) in [("int64", "boolean"), ("utf8", "int32"), ("float64", "large_utf8"), ("boolean", "utf8")] {
+        let batch = facet_impute_batch(col, Some(row));
+        let prep = try_prep(&facet_impute_spec(true, true), &batch).unwrap_or_else(|e| panic!("{col}/{row}: {e}"));
+        assert_eq!(prep.final_batch().num_rows(), 8, "{col}/{row}");
+        for field in ["f", "g"] {
+            assert_eq!(prep.final_batch().column_by_name(field).unwrap().null_count(), 0, "{col}/{row} {field}");
+        }
+    }
+}
+
+/// The facet repeat writes a repeated row's panel value into the facet
+/// column; a non-string facet column must keep its dtype there too.
+#[test]
+fn a_facet_repeat_over_a_non_string_facet_column_keeps_the_column_dtype() {
+    let batch = facet_impute_batch("int64", None);
+    let repeat = vec![false, false, false, false, false, true];
+    let parts = partition_batch_by_field(&batch, "f", &repeat);
+    let parts = parts.unwrap_or_else(|e| panic!("a repeat row over an integer facet must partition: {e}"));
+    assert_eq!(parts.len(), 2);
+    for (_, part) in parts {
+        assert_eq!(part.column_by_name("f").unwrap().data_type(), &DataType::Int64);
+    }
+}
+
+/// A frame whose facet columns (`g` the column field, `c` the row field) hold
+/// `col_pair` / `row_pair` values cast to `dtype`: rows 0 and 1 are the host's
+/// (`g=col_pair[0]`, `c=row_pair[0]` and `row_pair[1]`); row 2 is a layer
+/// lacking the row field (`g=col_pair[1]`, `c` null) and row 3 a layer lacking
+/// the column field (`g` null, `c=row_pair[0]`... drawn in its own row cell).
+fn grid_repeat_batch(dtype: &DataType, col_pair: [&str; 2], row_pair: [&str; 2]) -> RecordBatch {
+    use arrow::array::{ArrayRef, Float64Array};
+    let cast = |values: Vec<Option<&str>>| -> ArrayRef {
+        arrow::compute::cast(&StringArray::from(values), dtype).unwrap_or_else(|e| panic!("{dtype}: {e}"))
+    };
+    let g = cast(vec![Some(col_pair[0]), Some(col_pair[0]), Some(col_pair[1]), None]);
+    let c = cast(vec![Some(row_pair[0]), Some(row_pair[1]), None, Some(row_pair[0])]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("g", g.data_type().clone(), true),
+        Field::new("c", c.data_type().clone(), true),
+        Field::new("v", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(schema, vec![g, c, Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]))]).unwrap()
+}
+
+fn facet_strings(panel: &RecordBatch, field: &str) -> Vec<Option<String>> {
+    crate::render::facet_key_column(panel, field).unwrap().iter().map(|v| v.map(str::to_string)).collect()
+}
+
+fn grid_repeat_dtypes() -> Vec<(DataType, [&'static str; 2], [&'static str; 2])> {
+    vec![
+        (DataType::Utf8, ["a", "b"], ["p", "q"]),
+        (DataType::Int64, ["1", "2"], ["3", "4"]),
+        (DataType::Float64, ["1.5", "2.5"], ["3.5", "4.5"]),
+        (DataType::Boolean, ["true", "false"], ["false", "true"]),
+        (DataType::Int32, ["7", "8"], ["9", "10"]),
+        (DataType::LargeUtf8, ["a", "b"], ["p", "q"]),
+    ]
+}
+
+/// A layer lacking the row field repeats in every row of a column panel that
+/// only that layer reaches (`g=col_pair[1]` has no host row): the cell exists,
+/// and each repeated row carries the cell's own row value in the row field's
+/// dtype. A cell no host row reaches used to keep a null row value, so the
+/// grid declared it empty.
+#[test]
+fn a_layer_lacking_the_row_field_fills_a_panel_no_host_row_reaches() {
+    for (dtype, col_pair, row_pair) in grid_repeat_dtypes() {
+        let batch = grid_repeat_batch(&dtype, col_pair, row_pair);
+        let row_repeat = [false, false, true, false];
+        let col_repeat = [false; 4];
+        let cells = partition_batch_by_two_fields(&batch, ("g", &col_repeat), ("c", &row_repeat)).unwrap();
+        let keys: Vec<(String, String)> = cells.iter().map(|(k, _)| k.clone()).collect();
+        let expected: Vec<(String, String)> =
+            row_pair.iter().flat_map(|r| col_pair.iter().map(move |g| (g.to_string(), r.to_string()))).collect();
+        let mut got = keys.clone();
+        got.sort();
+        let mut want = expected;
+        want.sort();
+        assert_eq!(got, want, "{dtype}: all four cells are partitioned");
+        for ((g, c), cell) in &cells {
+            assert_eq!(cell.column_by_name("g").unwrap().data_type(), batch.column_by_name("g").unwrap().data_type(), "{dtype}");
+            assert_eq!(cell.column_by_name("c").unwrap().data_type(), batch.column_by_name("c").unwrap().data_type(), "{dtype}");
+            assert!(facet_strings(cell, "g").iter().all(|v| v.as_deref() == Some(g.as_str())), "{dtype} ({g},{c})");
+            assert!(facet_strings(cell, "c").iter().all(|v| v.as_deref() == Some(c.as_str())), "{dtype} ({g},{c}) row value");
+        }
+        let reached_by_the_repeat_alone = cells.iter().find(|((g, c), _)| g == col_pair[1] && c == row_pair[0]).unwrap();
+        assert_eq!(reached_by_the_repeat_alone.1.num_rows(), 1, "{dtype}: the repeated row is in the cell");
+    }
+}
+
+/// A layer lacking the column field repeats along every column of its own
+/// row cells, a panel with no host row included.
+#[test]
+fn a_layer_lacking_the_column_field_fills_every_column_of_its_row() {
+    for (dtype, col_pair, row_pair) in grid_repeat_dtypes() {
+        let batch = grid_repeat_batch(&dtype, col_pair, row_pair);
+        let col_repeat = [false, false, false, true];
+        let row_repeat = [false; 4];
+        // Row 2 has `g` set and `c` null: it joins no row cell; the repeating
+        // row 3 joins both columns of its own row cell.
+        let cells = partition_batch_by_two_fields(&batch, ("g", &col_repeat), ("c", &row_repeat)).unwrap();
+        let hit = |g: &str, c: &str| cells.iter().find(|((cg, cc), _)| cg == g && cc == c).map(|(_, b)| b);
+        let repeated = hit(col_pair[0], row_pair[0]).unwrap_or_else(|| panic!("{dtype}: host cell"));
+        assert_eq!(facet_strings(repeated, "g"), vec![Some(col_pair[0].to_string()); 2], "{dtype}");
+        for ((g, _), cell) in &cells {
+            assert!(facet_strings(cell, "g").iter().all(|v| v.as_deref() == Some(g.as_str())), "{dtype}: g carries the cell's value");
+        }
+    }
+}
+
+/// A layer lacking both facet fields repeats in every cell, each field
+/// written with the cell's own value.
+#[test]
+fn a_layer_lacking_both_facet_fields_repeats_in_every_cell() {
+    for (dtype, col_pair, row_pair) in grid_repeat_dtypes() {
+        let batch = grid_repeat_batch(&dtype, col_pair, row_pair);
+        let both = [false, false, false, true];
+        let cells = partition_batch_by_two_fields(&batch, ("g", &both), ("c", &both)).unwrap();
+        for ((g, c), cell) in &cells {
+            assert!(facet_strings(cell, "g").iter().all(|v| v.as_deref() == Some(g.as_str())), "{dtype} ({g},{c})");
+            assert!(facet_strings(cell, "c").iter().all(|v| v.as_deref() == Some(c.as_str())), "{dtype} ({g},{c})");
+            assert!(cell.num_rows() >= 1);
+        }
+        assert!(cells.len() >= 2, "{dtype}");
+    }
+}
+
+/// One facet field: a layer lacking it repeats in every panel in the
+/// field's own dtype.
+#[test]
+fn a_layer_lacking_the_single_facet_field_repeats_in_every_panel() {
+    for (dtype, _, row_pair) in grid_repeat_dtypes() {
+        let batch = grid_repeat_batch(&dtype, [row_pair[0], row_pair[1]], row_pair);
+        let repeat = [false, false, true, false];
+        let panels = partition_batch_by_field(&batch, "c", &repeat).unwrap();
+        assert_eq!(panels.len(), 2, "{dtype}");
+        for (value, panel) in &panels {
+            assert_eq!(panel.column_by_name("c").unwrap().data_type(), batch.column_by_name("c").unwrap().data_type(), "{dtype}");
+            assert!(facet_strings(panel, "c").iter().all(|v| v.as_deref() == Some(value.as_str())), "{dtype} {value}");
+        }
+    }
+}
+
+/// A grid frame whose repeats reach two column values and two row values:
+/// rows 0 and 1 are the host's (`g=col_pair[0]`/`c=row_pair[0]`, then
+/// `g=col_pair[1]`/`c=row_pair[1]`); row 2 lacks the row field (`g=col_pair[1]`,
+/// `c` null) and row 3 lacks the column field (`g` null, `c=row_pair[1]`). Both
+/// second values first appear on a later row than row 0, so a cell that took
+/// its written value from row 0 of the batch, or from another panel's row,
+/// carries the wrong key.
+fn grid_two_valued_repeat_batch(dtype: &DataType, col_pair: [&str; 2], row_pair: [&str; 2]) -> RecordBatch {
+    use arrow::array::{ArrayRef, Float64Array};
+    let cast = |values: Vec<Option<&str>>| -> ArrayRef {
+        arrow::compute::cast(&StringArray::from(values), dtype).unwrap_or_else(|e| panic!("{dtype}: {e}"))
+    };
+    let g = cast(vec![Some(col_pair[0]), Some(col_pair[1]), Some(col_pair[1]), None]);
+    let c = cast(vec![Some(row_pair[0]), Some(row_pair[1]), None, Some(row_pair[1])]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("g", g.data_type().clone(), true),
+        Field::new("c", c.data_type().clone(), true),
+        Field::new("v", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(schema, vec![g, c, Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]))]).unwrap()
+}
+
+/// Every cell of a grid whose repeats reach two column and two row values
+/// carries its own column value and its own row value on every row, written
+/// in the column's dtype, and holds exactly the rows that belong to it.
+#[test]
+fn every_grid_cell_a_repeat_reaches_carries_its_own_column_and_row_value() {
+    for (dtype, col_pair, row_pair) in grid_repeat_dtypes() {
+        let batch = grid_two_valued_repeat_batch(&dtype, col_pair, row_pair);
+        let row_repeat = [false, false, true, false];
+        let col_repeat = [false, false, false, true];
+        let cells = partition_batch_by_two_fields(&batch, ("g", &col_repeat), ("c", &row_repeat)).unwrap();
+        assert_eq!(cells.len(), 4, "{dtype}: both column values cross both row values");
+        for ((g, c), cell) in &cells {
+            assert_eq!(cell.column_by_name("g").unwrap().data_type(), batch.column_by_name("g").unwrap().data_type(), "{dtype}");
+            assert!(facet_strings(cell, "g").iter().all(|v| v.as_deref() == Some(g.as_str())), "{dtype} ({g},{c}) column value");
+            assert!(facet_strings(cell, "c").iter().all(|v| v.as_deref() == Some(c.as_str())), "{dtype} ({g},{c}) row value");
+        }
+        let rows_in = |g: &str, c: &str| -> usize {
+            cells.iter().find(|((cg, cc), _)| cg == g && cc == c).map(|(_, b)| b.num_rows()).unwrap_or(0)
+        };
+        assert_eq!(rows_in(col_pair[0], row_pair[0]), 1, "{dtype}: the host row only");
+        assert_eq!(rows_in(col_pair[1], row_pair[0]), 1, "{dtype}: the layer lacking the row field");
+        assert_eq!(rows_in(col_pair[0], row_pair[1]), 1, "{dtype}: the layer lacking the column field");
+        assert_eq!(rows_in(col_pair[1], row_pair[1]), 3, "{dtype}: the host row and both repeats");
+    }
+}
+
+/// One facet field whose second value first appears after row 0: each panel's
+/// repeated row takes that panel's value.
+#[test]
+fn every_single_field_panel_a_repeat_reaches_carries_its_own_value() {
+    for (dtype, _, row_pair) in grid_repeat_dtypes() {
+        let batch = grid_two_valued_repeat_batch(&dtype, row_pair, row_pair);
+        let repeat = [false, false, true, false];
+        let panels = partition_batch_by_field(&batch, "c", &repeat).unwrap();
+        assert_eq!(panels.len(), 2, "{dtype}");
+        for (value, panel) in &panels {
+            assert!(facet_strings(panel, "c").iter().all(|v| v.as_deref() == Some(value.as_str())), "{dtype} {value}");
+        }
+    }
+}
+
+/// A faceted impute over two facet fields gives each imputed row its own
+/// panel's column value and row value: every (column, row) pair in the result
+/// is a pair the frame holds, so a row never lands in another panel's cell.
+#[test]
+fn a_faceted_impute_over_two_fields_writes_each_imputed_row_its_own_cell() {
+    for (col, row) in [("int64", "boolean"), ("utf8", "int32"), ("float64", "large_utf8"), ("boolean", "utf8")] {
+        let batch = facet_impute_batch(col, Some(row));
+        let pairs = |b: &RecordBatch| -> std::collections::BTreeSet<(Option<String>, Option<String>)> {
+            facet_strings(b, "f").into_iter().zip(facet_strings(b, "g")).collect()
+        };
+        let prep = try_prep(&facet_impute_spec(true, true), &batch).unwrap_or_else(|e| panic!("{col}/{row}: {e}"));
+        let out = prep.final_batch();
+        assert_eq!(out.num_rows(), 8, "{col}/{row}: one completed point per panel");
+        assert_eq!(pairs(out), pairs(&batch), "{col}/{row}: every row sits in a cell the frame holds");
+    }
 }

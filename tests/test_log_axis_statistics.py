@@ -2151,20 +2151,20 @@ def test_a_boolean_hue_groups_the_ecdf_count():
     assert heights == [[0, 1, 2, 3], [0, 1, 2, 3]], heights
 
 
-def test_a_null_hue_draws_its_own_rows_as_one_group_with_no_legend_entry():
-    """A null hue value is its own group (`DataWindow` pools null keys by
-    design), drawn in the null color with no legend entry -- the same
-    outcome any `mark_line` over null-color rows gives, not a dropped row."""
+def test_a_null_hue_is_dropped_and_counted_and_the_ecdf_draws_only_the_other_group():
+    """A null hue belongs to no group: its three rows are dropped and counted by the figure, and
+    the ECDF draws the one group the other rows form, with its legend entry."""
     df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "g": ["a", None, "a", None, "a", None]})
-    svg = fm.displot(df, x="v", kind="ecdf", hue="g").to_svg()
+    svg, messages = _render_capturing(fm.displot(df, x="v", kind="ecdf", hue="g").to_svg)
+    assert messages == [_null_key_dropped_message("displot", 3, "g")]
     assert legend_labels(svg) == ["a"]
     y_ladder = value_axis_ladder(svg, axis="y")
     heights = sorted(
         sorted(round(value_for_pixel(y_ladder, py)) for _px, py in corners)
         for _stroke, corners in step_after_paths(svg)
     )
-    # Each line also rises from 0 at its first observation.
-    assert heights == [[0, 1, 2, 3], [0, 1, 2, 3]], heights
+    # The one line also rises from 0 at its first observation.
+    assert heights == [[0, 1, 2, 3]], heights
 
 
 # ---------------------------------------------------------------------------
@@ -5188,7 +5188,8 @@ def test_a_fit_group_one_panel_cannot_estimate_keeps_its_report_beside_an_emptie
 
 
 #: The statistics that drop a row whose grouping column is null, by door, in the order they warn.
-#: The ECDF's window pools a null key as a group of its own instead of dropping it.
+#: The ECDF's window pools a null key, so the figure's raw-row layer drops it instead (see
+#: ``_NULL_KEY_DROPPED_BY_LAYER``).
 _NULL_KEY_DROPPED_BY = {
     "displot hist": ["Bin"],
     "displot hist kde=True": ["Kde", "Bin"],
@@ -5207,28 +5208,44 @@ _NULL_KEY_DROPPED_BY = {
 }
 
 
+#: The raw-row layer a figure draws beside its statistic (or alone, for the ECDF) drops the same
+#: null-keyed rows under its own entry, after the statistics' reports.
+_NULL_KEY_DROPPED_BY_LAYER = {
+    "displot ecdf": ["displot"],
+    "lmplot robust": ["lmplot"],
+    "lmplot logistic": ["lmplot"],
+    "lmplot glm": ["lmplot"],
+}
+
+#: Doors whose only off-side rows are the null-keyed ones a raw-row layer has already dropped, so
+#: no row reaches the axis for the log warning to count.
+_NULL_KEYED_ROWS_LEAVE_NOTHING_OFF_SIDE = {"displot ecdf"}
+
+
 @pytest.mark.parametrize("name", list(_STATISTIC_DOORS))
-def test_rows_off_the_log_side_with_a_null_key_are_reported_by_the_log_warning_beside_the_key(
+def test_rows_off_the_log_side_with_a_null_key_are_dropped_by_each_layer_that_draws_them(
     name: str,
 ):
     """Three rows whose grouping column is null and whose ``v`` is off the axis's side. A statistic
-    that drops a null-keyed row says so (a separate event, which stays) and the log warning counts
-    the three rows; the ECDF keeps the null key as a group of its own, which the axis empties, so
-    the log warning is its only message: not a census sentence for ``g=null``."""
+    that drops a null-keyed row says so, and so does each raw-row layer that draws the key (the
+    figure's scatter, the ECDF's line), once, before any scale reads it. The log warning counts
+    what still reaches the axis: the statistic's own copy of the rows, and nothing for the ECDF,
+    whose only off-side rows were the dropped ones."""
     frame = _level_frame(_OFF_SIDE_LEVEL).with_columns(
         g=pl.when(pl.col("g") == "c").then(None).otherwise(pl.col("g"))
     )
     _, messages = _render_capturing(_STATISTIC_DOORS[name].build(frame).to_svg)
-    dropped = [_null_key_dropped_message(step, 3, "g") for step in _NULL_KEY_DROPPED_BY[name]]
-    assert messages == dropped + [_log_message("x", "v", 3)]
+    speakers = _NULL_KEY_DROPPED_BY[name] + _NULL_KEY_DROPPED_BY_LAYER.get(name, [])
+    log = [] if name in _NULL_KEYED_ROWS_LEAVE_NOTHING_OFF_SIDE else [_log_message("x", "v", 3)]
+    assert messages == [_null_key_dropped_message(step, 3, "g") for step in speakers] + log
 
 
-def test_an_ecdf_panel_whose_only_level_has_a_null_key_off_the_side_is_reported_once():
-    """Faceted: panel ``q`` holds only a null-keyed level, every value off the axis's side. The
-    panel is drawn empty and the log warning is the only message."""
+def test_an_ecdf_panel_whose_only_level_has_a_null_key_is_counted_once_and_drawn_empty():
+    """Faceted: panel ``q`` holds only a null-keyed level. Its rows are dropped and counted over the
+    frame once, the panel is drawn empty, and the log axis has nothing left to report."""
     frame = _panel_level_frame({"p": _HUE_PANELS, "q": {None: _OFF_SIDE_LEVEL}})
     svg, messages = _render_capturing(_faceted("ecdf", frame, hue=True).to_svg)
-    assert messages == [_log_message("x", "v", 3)]
+    assert messages == [_null_key_dropped_message("displot", 3, "g")]
     assert _drawn_panels(svg) == (["p", "q"], 2)
 
 

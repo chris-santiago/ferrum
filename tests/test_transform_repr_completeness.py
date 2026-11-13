@@ -418,6 +418,7 @@ ROWS: list[Row] = [
             z_score="rows",
             standard_scale="columns",
             name="li_nm",
+            labels="li_lb",
         ),
         dict(
             method="method=Average",
@@ -426,6 +427,7 @@ ROWS: list[Row] = [
             z_score="z_score=Some(Rows)",
             standard_scale="standard_scale=Some(Columns)",
             name='name=Some("li_nm")',
+            labels='labels=Some("li_lb")',
         ),
     ),
     Row(

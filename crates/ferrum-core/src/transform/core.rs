@@ -329,8 +329,6 @@ impl TransformSpec {
                     // step to wait for, so it runs as written.
                     Self::Composed(s) => s.step.apply_with_context(batch, ctx),
                     Self::Bin2D(_)
-                    | Self::Swarm(_)
-                    | Self::Linkage(_)
                     | Self::Unpivot(_)
                     | Self::ReferenceLine(_)
                     | Self::Identity(_)
@@ -374,7 +372,17 @@ impl TransformSpec {
             DataWindow => data_window,
             JoinAggregate => join_aggregate,
             Project => project,
+            Swarm => swarm,
+            Linkage => linkage,
         }
+    }
+
+    /// Whether this transform's partition pools a whole-batch fallback when
+    /// every grouping key is null (`NullKeyPolicy::SkipWithWholeBatchFallback`:
+    /// the fits, [`crate::transform::group_key::FIT_NULL_KEYS`]), so its
+    /// output may carry a null key by design.
+    pub(crate) fn pools_null_keys(&self) -> bool {
+        matches!(self, Self::Smooth(_) | Self::Robust(_) | Self::Logistic(_) | Self::Glm(_))
     }
 
     /// Additional named outputs produced by this transform's `apply` invocation,
@@ -404,6 +412,7 @@ impl TransformSpec {
                     $( Self::$V(s) => crate::transform::$m::secondary_outputs(s, primary), )*
                     Self::LetterValue(s) =>
                         crate::transform::letter_value::secondary_outputs(s, input, primary, ctx),
+                    Self::Linkage(s) => crate::transform::linkage::secondary_outputs(s, input, primary),
                     _ => {
                         let _ = input;
                         Ok(Vec::new())
@@ -413,7 +422,6 @@ impl TransformSpec {
         }
         arm! {
             Qq      => qq,
-            Linkage => linkage,
         }
     }
 }
@@ -909,7 +917,7 @@ mod tests {
         use crate::transform::linkage::{LinkageSpec, LinkageMethod, DistanceMetric, LinkageAxis};
         let original = TransformSpec::Linkage(LinkageSpec {
             method: LinkageMethod::Ward, metric: DistanceMetric::Euclidean,
-            axis: LinkageAxis::Rows, z_score: None, standard_scale: None, name: None,
+            axis: LinkageAxis::Rows, z_score: None, standard_scale: None, labels: None, name: None,
         });
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains(r#""type":"linkage""#));

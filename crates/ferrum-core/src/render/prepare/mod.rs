@@ -30,6 +30,7 @@ use super::{RenderError, RenderWarning};
 mod extent;
 mod facet_panels;
 mod legend;
+pub(in crate::render) mod null_keys;
 
 // Re-exported into this module's namespace so the orchestrator and the inline
 // `#[cfg(test)] mod tests` (which uses `super::*`) resolve the extracted helpers
@@ -147,6 +148,22 @@ pub struct LayerPrepared {
     /// once the layer's rows are resolved. Empty for every layer whose rows
     /// no statistic grouped by such a field.
     pub(in crate::render) grouping_series: SeriesGrouping,
+    /// The key in the transform outputs that holds this layer's own rows,
+    /// set by the null-key drop ([`null_keys`]) when the layer draws rows its
+    /// key-siblings do not (their key fields differ, so they drop different
+    /// rows). `data_source` is left as the caller wrote it, so every question
+    /// that classifies the layer by its source answers as before; only code
+    /// that fetches the layer's batch reads this, through [`Self::rows_key`].
+    pub(in crate::render) own_rows: Option<String>,
+}
+
+impl LayerPrepared {
+    /// The key in the transform outputs whose batch this layer draws: its own
+    /// rows ([`Self::own_rows`]), else the output its `data_source` names,
+    /// else the pipeline tail ([`FINAL_OUTPUT_KEY`]).
+    pub(in crate::render) fn rows_key(&self) -> &str {
+        self.own_rows.as_deref().or(self.data_source.as_deref()).unwrap_or(FINAL_OUTPUT_KEY)
+    }
 }
 
 /// The position adjustment `layer` of `spec` draws with, resolved once at
@@ -272,6 +289,7 @@ impl LayerPrepared {
             dropped_reads: Vec::new(),
             raster_value_field: None,
             grouping_series: SeriesGrouping::default(),
+            own_rows: None,
         }
     }
 
@@ -325,6 +343,7 @@ impl LayerPrepared {
             dropped_reads: Vec::new(),
             raster_value_field: None,
             grouping_series: SeriesGrouping::default(),
+            own_rows: layer.own_rows.clone(),
         }
     }
 
@@ -744,11 +763,17 @@ pub struct PreparedInputs {
     pub provisional_scales: ResolvedScales,
     pub axes: AxesInput,
     pub facet_groups: Vec<FacetGroup>,
-    /// The facet partitions a step left with nothing to draw, by a
-    /// `groupby` null-key drop or by a log axis with no value on its side
-    /// ([`FacetPartitions::emptied_by_drop`]): their panels draw empty, frame
-    /// and axes over no marks, where a cell no layer has rows for is skipped.
+    /// The facet partitions a step or the mark-level null-key drop
+    /// ([`null_keys`]) left with nothing to draw, or a log axis with no value
+    /// on its side ([`FacetPartitions::emptied_by_drop`]): their panels draw
+    /// empty, frame and axes over no marks, where a cell no layer has rows
+    /// for is skipped.
     pub(in crate::render) facet_emptied_by_drop: HashSet<FacetPartitionKey>,
+    /// The layers the null-key drop gave rows of their own, as `(layer index,
+    /// key of those rows in `transform_outputs`)`: where two layers read one
+    /// key but drop different rows, the later one reads its own. Empty for
+    /// every chart whose layers all read the key they started on.
+    pub(in crate::render) layer_routes: Vec<(usize, String)>,
     pub legend_entries: Vec<LegendEntry>,
     /// Legend title (Themes-T2.5b). Defaults to the color encoding's field
     /// name; None when no categorical color encoding drives a legend.
@@ -913,6 +938,14 @@ impl PreparedInputs {
         self.facet_emptied_by_drop.contains(&(col.value.clone(), row.map(|row| row.value.clone())))
     }
 
+    /// `spec` with [`Self::layer_routes`] written on its layers (`own_rows`),
+    /// so every reader that resolves a layer's batch through the spec finds
+    /// the rows the layer draws; `spec` itself, borrowed, when no layer moved.
+    /// Called wherever a spec reaches scale resolution after prepare.
+    pub(in crate::render) fn routed_spec<'s>(&self, spec: &'s ChartSpec) -> Cow<'s, ChartSpec> {
+        routed_spec(spec, &self.layer_routes)
+    }
+
     /// The chart's rendering encoding: the `rendering_encoding` field this
     /// struct already carries (see that field's doc for what it holds).
     pub(crate) fn rendering_encoding(&self) -> &crate::spec::encoding::Encoding {
@@ -927,6 +960,23 @@ impl PreparedInputs {
             .get(FINAL_OUTPUT_KEY)
             .expect("apply_transforms_named publishes FINAL_OUTPUT_KEY unconditionally")
     }
+}
+
+/// `spec` with each route's `own_rows` written on its layer
+/// ([`PreparedInputs::routed_spec`]); borrowed when there is no route.
+fn routed_spec<'s>(spec: &'s ChartSpec, routes: &[(usize, String)]) -> Cow<'s, ChartSpec> {
+    if routes.is_empty() {
+        return Cow::Borrowed(spec);
+    }
+    let mut routed = spec.clone();
+    if let Some(layers) = routed.layers.as_mut() {
+        for (index, key) in routes {
+            if let Some(layer) = layers.get_mut(*index) {
+                layer.own_rows = Some(key.clone());
+            }
+        }
+    }
+    Cow::Owned(routed)
 }
 
 /// Which positional channel an axis-input derivation is for.
@@ -1442,8 +1492,8 @@ pub fn prepare_render_inputs(
 
     // Run the Phase 5 transform pipeline, applying the facet-aware partition →
     // per-panel transforms → inject → concat path when a facet is present and
-    // the plain single-partition path otherwise. The D10 impute step runs once
-    // inside, in both branches (SPINE-12). `viewport`/`theme` seed the M2
+    // the plain single-partition path otherwise. The D10 impute step runs
+    // after the null-key drop below (SPINE-12). `viewport`/`theme` seed the M2
     // pre-layout panel-size estimate (see `run_transforms_with_facet`'s doc).
     //
     // #162: `run_transforms_with_facet` also drains every `TransformWarning`
@@ -1451,7 +1501,7 @@ pub fn prepare_render_inputs(
     // `k` clamp, `LetterValue`'s depth cap, `Impute`'s fallbacks). Hoisted
     // here, above `scale_warnings`' construction below, so both land in the
     // one `PreparedInputs.warnings` vec this function returns.
-    let (transform_outputs, transform_warnings, transform_lineages, facet_partitions) =
+    let (mut transform_outputs, transform_warnings, mut transform_lineages, mut facet_partitions) =
         run_pipeline(spec, &normalized, viewport, theme, leaf_scales)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
@@ -1581,6 +1631,41 @@ pub fn prepare_render_inputs(
         }
     }
 
+    // The mark-level null-key drop, then the D10 impute step over the rows
+    // it kept, so no synthesised row is ever counted as a caller's. After
+    // this, every reader below finds each layer's kept rows under the key the
+    // layer reads (`LayerPrepared::rows_key`), and `spec` carries the routes
+    // that tell scale resolution where a moved layer's rows live.
+    let mut null_key_drop =
+        null_keys::drop_null_key_rows(spec, &mut layers, &mut transform_outputs, &mut transform_lineages, &mut facet_partitions)?;
+    // A layer that keys a grouping field the impute's series do not carry
+    // draws none of the rows the impute synthesises (they are null on it), so
+    // it reads the rows from before the impute.
+    if let Some(pre_impute) = apply_impute_after_drop(&mut transform_outputs, spec, &facet_partitions.order)? {
+        let series = impute_series_fields(spec);
+        null_key_drop.routes.extend(null_keys::keep_pre_impute_rows(
+            spec,
+            &mut layers,
+            &mut transform_outputs,
+            &mut transform_lineages,
+            &pre_impute,
+            &series,
+        ));
+    }
+    let transformed = transform_outputs
+        .get(FINAL_OUTPUT_KEY)
+        .cloned()
+        .ok_or_else(|| unpublished_data_source(0, FINAL_OUTPUT_KEY, &transform_outputs))?;
+    let routed = routed_spec(spec, &null_key_drop.routes);
+    let spec = &*routed;
+    let mut layer_batches: Vec<&RecordBatch> = Vec::with_capacity(layers.len());
+    for (i, layer) in layers.iter().enumerate() {
+        match transform_outputs.get(layer.rows_key()) {
+            Some(batch) => layer_batches.push(batch),
+            None => return Err(unpublished_data_source(i, layer.rows_key(), &transform_outputs)),
+        }
+    }
+
     // A layered spec whose axis a continuous caller scale establishes draws
     // every layer on that axis, so each layer's column must be placeable on
     // it, and a layer whose own scale that axis leaves out is reported. Asked
@@ -1673,6 +1758,7 @@ pub fn prepare_render_inputs(
     let mut scale_warnings: Vec<RenderWarning> = transform_warnings
         .into_iter()
         .map(RenderWarning::Transform)
+        .chain(null_key_drop.warnings)
         .chain(column_warnings)
         .chain(undrawn_channel_warnings(spec, &layers))
         .chain(layer_scale_warnings)
@@ -1813,6 +1899,7 @@ pub fn prepare_render_inputs(
         axes,
         facet_groups,
         facet_emptied_by_drop: facet_partitions.emptied_by_drop,
+        layer_routes: null_key_drop.routes,
         legend_entries,
         legend_title,
         colorbar,
@@ -2162,8 +2249,8 @@ type MergedLineage = (OutputLineage, Vec<RecordBatch>, HashMap<(crate::spec::lay
 /// transforms execute independently per panel; the facet column(s) are
 /// re-injected into every output and per-key batches are concatenated across
 /// panels. When there is no facet, the pipeline is the plain single-partition
-/// path (one partition = full batch). Both branches apply the D10 impute step
-/// (`apply_impute_to_final`) exactly once on `FINAL_OUTPUT_KEY`.
+/// path (one partition = full batch). The D10 impute step runs after the
+/// null-key drop ([`apply_impute_after_drop`]), not here.
 ///
 /// `viewport`/`theme` seed `TransformContext.panel_pixel_size` with the M2
 /// pre-layout estimate (spec §4.2; `layout::estimate_panel_pixel_size`'s doc)
@@ -2200,9 +2287,8 @@ fn run_transforms_with_facet(
             run_plan: run_plan.clone(),
             ..TransformContext::default()
         };
-        let (mut outputs, lineages) = apply_transforms_named(&spec.transforms, normalized, &ctx)
+        let (outputs, lineages) = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| transform_refusal(e.to_string(), &ctx))?;
-        apply_impute_to_final(&mut outputs, spec);
         // #162: drain whatever this run's (possibly per-step-cloned, but
         // `Rc`-shared) sink accumulated — see `TransformContext::warnings`'s
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
@@ -2404,8 +2490,6 @@ fn run_transforms_with_facet(
                 log_input.entry(field_key).or_default().push(column);
             }
         }
-        // D10: per-panel imputation.
-        apply_impute_to_final(&mut panel_outputs, spec);
         // Re-inject the col field (and row field when in grid mode) into every
         // output batch. Transforms like Smooth replace the batch entirely, losing
         // any facet columns that were present on the input partition.
@@ -2624,18 +2708,82 @@ fn concat_batches_by_name(
 }
 
 /// Apply the D10 impute step in place on the pipeline's `FINAL_OUTPUT_KEY`
-/// batch, replacing it only when imputation added rows (SPINE-12).
+/// batch, over the rows the null-key drop kept, replacing it only when
+/// imputation added rows (SPINE-12).
 ///
-/// This is the single call site for both the facet (per-panel) and non-facet
-/// transform branches; it formerly appeared verbatim in each.
-fn apply_impute_to_final(outputs: &mut HashMap<String, RecordBatch>, spec: &ChartSpec) {
-    let final_batch = outputs
-        .get(FINAL_OUTPUT_KEY)
-        .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY");
-    let imputed = apply_impute(final_batch, spec);
-    if imputed.num_rows() != final_batch.num_rows() {
-        outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed);
+/// An unfaceted chart imputes the tail once. A faceted one imputes each
+/// partition's rows (`order`, the partitions' order) on their own, as the
+/// pipeline did when it ran the step inside each panel's run, gives each
+/// imputed row its partition's facet value(s) so it is drawn in that panel,
+/// and concatenates the partitions in that order. Runs only when the chart's
+/// `y` states an impute.
+///
+/// Returns the rows the tail held before the step when it added some, `None`
+/// when it added nothing.
+fn apply_impute_after_drop(
+    outputs: &mut HashMap<String, RecordBatch>,
+    spec: &ChartSpec,
+    order: &[FacetPartitionKey],
+) -> Result<Option<RecordBatch>, RenderError> {
+    if spec.encoding.y.as_ref().is_none_or(|y| y.impute.is_none()) {
+        return Ok(None);
     }
+    let Some(final_batch) = outputs.get(FINAL_OUTPUT_KEY) else { return Ok(None) };
+    let imputed = match &spec.facet {
+        None => apply_impute(final_batch, spec),
+        Some(fspec) => {
+            let mut parts: Vec<RecordBatch> = Vec::with_capacity(order.len());
+            for (col_value, row_value) in order {
+                let mut part = crate::render::filter_batch_by_facet(final_batch, &fspec.field, col_value)?;
+                if let (Some(row_field), Some(row_value)) = (&fspec.row, row_value) {
+                    part = crate::render::filter_batch_by_facet(&part, row_field, row_value)?;
+                }
+                let before = part.num_rows();
+                let facet_names: Vec<&str> = std::iter::once(fspec.field.as_str()).chain(fspec.row.as_deref()).collect();
+                let mut imputed = apply_impute(&nullable_columns(&part, &facet_names), spec);
+                // The imputed rows belong to this partition's panel.
+                if imputed.num_rows() > before {
+                    let appended: Vec<bool> = (0..imputed.num_rows()).map(|row| row >= before).collect();
+                    // Appended rows exist only when the partition has a row to copy its value from.
+                    if before > 0 {
+                        let source = facet_value_at(&part, &fspec.field, 0)?;
+                        imputed = write_repeated_facet_value(imputed, &fspec.field, &source, &appended)?;
+                        if let (Some(row_field), Some(_)) = (&fspec.row, row_value) {
+                            let source = facet_value_at(&part, row_field, 0)?;
+                            imputed = write_repeated_facet_value(imputed, row_field, &source, &appended)?;
+                        }
+                    }
+                }
+                parts.push(imputed);
+            }
+            if parts.iter().map(RecordBatch::num_rows).sum::<usize>() == final_batch.num_rows() {
+                return Ok(None);
+            }
+            concat_batches_by_name(FINAL_OUTPUT_KEY, parts)?
+        }
+    };
+    if imputed.num_rows() == final_batch.num_rows() {
+        return Ok(None);
+    }
+    Ok(outputs.insert(FINAL_OUTPUT_KEY.to_string(), imputed))
+}
+
+/// `batch` with the columns named `names` declared nullable, so imputed rows
+/// can leave them null until the panel's value is written into them: the facet
+/// columns of a partition the pipeline passed through carry the caller's
+/// nullable field.
+fn nullable_columns(batch: &RecordBatch, names: &[&str]) -> RecordBatch {
+    let schema = batch.schema();
+    let fields: Vec<Arc<Field>> = schema
+        .fields()
+        .iter()
+        .map(|field| match names.contains(&field.name().as_str()) {
+            true => Arc::new(field.as_ref().clone().with_nullable(true)),
+            false => field.clone(),
+        })
+        .collect();
+    RecordBatch::try_new(Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())), batch.columns().to_vec())
+        .unwrap_or_else(|_| batch.clone())
 }
 
 /// Refuse a `group` grouping key where nothing reads it
@@ -3371,7 +3519,7 @@ fn chart_rows_schema(layer: &LayerPrepared, pipeline: &PipelineBatches<'_>) -> S
 /// built once so every site that could reach it (the per-layer batch
 /// resolution loop above, [`layer_final_rows`], [`pre_statistic_rows`])
 /// raises the same typed error with the same text.
-fn unpublished_data_source(layer_index: usize, name: &str, transform_outputs: &HashMap<String, RecordBatch>) -> RenderError {
+pub(in crate::render) fn unpublished_data_source(layer_index: usize, name: &str, transform_outputs: &HashMap<String, RecordBatch>) -> RenderError {
     let mut keys: Vec<&str> = transform_outputs.keys().map(|s| s.as_str()).collect();
     keys.sort_unstable();
     RenderError::TransformFailed(format!(
@@ -3702,11 +3850,9 @@ fn build_secondary_y_axis_inputs(
     for (slot_index, &layer_idx) in y_slot_plan.secondary_layers().iter().enumerate() {
         let y_slot = slot_index + 1;
         let layer = &layers[layer_idx];
-        let layer_batch: &RecordBatch = match &layer.data_source {
-            Some(name) => transform_outputs
-                .get(name)
-                .expect("layer.data_source validated by prepare_render_inputs"),
-            None => transformed,
+        let layer_batch: &RecordBatch = match layer.rows_key() {
+            FINAL_OUTPUT_KEY => transformed,
+            key => transform_outputs.get(key).ok_or_else(|| unpublished_data_source(layer_idx, key, transform_outputs))?,
         };
         // Shared param-aware per-layer y resolution (#72): the same
         // `scale_resolve::resolve_layer_y_slot_scale` scene_build's
@@ -3821,19 +3967,55 @@ fn build_secondary_y_axis_inputs(
     })
 }
 
-/// D10: fill missing (group × x-value) combinations in the batch with a constant y value.
+/// D10: fill missing (series × x-value) combinations in the batch with a constant y value.
 ///
 /// When `encoding.y.impute = {"value": N}` is set and the encoding has both an x and
-/// color channel, this synthesizes zero-rows for every (x-value, color-group) pair
-/// that is absent from the data, ensuring that line charts and area charts connect
-/// correctly even when some groups are missing observations at certain x ticks.
+/// color channel, this synthesizes a row for every (x-value, series) pair that is
+/// absent from the data, ensuring that line charts and area charts connect
+/// correctly even when some series are missing observations at certain x ticks.
 ///
-/// The imputed rows carry the x and color values from the (x, group) key and the
-/// impute constant for y. All other columns default to null. No-ops when any of
-/// these conditions hold: no x encoding, no color encoding, impute value absent,
-/// or the batch is already complete.
+/// A series is one combination of the colour and every other grouping binding
+/// the chart's mark draws (`shape`, `stroke_dash`, `detail`). The imputed rows
+/// carry the x value, the impute constant for y, and every key of their series,
+/// copied from a row of it; every other column is null. A row null in any
+/// series key belongs to no series, so it forms none and adds no x value to
+/// complete. No-ops when any of these conditions hold: no x encoding, no color
+/// encoding, impute value absent, or the batch is already complete.
+/// The fields whose combinations are an impute's series: the colour, then every
+/// other grouping binding the chart's mark draws (`shape`, `stroke_dash`,
+/// `detail`), each once. Empty without a colour binding.
+fn impute_series_fields(spec: &ChartSpec) -> Vec<&str> {
+    let Some(color) = spec.encoding.color.as_ref() else { return Vec::new() };
+    let mut series_fields: Vec<&str> = vec![color.field.as_str()];
+    let grouping = [
+        (spec.encoding.shape.as_ref(), crate::spec::layer::InheritedChannel::Shape),
+        (spec.encoding.stroke_dash.as_ref(), crate::spec::layer::InheritedChannel::StrokeDash),
+    ];
+    for (binding, channel) in grouping {
+        if let Some(binding) = binding.filter(|_| spec.mark.draws_channel(channel)) {
+            series_fields.push(binding.field.as_str());
+        }
+    }
+    if let Some(detail) = spec
+        .mark_style
+        .as_ref()
+        .and_then(|m| m.detail.as_deref())
+        .filter(|_| spec.mark.style_field("detail").is_some())
+    {
+        series_fields.push(detail);
+    }
+    let mut seen_fields: Vec<&str> = Vec::new();
+    series_fields.retain(|field| {
+        let new = !seen_fields.contains(field);
+        seen_fields.push(field);
+        new
+    });
+    series_fields
+}
+
 fn apply_impute(batch: &RecordBatch, spec: &ChartSpec) -> RecordBatch {
-    use arrow::array::{Float64Array, StringArray};
+    use arrow::array::{Float64Array, StringArray, UInt32Array};
+    use arrow::util::display::array_value_to_string;
 
     // Only handle `encoding.y.impute = {"value": <number>}`.
     let impute_value = spec
@@ -3848,159 +4030,113 @@ fn apply_impute(batch: &RecordBatch, spec: &ChartSpec) -> RecordBatch {
         return batch.clone();
     };
 
-    let x_enc = match spec.encoding.x.as_ref() {
-        Some(e) => e,
-        None => return batch.clone(),
-    };
-    let color_enc = match spec.encoding.color.as_ref() {
-        Some(e) => e,
-        None => return batch.clone(),
-    };
-    let y_enc = match spec.encoding.y.as_ref() {
-        Some(e) => e,
-        None => return batch.clone(),
+    let (Some(x_enc), Some(_), Some(y_enc)) =
+        (spec.encoding.x.as_ref(), spec.encoding.color.as_ref(), spec.encoding.y.as_ref())
+    else {
+        return batch.clone();
     };
 
     let x_field = &x_enc.field;
-    let color_field = &color_enc.field;
     let y_field = &y_enc.field;
 
-    // Collect distinct x values and groups. Only handles Float64 x + Utf8 color.
-    let x_col = match batch.column_by_name(x_field) {
-        Some(c) => c,
-        None => return batch.clone(),
-    };
-    let color_col = match batch.column_by_name(color_field) {
-        Some(c) => c,
-        None => return batch.clone(),
-    };
-    let x_arr = match x_col.as_any().downcast_ref::<Float64Array>() {
-        Some(a) => a,
-        None => return batch.clone(),
-    };
-    let color_arr = match color_col.as_any().downcast_ref::<StringArray>() {
-        Some(a) => a,
+    let series_fields = impute_series_fields(spec);
+    let series_columns: Vec<&ArrayRef> = match series_fields.iter().map(|f| batch.column_by_name(f)).collect() {
+        Some(columns) => columns,
         None => return batch.clone(),
     };
 
-    // Collect all (x, group) pairs and the full domain of each.
-    use std::collections::HashSet;
-    let mut x_vals: Vec<f64> = x_arr.iter().flatten().collect();
-    x_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    x_vals.dedup();
-    let mut groups: Vec<String> = color_arr.iter().flatten().map(str::to_owned).collect();
-    groups.sort_unstable();
-    groups.dedup();
-
-    if x_vals.is_empty() || groups.is_empty() {
+    // Only handles Float64 x + Utf8 color.
+    let Some(x_arr) = batch.column_by_name(x_field).and_then(|c| c.as_any().downcast_ref::<Float64Array>()) else {
+        return batch.clone();
+    };
+    if series_columns[0].as_any().downcast_ref::<StringArray>().is_none() {
         return batch.clone();
     }
 
-    // Build the set of existing (x, group) keys.
-    let mut existing: HashSet<(u64, String)> = HashSet::new();
-    for i in 0..batch.num_rows() {
-        if x_arr.is_null(i) || color_arr.is_null(i) {
-            continue;
+    // Each row's series (`None` when any key is null), and the first row of
+    // every series, to copy its keys from.
+    let series_of: Vec<Option<Vec<String>>> = (0..batch.num_rows())
+        .map(|row| {
+            series_columns
+                .iter()
+                .map(|column| (!column.is_null(row)).then(|| array_value_to_string(column, row).ok()).flatten())
+                .collect()
+        })
+        .collect();
+    let mut representative: std::collections::BTreeMap<Vec<String>, u32> = std::collections::BTreeMap::new();
+    for (row, series) in series_of.iter().enumerate() {
+        if let Some(series) = series {
+            representative.entry(series.clone()).or_insert(row as u32);
         }
-        let xv = x_arr.value(i);
-        let gv = color_arr.value(i).to_owned();
-        existing.insert((xv.to_bits(), gv));
     }
 
-    // Build synthetic rows for missing (x, group) pairs.
-    let mut new_x: Vec<Option<f64>> = Vec::new();
-    let mut new_group: Vec<Option<String>> = Vec::new();
-    let mut new_y: Vec<Option<f64>> = Vec::new();
+    // Collect all (x, series) pairs and the full domain of each.
+    use std::collections::HashSet;
+    let mut x_vals: Vec<f64> = series_of
+        .iter()
+        .enumerate()
+        .filter(|(row, series)| series.is_some() && !x_arr.is_null(*row))
+        .map(|(row, _)| x_arr.value(row))
+        .collect();
+    x_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    x_vals.dedup();
+
+    if x_vals.is_empty() || representative.is_empty() {
+        return batch.clone();
+    }
+
+    // Build the set of existing (x, series) keys.
+    let mut existing: HashSet<(u64, &Vec<String>)> = HashSet::new();
+    for (row, series) in series_of.iter().enumerate() {
+        if let (Some(series), false) = (series, x_arr.is_null(row)) {
+            existing.insert((x_arr.value(row).to_bits(), series));
+        }
+    }
+
+    // Build synthetic rows for missing (x, series) pairs: the x value, the
+    // row of the series to copy its keys from, and the fill for y.
+    let mut new_x: Vec<f64> = Vec::new();
+    let mut new_from: Vec<u32> = Vec::new();
     for xv in &x_vals {
-        for gv in &groups {
-            if existing.contains(&(xv.to_bits(), gv.clone())) {
+        for (series, from) in &representative {
+            if existing.contains(&(xv.to_bits(), series)) {
                 continue;
             }
-            new_x.push(Some(*xv));
-            new_group.push(Some(gv.clone()));
-            new_y.push(Some(fill));
+            new_x.push(*xv);
+            new_from.push(*from);
         }
     }
     if new_x.is_empty() {
         return batch.clone();
     }
+    let new_from = UInt32Array::from(new_from);
 
-    // Append synthetic rows: build a small batch with (x, color, y) and null all other cols.
+    // Append synthetic rows to every column: the x and y values, the series'
+    // keys copied from their series, and null for everything else.
     let n_new = new_x.len();
-    let n_orig = batch.num_rows();
     let schema = batch.schema();
     let mut combined_cols: Vec<ArrayRef> = Vec::new();
     for (col_idx, field) in schema.fields().iter().enumerate() {
         let orig_col = batch.column(col_idx);
-        match field.name().as_str() {
-            name if name == x_field => {
-                let combined: ArrayRef = Arc::new(Float64Array::from(
-                    (0..n_orig)
-                        .map(|i| {
-                            if x_arr.is_null(i) {
-                                None
-                            } else {
-                                Some(x_arr.value(i))
-                            }
-                        })
-                        .chain(new_x.iter().copied())
-                        .collect::<Vec<Option<f64>>>(),
-                ));
-                combined_cols.push(combined);
+        let name = field.name().as_str();
+        let appended: ArrayRef = if name == x_field {
+            Arc::new(Float64Array::from(new_x.iter().copied().map(Some).collect::<Vec<_>>()))
+        } else if name == y_field {
+            if orig_col.as_any().downcast_ref::<Float64Array>().is_none() {
+                return batch.clone();
             }
-            name if name == color_field => {
-                let orig_str = orig_col.as_any().downcast_ref::<StringArray>();
-                let combined: ArrayRef = if let Some(orig_str) = orig_str {
-                    Arc::new(
-                        (0..n_orig)
-                            .map(|i| {
-                                if orig_str.is_null(i) {
-                                    None
-                                } else {
-                                    Some(orig_str.value(i))
-                                }
-                            })
-                            .chain(new_group.iter().map(|v| v.as_deref()))
-                            .collect::<Vec<Option<&str>>>()
-                            .into_iter()
-                            .collect::<StringArray>(),
-                    )
-                } else {
-                    return batch.clone();
-                };
-                combined_cols.push(combined);
+            Arc::new(Float64Array::from(vec![Some(fill); n_new]))
+        } else if series_fields.contains(&name) {
+            match arrow::compute::take(orig_col.as_ref(), &new_from, None) {
+                Ok(copied) => copied,
+                Err(_) => return batch.clone(),
             }
-            name if name == y_field => {
-                let orig_f64 = orig_col.as_any().downcast_ref::<Float64Array>();
-                let combined: ArrayRef = if let Some(orig_f64) = orig_f64 {
-                    Arc::new(Float64Array::from(
-                        (0..n_orig)
-                            .map(|i| {
-                                if orig_f64.is_null(i) {
-                                    None
-                                } else {
-                                    Some(orig_f64.value(i))
-                                }
-                            })
-                            .chain(new_y.iter().copied())
-                            .collect::<Vec<Option<f64>>>(),
-                    ))
-                } else {
-                    return batch.clone();
-                };
-                combined_cols.push(combined);
-            }
-            _ => {
-                // Append nulls for synthetic rows.
-                let extended = arrow::compute::concat(&[
-                    orig_col.as_ref(),
-                    arrow::array::new_null_array(orig_col.data_type(), n_new).as_ref(),
-                ]);
-                match extended {
-                    Ok(arr) => combined_cols.push(arr),
-                    Err(_) => return batch.clone(),
-                }
-            }
+        } else {
+            arrow::array::new_null_array(orig_col.data_type(), n_new)
+        };
+        match arrow::compute::concat(&[orig_col.as_ref(), appended.as_ref()]) {
+            Ok(arr) => combined_cols.push(arr),
+            Err(_) => return batch.clone(),
         }
     }
     match RecordBatch::try_new(schema, combined_cols) {
@@ -5605,29 +5741,41 @@ fn null_facet_rows(values: &StringArray, repeat: &[bool]) -> usize {
     repeat.iter().enumerate().filter(|&(row, &repeats)| !repeats && values.is_null(row)).count()
 }
 
-/// `panel` with `value` written into its Utf8 `field` column on every row
+/// Row `row` of `batch`'s `field` column as a one-row array in the column's
+/// own dtype (a zero-copy slice), the facet value a repeated or imputed row
+/// is given.
+fn facet_value_at(batch: &RecordBatch, field: &str, row: usize) -> Result<ArrayRef, RenderError> {
+    let index = batch.schema().index_of(field).map_err(|_| RenderError::UnknownColumn { name: field.to_string() })?;
+    Ok(batch.column(index).slice(row, 1))
+}
+
+/// `panel` with the facet value `source` (a one-row array from
+/// [`facet_value_at`]) written into its `field` column on every row
 /// `repeated` marks, so a repeated row carries the panel it is drawn in, as
-/// every other row in the panel does. Unchanged when no row repeats.
+/// every other row in the panel does. The value is copied, not re-encoded, so
+/// the column keeps its own dtype (an integer, float, boolean, date or
+/// dictionary facet is not turned into text), and the panel needs no row of
+/// its own that holds the value: a panel reached only by repeated rows takes
+/// it from `source`. Unchanged when no row repeats.
 fn write_repeated_facet_value(
     panel: RecordBatch,
     field: &str,
-    value: &str,
+    source: &ArrayRef,
     repeated: &[bool],
 ) -> Result<RecordBatch, RenderError> {
     if !repeated.contains(&true) {
         return Ok(panel);
     }
     let index = panel.schema().index_of(field).map_err(|_| RenderError::UnknownColumn { name: field.to_string() })?;
-    let values = crate::render::facet_key_column(&panel, field)?;
-    let written: StringArray = values
-        .iter()
-        .zip(repeated)
-        .map(|(own, &repeats)| if repeats { Some(value) } else { own })
-        .collect();
+    let fail = |e: arrow::error::ArrowError| RenderError::ScaleResolutionFailed(format!("facet repeat for '{field}': {e}"));
+    let column = panel.column(index);
+    let n = panel.num_rows();
+    let widened = arrow::compute::concat(&[column.as_ref(), source.as_ref()]).map_err(fail)?;
+    let picks: arrow::array::UInt32Array = (0..n).map(|row| Some(if repeated[row] { n } else { row } as u32)).collect();
+    let written = arrow::compute::take(widened.as_ref(), &picks, None).map_err(fail)?;
     let mut columns: Vec<ArrayRef> = panel.columns().to_vec();
-    columns[index] = Arc::new(written);
-    RecordBatch::try_new(panel.schema(), columns)
-        .map_err(|e| RenderError::ScaleResolutionFailed(format!("facet repeat for '{field}': {e}")))
+    columns[index] = written;
+    RecordBatch::try_new(panel.schema(), columns).map_err(fail)
 }
 
 /// The rows `mask` keeps, each paired with whether it repeats.
@@ -5650,18 +5798,17 @@ fn partition_batch_by_field(
     use arrow::array::BooleanArray;
     use arrow::compute::filter_record_batch;
     let arr = crate::render::facet_key_column(batch, field)?;
-    // Collect distinct values in first-appearance order.
-    let mut order: Vec<String> = Vec::new();
+    // Distinct values in first-appearance order, each with its first row.
+    let mut order: Vec<(String, usize)> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (v, &repeats) in arr.iter().zip(repeat) {
+    for (row, (v, &repeats)) in arr.iter().zip(repeat).enumerate() {
         let Some(v) = v.filter(|_| !repeats) else { continue };
-        let s = v.to_string();
-        if seen.insert(s.clone()) {
-            order.push(s);
+        if seen.insert(v.to_string()) {
+            order.push((v.to_string(), row));
         }
     }
     let mut result = Vec::with_capacity(order.len());
-    for value in order {
+    for (value, first_row) in order {
         let mask: BooleanArray = arr
             .iter()
             .zip(repeat)
@@ -5669,7 +5816,12 @@ fn partition_batch_by_field(
             .collect();
         let filtered = filter_record_batch(batch, &mask)
             .map_err(|e| RenderError::ScaleResolutionFailed(format!("partition filter: {e}")))?;
-        let filtered = write_repeated_facet_value(filtered, field, &value, &kept_repeats(&mask, repeat))?;
+        let filtered = write_repeated_facet_value(
+            filtered,
+            field,
+            &facet_value_at(batch, field, first_row)?,
+            &kept_repeats(&mask, repeat),
+        )?;
         result.push((value, filtered));
     }
     Ok(result)
@@ -5722,10 +5874,11 @@ fn partition_batch_by_two_fields(
     let joins_col = |i: usize| col_repeat[i] || !col_arr.is_null(i);
     let joins_row = |i: usize| row_repeat[i] || !row_arr.is_null(i);
 
-    // Collect distinct (row_val, col_val) pairs in row-major first-appearance order.
-    let mut row_order: Vec<String> = Vec::new();
+    // Collect distinct (row_val, col_val) pairs in row-major first-appearance
+    // order, each value with the first row that holds it.
+    let mut row_order: Vec<(String, usize)> = Vec::new();
     let mut row_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut col_order: Vec<String> = Vec::new();
+    let mut col_order: Vec<(String, usize)> = Vec::new();
     let mut col_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for i in 0..batch.num_rows() {
@@ -5735,20 +5888,20 @@ fn partition_batch_by_two_fields(
         if !row_repeat[i] {
             let rv = row_arr.value(i).to_string();
             if row_seen.insert(rv.clone()) {
-                row_order.push(rv);
+                row_order.push((rv, i));
             }
         }
         if !col_repeat[i] {
             let cv = col_arr.value(i).to_string();
             if col_seen.insert(cv.clone()) {
-                col_order.push(cv);
+                col_order.push((cv, i));
             }
         }
     }
 
     let mut result = Vec::with_capacity(row_order.len() * col_order.len());
-    for row_v in &row_order {
-        for col_v in &col_order {
+    for (row_v, row_first) in &row_order {
+        for (col_v, col_first) in &col_order {
             let mask: BooleanArray = (0..batch.num_rows())
                 .map(|i| {
                     let in_col = col_repeat[i] || (!col_arr.is_null(i) && col_arr.value(i) == col_v.as_str());
@@ -5763,8 +5916,19 @@ fn partition_batch_by_two_fields(
             let filtered = filter_record_batch(batch, &mask).map_err(|e| {
                 RenderError::ScaleResolutionFailed(format!("partition filter: {e}"))
             })?;
-            let filtered = write_repeated_facet_value(filtered, col_field, col_v, &kept_repeats(&mask, col_repeat))?;
-            let filtered = write_repeated_facet_value(filtered, row_field, row_v, &kept_repeats(&mask, row_repeat))?;
+            // A cell reached only by repeated rows takes its value from a row of the whole batch.
+            let filtered = write_repeated_facet_value(
+                filtered,
+                col_field,
+                &facet_value_at(batch, col_field, *col_first)?,
+                &kept_repeats(&mask, col_repeat),
+            )?;
+            let filtered = write_repeated_facet_value(
+                filtered,
+                row_field,
+                &facet_value_at(batch, row_field, *row_first)?,
+                &kept_repeats(&mask, row_repeat),
+            )?;
             result.push(((col_v.clone(), row_v.clone()), filtered));
         }
     }

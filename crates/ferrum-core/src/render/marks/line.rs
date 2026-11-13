@@ -49,7 +49,7 @@
 //! layer's `size` conditional never reaches the line.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries, SeriesPartition};
 use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
@@ -229,7 +229,7 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
     let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
     let axis_pixels = |scale: &ScaleKind, field: &str| -> Option<Vec<Option<f64>>> {
         Some(match scale {
-            ScaleKind::Ordinal(_) => col_as_positional_category_str(ctx.batch, field)
+            ScaleKind::Ordinal(_) => col_as_ordinal_category_str(ctx.batch, field)
                 .ok()?
                 .iter()
                 .map(|opt| opt.as_deref().and_then(|s| scale.to_pixel_str(s)))

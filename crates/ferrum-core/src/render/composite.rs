@@ -1639,16 +1639,6 @@ fn leaf_positional_domain(
             Ok(Some(SharedDomain::Numeric { lo, hi }))
         }
         SpecDataType::Ordinal | SpecDataType::Nominal => {
-            // `#247`B's null-band occupancy rule needs the OPPOSITE positional
-            // channel (the second coordinate a mark cannot be placed without),
-            // which is a different pairing from the `paired` x2/y2 span partner
-            // the numeric arm above unions over.
-            let paired_positional = match channel {
-                Channel::X => leaf.encoding.y.as_ref(),
-                Channel::Y => leaf.encoding.x.as_ref(),
-                _ => None,
-            }
-            .map(|e| e.field.as_str());
             // `leaf.spec` for the same reason the numeric arm above passes it: a
             // leaf can itself be a flat-merged layered chart (`hconcat(a + b, c)`),
             // and its own layers' categories belong in the domain it contributes
@@ -1659,7 +1649,6 @@ fn leaf_positional_domain(
             let cats = positional_category_union(
                 channel.as_str(),
                 &enc.field,
-                paired_positional,
                 leaf.final_batch,
                 leaf.transform_outputs,
                 leaf.spec,

@@ -366,6 +366,15 @@ pub struct Layer {
     /// that falls back to [`crate::spec::chart::ChartSpec::flip_by_call`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flip_by_call: bool,
+    /// The key in the transform outputs that holds this layer's own rows,
+    /// when the render's null-key drop gave the layer rows its key-siblings
+    /// do not share ([`crate::render::prepare::LayerPrepared::own_rows`]).
+    /// Internal: set only by the render's prepare step on its own routed copy
+    /// of the spec, never read from or written to the wire. It changes which
+    /// batch the layer is fetched from and nothing about how the layer is
+    /// classified: `data_source` stays what the caller wrote.
+    #[serde(skip)]
+    pub(crate) own_rows: Option<String>,
 }
 
 /// A point layer with every optional field empty, the base test literals
@@ -390,11 +399,24 @@ impl Default for Layer {
             coord: None,
             entry: None,
             flip_by_call: false,
+            own_rows: None,
         }
     }
 }
 
 impl Layer {
+    /// The key in the transform outputs whose batch this layer draws: its own
+    /// rows when the null-key drop routed it to some, else the output its
+    /// `data_source` names, else the chart's final rows. The one answer for
+    /// code that fetches a layer's batch; code that classifies a layer by
+    /// where its rows come from keeps reading `data_source`.
+    pub(crate) fn rows_key(&self) -> &str {
+        self.own_rows
+            .as_deref()
+            .or(self.data_source.as_deref())
+            .unwrap_or(crate::transform::core::FINAL_OUTPUT_KEY)
+    }
+
     /// The positional channels this layer writes itself: those its encoding
     /// binds that Python did not fill from a parent
     /// ([`Self::inherited_positional`]).
@@ -480,7 +502,7 @@ impl Layer {
     /// filled that its mark does not draw: the channels it binds itself, as
     /// its completed encoding ([`Self::completed_encoding`]) keeps them. The
     /// read a per-layer domain loop takes, so a channel the mark never draws
-    /// widens no axis and judges no null band.
+    /// widens no axis.
     pub(crate) fn drawn_own_encoding(&self, parent: &Encoding) -> Encoding {
         let completed = self.completed_encoding(parent);
         let mut encoding = self.encoding.clone();

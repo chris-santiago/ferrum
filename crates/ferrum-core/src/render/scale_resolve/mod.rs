@@ -1791,11 +1791,23 @@ pub(super) fn shared_categorical_batch<'a>(
     transform_outputs: &'a HashMap<String, RecordBatch>,
     facet_shared: bool,
 ) -> &'a RecordBatch {
+    shared_batch_at(primary_batch, field, transform_outputs, facet_shared, crate::transform::core::FINAL_OUTPUT_KEY)
+}
+
+/// [`shared_categorical_batch`] for a read of the chart's data whose
+/// all-panel rows are published under `global_key`: the pipeline's tail for
+/// every layer but one the null-key drop gave rows of its own.
+pub(super) fn shared_batch_at<'a>(
+    primary_batch: &'a RecordBatch,
+    field: &str,
+    transform_outputs: &'a HashMap<String, RecordBatch>,
+    facet_shared: bool,
+    global_key: &str,
+) -> &'a RecordBatch {
     if !facet_shared {
         return primary_batch;
     }
-    use crate::transform::core::FINAL_OUTPUT_KEY;
-    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+    let Some(global_batch) = transform_outputs.get(global_key) else {
         return primary_batch;
     };
     if global_batch.column_by_name(field).is_none() {
@@ -1820,8 +1832,18 @@ pub(super) fn union_panel_with_global_extent(
     field: &str,
     transform_outputs: &HashMap<String, RecordBatch>,
 ) -> (f64, f64) {
-    use crate::transform::core::FINAL_OUTPUT_KEY;
-    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+    union_panel_with_global_extent_at(panel_extent, field, transform_outputs, crate::transform::core::FINAL_OUTPUT_KEY)
+}
+
+/// [`union_panel_with_global_extent`] against the all-panel rows published
+/// under `global_key`.
+pub(super) fn union_panel_with_global_extent_at(
+    panel_extent: (f64, f64),
+    field: &str,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    global_key: &str,
+) -> (f64, f64) {
+    let Some(global_batch) = transform_outputs.get(global_key) else {
         return panel_extent;
     };
     let Some(col) = global_batch.column_by_name(field) else {
@@ -1843,19 +1865,6 @@ pub(in crate::render) fn distinct_values_in_order(
     field: &str,
 ) -> Result<Vec<String>, RenderError> {
     super::arrow_cast::distinct_values_in_order(batch, field)
-}
-
-/// Positional (x:N / y:N) ordinal domain: like [`distinct_values_in_order`] but
-/// surfaces a null row as its own category (FA-9) when the opposite positional
-/// channel `paired_positional` shows that band to be occupied (`#247`B). Used
-/// only by the positional scale path so color/shape/legend domains keep dropping
-/// nulls.
-fn distinct_positional_categories(
-    batch: &RecordBatch,
-    field: &str,
-    paired_positional: Option<&str>,
-) -> Result<Vec<String>, RenderError> {
-    super::arrow_cast::distinct_positional_categories(batch, field, paired_positional)
 }
 
 /// T4: per-channel "shared faceted positional scale" flags `(x_shared, y_shared)`.

@@ -1037,7 +1037,7 @@ class SpecBuildMixin:
         return d
 
     def _infer_facet_cardinality(self, col_name: str | None) -> int:
-        """Return the number of distinct values in *col_name* from self._data.
+        """Return the number of distinct non-null values in *col_name* from self._data.
 
         Delegates to :func:`ferrum._facet.infer_facet_cardinality`.
         """

@@ -2,9 +2,11 @@
 //!
 //! `by` names an Int64 index column. On the row axis (default),
 //! output.row[i] == input.row[by[i]]. On the column axis, the batch's numeric
-//! columns (the ones `Linkage(axis="columns")` clusters, see
-//! [`numeric_column_indices`]) are permuted in place: the i-th numeric slot
-//! receives numeric column by[i], and every other column keeps its position.
+//! columns other than the order's `Linkage` label column (the ones
+//! `Linkage(axis="columns")` clusters, see [`feature_column_indices`]) are
+//! permuted in place: the i-th numeric slot receives numeric column by[i], and
+//! every other column keeps its position. The `order` of a `Linkage` with
+//! `labels` names only the rows whose label is not null.
 //! When `drop_index=true` (default), the `by` column is omitted from output.
 //!
 //! Used by `clustermap()` to reorder rows and columns by each Linkage's
@@ -20,8 +22,7 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::transform::linkage::LinkageAxis;
-use crate::transform::numeric_util::numeric_column_indices;
+use crate::transform::linkage::{feature_column_indices, LinkageAxis, LinkageOrderMeta};
 use crate::transform::vocabulary::Vocabulary;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,9 +84,10 @@ pub(crate) fn apply_with_outputs(
     let idx_arr = index_batch.column(idx).as_any().downcast_ref::<Int64Array>()
         .ok_or_else(|| PyValueError::new_err(format!(
             "stat_reorder: expected Int64Array for index column '{}'", spec.by)))?;
+    let linkage = spec.from.as_ref().and_then(|_| LinkageOrderMeta::read(index_batch));
     let (cols, fields) = match spec.axis {
-        LinkageAxis::Rows => permute_rows(spec, idx_arr, batch)?,
-        LinkageAxis::Columns => permute_columns(spec, idx_arr, batch)?,
+        LinkageAxis::Rows => permute_rows(spec, idx_arr, batch, linkage.as_ref())?,
+        LinkageAxis::Columns => permute_columns(spec, idx_arr, batch, linkage.as_ref())?,
     };
     let (out_fields, out_cols): (Vec<Field>, Vec<ArrayRef>) = fields
         .into_iter()
@@ -110,12 +112,33 @@ fn checked_indices(idx_arr: &Int64Array, len: usize) -> PyResult<Vec<usize>> {
     }).collect()
 }
 
-fn permute_rows(spec: &ReorderSpec, idx_arr: &Int64Array, batch: &RecordBatch) -> PyResult<Columns> {
-    let n = idx_arr.len();
-    if spec.from.is_some() && n != batch.num_rows() {
-        return Err(PyValueError::new_err(format!(
-            "stat_reorder: from='{}' produced {} indices but batch has {} rows",
-            spec.from.as_deref().unwrap_or(""), n, batch.num_rows())));
+/// Permute the batch's rows by `idx_arr`. An order read `from` a named output
+/// must be as long as the batch, except the order of a `Linkage` with
+/// `labels` (`linkage` is its record): that order names only the rows whose
+/// label is not null and keeps exactly those, in its order, over a batch that
+/// has the rows the linkage read.
+fn permute_rows(
+    spec: &ReorderSpec,
+    idx_arr: &Int64Array,
+    batch: &RecordBatch,
+    linkage: Option<&LinkageOrderMeta>,
+) -> PyResult<Columns> {
+    if let Some(from) = spec.from.as_deref() {
+        match linkage {
+            Some(meta) if meta.rows != batch.num_rows() => {
+                return Err(PyValueError::new_err(format!(
+                    "stat_reorder: from='{from}' orders the {} rows its linkage read but batch has {} rows; \
+                     place the Reorder before any step that adds or removes rows",
+                    meta.rows, batch.num_rows())));
+            }
+            Some(_) => {}
+            None if idx_arr.len() != batch.num_rows() => {
+                return Err(PyValueError::new_err(format!(
+                    "stat_reorder: from='{from}' produced {} indices but batch has {} rows",
+                    idx_arr.len(), batch.num_rows())));
+            }
+            None => {}
+        }
     }
     // arrow::compute::take requires UInt64 indices.
     let take_indices: UInt64Array = checked_indices(idx_arr, batch.num_rows())?
@@ -128,10 +151,22 @@ fn permute_rows(spec: &ReorderSpec, idx_arr: &Int64Array, batch: &RecordBatch) -
     Ok((cols, fields))
 }
 
-fn permute_columns(spec: &ReorderSpec, idx_arr: &Int64Array, batch: &RecordBatch) -> PyResult<Columns> {
+/// Permute the numeric feature columns by `idx_arr`: the numeric columns
+/// other than the order's `Linkage` label column, the columns that linkage
+/// clustered. The empty order of a labelled linkage (every label null, so no
+/// observation) leaves the columns in place.
+fn permute_columns(
+    spec: &ReorderSpec,
+    idx_arr: &Int64Array,
+    batch: &RecordBatch,
+    linkage: Option<&LinkageOrderMeta>,
+) -> PyResult<Columns> {
     let from = spec.from.as_deref().unwrap_or_default();
     let schema = batch.schema();
-    let slots = numeric_column_indices(&schema, "stat_reorder")?;
+    let slots = feature_column_indices(&schema, linkage.map(|m| m.label.as_str()), "stat_reorder")?;
+    if idx_arr.is_empty() && linkage.is_some() {
+        return Ok((batch.columns().to_vec(), schema.fields().iter().map(|f| f.as_ref().clone()).collect()));
+    }
     if idx_arr.len() != slots.len() {
         return Err(PyValueError::new_err(format!(
             "stat_reorder: from='{from}' produced {} indices but batch has {} numeric columns",
@@ -161,7 +196,10 @@ use crate::transform::core::TransformSpec;
 ///
 /// Permutes all rows of the input batch according to the values in the
 /// ``by`` column, which must be an integer column containing a permutation
-/// of ``0..n-1``. When ``from_`` is set, the batch is consumed from a
+/// of ``0..n-1`` (when ``from_`` names the ``order`` of a ``Linkage`` with
+/// ``labels``, it names only the rows whose label is not null and the others
+/// are dropped, as that ``Linkage`` counted them; the batch must have the
+/// rows that ``Linkage`` read). When ``from_`` is set, the batch is consumed from a
 /// named sibling transform's output (e.g. a ``Linkage`` that emits
 /// ``new_idx``) rather than from the primary data source.
 ///
@@ -180,7 +218,8 @@ use crate::transform::core::TransformSpec;
 ///     directly into ``Reorder``.
 /// axis : {"rows", "columns"}, default "rows"
 ///     ``"rows"`` permutes the batch's rows. ``"columns"`` permutes its
-///     numeric columns (the ones ``Linkage(axis="columns")`` clusters) in
+///     numeric columns other than its ``Linkage``'s ``labels`` column (the
+///     ones ``Linkage(axis="columns")`` clusters) in
 ///     place, so a following ``Unpivot(value_vars=None)`` emits the column
 ///     blocks in linkage leaf order; it requires ``from_``.
 /// name : str, optional
@@ -321,7 +360,7 @@ mod tests {
             metric: DistanceMetric::Euclidean,
             axis,
             z_score: None,
-            standard_scale: None,
+            standard_scale: None, labels: None,
             name: Some(name.into()),
         })
     }
@@ -479,5 +518,130 @@ mod tests {
         let json = serde_json::to_string(&cols).unwrap();
         assert!(json.contains(r#""axis":"columns""#), "{json}");
         assert_eq!(serde_json::from_str::<TransformSpec>(&json).unwrap(), cols);
+    }
+
+    // ---------- an order shorter than the batch (a linkage that skipped rows) ----------
+
+    fn rows_spec() -> ReorderSpec {
+        ReorderSpec { by: "original_idx".into(), drop_index: true, from: Some("o".into()), axis: LinkageAxis::Rows, name: None }
+    }
+
+    fn values(batch: &RecordBatch) -> Vec<f64> {
+        let v = batch.column_by_name("v").unwrap().as_any().downcast_ref::<Float64Array>().unwrap();
+        (0..v.len()).map(|i| v.value(i)).collect()
+    }
+
+    fn five_rows() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0]))]).unwrap()
+    }
+
+    #[test]
+    fn an_order_shorter_than_the_batch_that_no_labelled_linkage_wrote_is_refused() {
+        pyo3::Python::initialize();
+        for order in [vec![3, 0, 4], vec![]] {
+            let n = order.len();
+            let err = apply_with_outputs(&rows_spec(), &five_rows(), Some(&order_outputs(order))).unwrap_err().to_string();
+            assert!(err.contains(&format!("from='o' produced {n} indices but batch has 5 rows")), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_full_length_order_still_permutes_every_row() {
+        let out = apply_with_outputs(&rows_spec(), &five_rows(), Some(&order_outputs(vec![4, 3, 2, 1, 0]))).unwrap();
+        assert_eq!(values(&out), vec![50.0, 40.0, 30.0, 20.0, 10.0]);
+    }
+
+    #[test]
+    fn an_order_longer_than_the_batch_or_out_of_range_is_still_refused() {
+        pyo3::Python::initialize();
+        let longer = apply_with_outputs(&rows_spec(), &five_rows(), Some(&order_outputs(vec![0, 1, 2, 3, 4, 0]))).unwrap_err().to_string();
+        assert!(longer.contains("produced 6 indices but batch has 5 rows"), "{longer}");
+        let out_of_range = apply_with_outputs(&rows_spec(), &five_rows(), Some(&order_outputs(vec![0, 1, 2, 3, 9]))).unwrap_err().to_string();
+        assert!(out_of_range.contains("out of bounds"), "{out_of_range}");
+    }
+
+    // ---------- orders written by a Linkage with labels ----------
+
+    /// `wide_batch` with its row column replaced by `label` (null where `None`).
+    fn labelled_wide_batch(label: ArrayRef) -> RecordBatch {
+        let wide = wide_batch();
+        let mut fields: Vec<Field> = wide.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+        fields[0] = Field::new("row", label.data_type().clone(), true);
+        let mut cols = wide.columns().to_vec();
+        cols[0] = label;
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
+    }
+
+    fn null_labelled_wide_batch() -> RecordBatch {
+        labelled_wide_batch(Arc::new(StringArray::from(vec![Some("r0"), None, Some("r2"), Some("r3")])))
+    }
+
+    fn labelled_linkage(axis: LinkageAxis, name: &str) -> TransformSpec {
+        let TransformSpec::Linkage(spec) = linkage(axis, name) else { unreachable!() };
+        TransformSpec::Linkage(LinkageSpec { labels: Some("row".into()), ..spec })
+    }
+
+    fn resizing_unpivot() -> TransformSpec {
+        TransformSpec::Unpivot(UnpivotSpec {
+            id_vars: vec!["row".into()], value_vars: None, var_name: "column".into(), value_name: "value".into(), name: None,
+        })
+    }
+
+    #[test]
+    fn a_linkage_order_over_a_batch_another_step_resized_is_refused() {
+        pyo3::Python::initialize();
+        let batch = null_labelled_wide_batch();
+        let labelled = [labelled_linkage(LinkageAxis::Rows, "o"), resizing_unpivot(), order_reorder(LinkageAxis::Rows, "o_order")];
+        let err = apply_transforms_named(&labelled, &batch, &TransformContext::default()).unwrap_err().to_string();
+        assert!(
+            err.contains("from='o_order' orders the 4 rows its linkage read but batch has 16 rows; place the Reorder before any step that adds or removes rows"),
+            "{err}"
+        );
+        let unlabelled = [linkage(LinkageAxis::Rows, "o"), resizing_unpivot(), order_reorder(LinkageAxis::Rows, "o_order")];
+        let err = apply_transforms_named(&unlabelled, &wide_batch(), &TransformContext::default()).unwrap_err().to_string();
+        assert!(err.contains("from='o_order' produced 4 indices but batch has 16 rows"), "{err}");
+    }
+
+    #[test]
+    fn a_labelled_linkage_order_keeps_exactly_the_rows_it_names() {
+        let specs = [labelled_linkage(LinkageAxis::Rows, "o"), order_reorder(LinkageAxis::Rows, "o_order")];
+        let (outs, _) = apply_transforms_named(&specs, &null_labelled_wide_batch(), &TransformContext::default()).unwrap();
+        let order = outs["o_order"].column_by_name("original_idx").unwrap().as_any().downcast_ref::<Int64Array>().unwrap().values().to_vec();
+        assert_eq!(order.len(), 3);
+        assert!(!order.contains(&1), "the null-labelled row is not in the order");
+        let out = &outs[FINAL_OUTPUT_KEY];
+        let rows = out.column_by_name("row").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+        let expected = ["r0", "", "r2", "r3"];
+        let got: Vec<&str> = (0..rows.len()).map(|i| rows.value(i)).collect();
+        assert_eq!(got, order.iter().map(|&i| expected[i as usize]).collect::<Vec<_>>(), "the kept rows, in the order's order");
+    }
+
+    #[test]
+    fn a_column_order_from_a_labelled_linkage_leaves_a_numeric_label_column_in_place() {
+        pyo3::Python::initialize();
+        let chain = [labelled_linkage(LinkageAxis::Columns, "cl"), order_reorder(LinkageAxis::Columns, "cl_order")];
+        let run = |label: ArrayRef| -> RecordBatch {
+            let (outs, _) = apply_transforms_named(&chain, &labelled_wide_batch(label), &TransformContext::default()).unwrap();
+            outs[FINAL_OUTPUT_KEY].clone()
+        };
+        let numeric = run(Arc::new(Int64Array::from(vec![10, 11, 12, 13])));
+        let text = run(Arc::new(StringArray::from(vec!["r0", "r1", "r2", "r3"])));
+        let names = |b: &RecordBatch| -> Vec<String> { b.schema().fields().iter().map(|f| f.name().clone()).collect() };
+        assert_eq!(names(&numeric), names(&text), "the feature columns come out in the same order");
+        assert_ne!(names(&numeric)[1..], COLS, "the linkage really reorders the features");
+        let id = numeric.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(id.values().to_vec(), vec![10, 11, 12, 13], "the label column keeps its place and values");
+    }
+
+    #[test]
+    fn an_empty_column_order_keeps_the_columns_only_when_a_labelled_linkage_wrote_it() {
+        pyo3::Python::initialize();
+        let every_null = labelled_wide_batch(Arc::new(StringArray::from(vec![None::<&str>; 4])));
+        let chain = [labelled_linkage(LinkageAxis::Columns, "cl"), order_reorder(LinkageAxis::Columns, "cl_order")];
+        let (outs, _) = apply_transforms_named(&chain, &every_null, &TransformContext::default()).unwrap();
+        assert_eq!(outs[FINAL_OUTPUT_KEY], every_null, "the stamped empty order leaves every column in place");
+        let err = apply_with_outputs(&column_spec(Some("o")), &wide_batch(), Some(&order_outputs(vec![]))).unwrap_err().to_string();
+        assert!(err.contains("from='o' produced 0 indices but batch has 4 numeric columns"), "{err}");
     }
 }

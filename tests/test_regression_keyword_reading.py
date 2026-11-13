@@ -29,6 +29,7 @@ from ferrum.encoding import Color, X, Y
 from ferrum.plots.regression import _SMOOTH_ROUTED_METHODS, _VALID_METHODS
 
 from _svg_extents import axis_tick_labels
+from tests.test_null_group_warning import FIT_FEW_POINTS, _panel_fit_message, _render_capturing
 
 _METHODS = sorted(_VALID_METHODS)
 
@@ -762,18 +763,27 @@ def test_degenerate_data_behaves_the_same_with_shorthand(xy_df):
 
 def test_degenerate_data_behaves_the_same_with_a_shorthand_facet_column(xy_df):
     """``col="g:N"`` behaves the same as ``col="g"`` on degenerate data:
-    zero rows refuses with the same ``ValueError`` text (the facet layout
-    sees no column either way), and one row renders byte-identical, with
-    the same degraded-fit warning.
+    zero rows draw the empty frame the row facet draws, with the same
+    messages and the same svg, and one row renders byte-identical, with the
+    same degraded-fit warning.
     """
     empty = xy_df.filter(pl.col("v") > 1000.0)
     one_row = xy_df.head(1)
 
-    with pytest.raises(ValueError) as bare_excinfo:
-        fm.lmplot(empty, x="v", y="w", ci=None, col="g").to_svg()
-    with pytest.raises(ValueError) as typed_excinfo:
-        fm.lmplot(empty, x="v", y="w", ci=None, col="g:N").to_svg()
-    assert str(bare_excinfo.value) == str(typed_excinfo.value)
+    bare_empty, bare_shown = _render_capturing(
+        lambda: fm.lmplot(empty, x="v", y="w", ci=None, col="g").to_svg()
+    )
+    typed_empty, typed_shown = _render_capturing(
+        lambda: fm.lmplot(empty, x="v", y="w", ci=None, col="g:N").to_svg()
+    )
+    row_empty, row_shown = _render_capturing(
+        lambda: fm.lmplot(empty, x="v", y="w", ci=None, row="g").to_svg()
+    )
+    # The column facet draws what the row facet draws on the same frame, shorthand or not: the
+    # fit's degrade text (it names an empty panel value, ``g=``) and one svg.
+    degraded = _panel_fit_message("Smooth", FIT_FEW_POINTS, panel="g=")
+    assert bare_shown == typed_shown == row_shown == [degraded]
+    assert bare_empty == typed_empty == row_empty
 
     with pytest.warns(UserWarning) as bare_record:
         bare = fm.lmplot(one_row, x="v", y="w", ci=None, col="g").to_svg()

@@ -37,7 +37,7 @@ use arrow::record_batch::RecordBatch;
 use crate::layout::TextAnchor;
 use crate::render::arrow_cast::col_as_ordinal_category_str;
 use crate::render::draw::{
-    col_as_f64, col_as_positional_category_str, col_as_str, resolve_contrast_fill_color,
+    col_as_f64, col_as_str, resolve_contrast_fill_color,
     resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, PaintSource,
 };
 use crate::render::format::{format_numeric, format_value_with_spec, Temporality};
@@ -400,7 +400,7 @@ fn value_angles(ctx: &DrawCtx<'_>, placement: &PolarLabels<'_>) -> Option<RowAng
     };
     let turn = |pixel: f64| scene_build::polar_projection_turn(channel, pixel, &area) * std::f64::consts::TAU;
     if matches!(scale, ScaleKind::Ordinal(_)) {
-        let categories = col_as_positional_category_str(ctx.batch, placement.theta_field).ok()?;
+        let categories = col_as_ordinal_category_str(ctx.batch, placement.theta_field).ok()?;
         let angles = categories.iter().map(|c| scale.to_pixel_str(c.as_deref()?).map(&turn)).collect();
         Some(RowAngles { angles, fallback_labels: categories })
     } else {
@@ -489,22 +489,21 @@ fn cartesian_anchors(ctx: &DrawCtx<'_>) -> Option<LabelAnchors> {
     let x_ordinal = matches!(ctx.scales.x, ScaleKind::Ordinal(_));
     let y_ordinal = matches!(ctx.scales.y, ScaleKind::Ordinal(_));
 
-    // The ordinal reads use `col_as_positional_category_str`, the same reader
-    // `point`/`bar`/`tick`/`rule` use for an ordinal positional channel (NF-A3,
-    // spec §4.4 — swept 2026-09-02). `col_as_str` errors on every non-`Utf8`
+    // The ordinal reads use `col_as_ordinal_category_str`, the same reader
+    // `point`/`bar`/`tick`/`rule` use for an ordinal positional channel.
+    // `col_as_str` errors on every non-`Utf8`
     // dtype and the `.ok()` swallowed it, so an `Int*`/`Float*`/`Bool` category
     // column on an ordinal axis left BOTH halves `None` and `build` took the
     // `return empty()` below — every label silently dropped from an otherwise
-    // intact panel. Identical on `Utf8` apart from a null row, which now lands
-    // in the FA-9 null band like every other positional mark's does.
+    // intact panel. A null row has no category and places no label.
     let xs_f: Option<Vec<Option<f64>>> =
         if !x_ordinal { col_as_f64(ctx.batch, xf).ok() } else { None };
     let xs_s: Option<Vec<Option<String>>> =
-        if x_ordinal { col_as_positional_category_str(ctx.batch, xf).ok() } else { None };
+        if x_ordinal { col_as_ordinal_category_str(ctx.batch, xf).ok() } else { None };
     let ys_f: Option<Vec<Option<f64>>> =
         if !y_ordinal { col_as_f64(ctx.batch, yf).ok() } else { None };
     let ys_s: Option<Vec<Option<String>>> =
-        if y_ordinal { col_as_positional_category_str(ctx.batch, yf).ok() } else { None };
+        if y_ordinal { col_as_ordinal_category_str(ctx.batch, yf).ok() } else { None };
 
     let n_x = match (&xs_f, &xs_s) {
         (Some(v), _) => v.len(),

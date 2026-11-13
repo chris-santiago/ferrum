@@ -2,6 +2,7 @@ import polars as pl
 
 from ferrum import Chart
 from ferrum._direct_label import _direct_label_endpoint
+from tests.test_null_group_warning import _null_key_dropped_message
 
 
 def test_direct_label_endpoint_emits_text_at_max_x_per_series():
@@ -28,13 +29,12 @@ def test_direct_label_endpoint_bails_when_label_field_missing():
     assert "_direct_label_text" not in chart._data.columns
 
 
-def test_direct_label_endpoint_skips_null_group_values(recwarn):
+def test_direct_label_endpoint_drops_and_counts_null_group_values(recwarn):
     """#220 sibling defect: a null ``label_field`` value (e.g. an injected
     sentinel row) must not reach ``pl.col(label_field) == series``, which
     always evaluates to null in polars and warns "Comparisons with None
-    always result in null". The null group's single row is also the one
-    series too short to draw, so the render names it (``split=null (one
-    point)``)."""
+    always result in null". The null group's single row belongs to no group,
+    so the line mark drops it and counts it once."""
     df = pl.DataFrame(
         {
             "x": [1, 2, 3, 1, 2, 3, 1],
@@ -47,9 +47,6 @@ def test_direct_label_endpoint_skips_null_group_values(recwarn):
     svg = chart.to_svg()
     assert ">train<" in svg
     assert ">val<" in svg
-    user_warnings = [w for w in recwarn.list if issubclass(w.category, UserWarning)]
-    expected = (
-        "layer 0: mark_line: mark_line() joins two or more points per series, "
-        "so it did not draw split=null (one point)"
-    )
-    assert [str(w.message) for w in user_warnings] == [expected]
+    assert [str(w.message) for w in recwarn.list] == [
+        _null_key_dropped_message("mark_line", 1, "split")
+    ]

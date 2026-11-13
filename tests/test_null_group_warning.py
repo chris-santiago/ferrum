@@ -214,43 +214,56 @@ def test_a_group_null_on_both_axes_names_both_channels():
     ]
 
 
-def test_a_band_axis_null_drawn_in_the_null_band_stays_silent_same_field():
-    """A null category occupies a band exactly when some null-category row
-    of the batch carries a present value on the paired channel; the group
-    that lands there draws into it and stays silent, never "absent"."""
+def test_a_band_axis_null_is_dropped_and_counted_once_when_it_is_also_the_color_field():
+    """A null category belongs to no band, so its rows carrying a value are dropped and counted
+    once for the column, though the column is both the category and the color. The chart is the
+    one drawn from the other rows."""
     df = pl.DataFrame({"cat": ["a", "a", None, None], "val": [1.0, 2.0, 3.0, 4.0]})
-    chart = fm.Chart(df).mark_bar().encode(x="cat", y="val", color="cat")
-    svg, messages = _render_capturing(chart.to_svg)
-    assert messages == []
-    assert ">null<" in svg
+
+    def chart(frame: pl.DataFrame) -> fm.Chart:
+        return fm.Chart(frame).mark_bar().encode(x="cat", y="val", color="cat")
+
+    svg, messages = _render_capturing(chart(df).to_svg)
+    assert messages == [_null_key_dropped_message("mark_bar", 2, "cat")]
+    assert ">null<" not in svg
+    assert svg == _render_capturing(chart(df.head(2)).to_svg)[0]
 
 
 @pytest.mark.parametrize("mark_method", ["mark_bar", "mark_point"])
-def test_a_band_axis_null_drawn_in_the_null_band_stays_silent_brief_fixture(mark_method: str):
+def test_a_band_axis_null_is_dropped_and_counted_with_the_group_it_empties(mark_method: str):
+    """Group ``c`` holds only the null-category rows, so dropping them leaves no ``c`` rows: the
+    chart is the one drawn from the other rows, with no ``null`` band and no ``c`` entry."""
     df = pl.DataFrame(
         {"x": [None, None, "p", "q"], "y": [1.0, 2.0, 3.0, 4.0], "g": ["c", "c", "a", "a"]}
     )
-    chart = getattr(fm.Chart(df), mark_method)().encode(x="x:N", y="y", color="g")
-    svg, messages = _render_capturing(chart.to_svg)
-    assert messages == []
-    assert ">null<" in svg
+
+    def chart(frame: pl.DataFrame) -> fm.Chart:
+        return getattr(fm.Chart(frame), mark_method)().encode(x="x:N", y="y", color="g")
+
+    svg, messages = _render_capturing(chart(df).to_svg)
+    assert messages == [_null_key_dropped_message(mark_method, 2, "x")]
+    assert ">null<" not in svg
+    assert svg == _render_capturing(chart(df.tail(2)).to_svg)[0]
 
 
-def test_a_single_axis_tick_null_category_draws_in_the_null_band():
-    """``mark_tick`` with only ``x`` bound has no paired channel at all, so
-    the null band is always occupied -- group ``c``'s null ``x`` draws a
-    tick in it rather than being reported absent."""
+def test_a_single_axis_tick_null_category_is_dropped_and_counted():
+    """``mark_tick`` with only ``x`` bound has no paired channel, so every row of a null
+    category would draw: those ticks are dropped and counted, never drawn in a ``null`` band."""
     df = pl.DataFrame({"x": [1.0, 2.0, None, None], "g": ["a", "a", "c", "c"]})
-    chart = fm.Chart(df).mark_tick().encode(x="x:N", color="g")
-    svg, messages = _render_capturing(chart.to_svg)
-    assert messages == []
-    assert ">null<" in svg
+
+    def chart(frame: pl.DataFrame) -> fm.Chart:
+        return fm.Chart(frame).mark_tick().encode(x="x:N", color="g")
+
+    svg, messages = _render_capturing(chart(df).to_svg)
+    assert messages == [_null_key_dropped_message("mark_tick", 2, "x")]
+    assert ">null<" not in svg
+    assert svg == _render_capturing(chart(df.head(2)).to_svg)[0]
 
 
 def test_a_band_axis_null_with_no_null_band_is_named_paired_null():
-    """Group ``c``'s ``x`` and ``y`` are both null on every row, so no row
-    anywhere occupies the null band for it: the band is unoccupied and the
-    group is absent, named on both channels."""
+    """Group ``c``'s ``x`` and ``y`` are both null on every row, so no row of it
+    places anything: the mark drops no row (a row with no value belongs to no
+    category it could be drawn in) and the group is absent, named on both channels."""
     df = pl.DataFrame(
         {"x": ["p", "p", None, None], "y": [1.0, 2.0, None, None], "g": ["a", "a", "c", "c"]}
     )
@@ -261,22 +274,24 @@ def test_a_band_axis_null_with_no_null_band_is_named_paired_null():
     ]
 
 
-def test_a_band_axis_null_with_no_null_band_is_named_declared_domain():
-    """An explicit ``BandScale`` domain that omits ``None`` gives the null
-    category no band to land in, so group ``c`` is absent even though its
-    ``y`` is present."""
+def test_a_null_category_beside_an_explicit_domain_is_dropped_before_the_domain_reads_it():
+    """The mark drops the null-category rows that carry a value before the explicit ``BandScale``
+    domain reads the rows, so the count is the mark's and group ``c``, which held only those
+    rows, is gone: no census sentence names it."""
     df = pl.DataFrame(
         {"x": ["p", "p", None, None], "y": [1.0, 2.0, 3.0, 4.0], "g": ["a", "a", "c", "c"]}
     )
-    chart = (
-        fm.Chart(df)
-        .mark_bar()
-        .encode(x=fm.X("x", scale=fm.BandScale(domain=["p", "q"])), y="y", color="g")
-    )
-    svg, messages = _render_capturing(chart.to_svg)
-    assert messages == [
-        "mark_bar: every row of g=c has a null or non-finite x, so it draws nothing"
-    ]
+
+    def chart(frame: pl.DataFrame) -> fm.Chart:
+        return (
+            fm.Chart(frame)
+            .mark_bar()
+            .encode(x=fm.X("x", scale=fm.BandScale(domain=["p", "q"])), y="y", color="g")
+        )
+
+    svg, messages = _render_capturing(chart(df).to_svg)
+    assert messages == [_null_key_dropped_message("mark_bar", 2, "x")]
+    assert svg == _render_capturing(chart(df.head(2)).to_svg)[0]
 
 
 @pytest.mark.parametrize(
@@ -1006,11 +1021,16 @@ def _whole_fit_message(statistic: str, reason: str) -> str:
 
 
 def _null_key_dropped_message(statistic: str, rows: int, column: str) -> str:
-    """The sentence a grouped statistic warns for ``rows`` rows whose grouping ``column`` is null,
-    which belong to no group and are dropped."""
+    """The sentence a grouped statistic, or a mark, warns for ``rows`` rows whose grouping
+    ``column`` is null, which belong to no group and are dropped. One row reads in the singular."""
+    noun, verb, belong, pronoun = (
+        ("row", "has", "belongs", "it was")
+        if rows == 1
+        else ("rows", "have", "belong", "they were")
+    )
     return (
-        f"{statistic}: {rows} rows have a null '{column}' and belong to no group, so they were "
-        f"dropped; fill or filter the nulls in '{column}'"
+        f"{statistic}: {rows} {noun} {verb} a null '{column}' and {belong} to no group, so "
+        f"{pronoun} dropped; fill or filter the nulls in '{column}'"
     )
 
 
@@ -1029,16 +1049,18 @@ def _all_keys_null_fallback_message(statistic: str, column: str) -> str:
     )
 
 
-def _all_keys_null_pooled_message(statistic: str, column: str) -> str:
-    """The sentence a statistic that pools a null key warns when ``column`` is null on every row:
-    the rows are one group with no label, so the chart keeps one ``null`` band."""
-    return _all_keys_null_prefix(statistic, column) + "all rows were treated as one unlabeled group"
-
-
 def _all_keys_null_prefix(statistic: str, column: str) -> str:
     return (
         f"{statistic}: every row has a null in its groupby key ({column}), so the data could "
         "not be split into groups; "
+    )
+
+
+def _not_drawn(entry: str, channel: str, field: str, mark: str) -> str:
+    """The notice that a binding on a channel no layer's ``mark`` draws was ignored."""
+    return (
+        f"{entry}: {channel} '{field}' has no effect: no layer's mark draws {channel} "
+        f"(this {mark} mark does not), so it gets no scale and no legend; it was ignored"
     )
 
 
@@ -1593,10 +1615,9 @@ def test_a_category_the_explicit_domain_omits_is_reported_by_the_domain_alone():
     assert render(["a", "b", "z"]) == [_slot_message("mark_point")]
 
 
-def test_a_null_category_that_draws_is_not_named_beside_an_empty_slot():
-    """A null category occupies a band when a row of it carries a value; its
-    rows draw there and stay silent. A real empty category beside it is still
-    named, and only it."""
+def test_a_null_category_is_dropped_and_an_empty_slot_beside_it_is_still_named():
+    """A null category belongs to no band: its rows carrying a value are dropped and counted, not
+    drawn. A real empty category beside it is still named as a slot, and only it."""
     only_null = pl.DataFrame(
         {"c": [None, None, "a", "a"], "w": [1.0, 2.0, 3.0, 4.0]},
         schema={"c": pl.Utf8, "w": pl.Float64},
@@ -1604,8 +1625,8 @@ def test_a_null_category_that_draws_is_not_named_beside_an_empty_slot():
     svg, messages = _render_capturing(
         fm.Chart(only_null).mark_point().encode(x="c:N", y="w").to_svg
     )
-    assert messages == []
-    assert ">null<" in svg
+    assert messages == [_null_key_dropped_message("mark_point", 2, "c")]
+    assert ">null<" not in svg
 
     beside_empty = pl.DataFrame(
         {"c": [None, None, "a", "a", "z", "z"], "w": [1.0, 2.0, 3.0, 4.0, None, None]},
@@ -1614,8 +1635,11 @@ def test_a_null_category_that_draws_is_not_named_beside_an_empty_slot():
     svg, messages = _render_capturing(
         fm.Chart(beside_empty).mark_point().encode(x="c:N", y="w").to_svg
     )
-    assert messages == [_slot_message("mark_point")]
-    assert ">null<" in svg
+    assert messages == [
+        _null_key_dropped_message("mark_point", 2, "c"),
+        _slot_message("mark_point"),
+    ]
+    assert ">null<" not in svg
 
 
 def test_a_null_category_with_no_band_is_not_a_slot():
@@ -1640,34 +1664,34 @@ def test_a_null_category_with_no_band_is_not_a_slot():
     assert ">n<" in svg
 
 
-def test_a_null_category_is_a_slot_when_another_layer_opened_the_null_band():
-    """The axis places a null band when a row of a null category carries a
-    value in any layer that draws it. Layer 0's null-category rows draw, so the
-    band exists; layer 1's are all unplaced, so it draws nothing in a band the
-    reader sees, and layer 1 names it. With layer 1's null-category rows drawn
-    too, nothing is empty."""
-    opened = pl.DataFrame(
+def test_a_null_category_is_never_a_slot_whatever_another_layer_drew():
+    """No layer draws a null band: each layer drops the null-category rows that carry a value and
+    counts them on its own entry. A layer whose null-category rows carry no value places nothing
+    there, so the null category is not a slot for it and nothing is named."""
+    first = pl.DataFrame(
         {"c": ["a", "a", None, None], "w": [1.0, 2.0, 3.0, 4.0]},
         schema={"c": pl.Utf8, "w": pl.Float64},
     )
 
     def render(null_category_values: list[float | None]) -> tuple[str, list[str]]:
-        """Render layer 0 (``opened``) with a line layer whose null category holds these values."""
+        """Render layer 0 (``first``) with a line layer whose null category holds these values."""
         second = pl.DataFrame(
             {"c": ["a", "a", None, None], "w": [1.0, 2.0, *null_category_values]},
             schema={"c": pl.Utf8, "w": pl.Float64},
         )
-        points = fm.Chart(opened).mark_point().encode(x="c:N", y="w")
+        points = fm.Chart(first).mark_point().encode(x="c:N", y="w")
         line = fm.Chart(second).mark_line().encode(x="c:N", y="w")
         return _render_capturing((points + line).to_svg)
 
     svg, messages = render([None, None])
+    assert messages == [_null_key_dropped_message("mark_point", 2, "c")]
+    assert ">null<" not in svg
+    svg, messages = render([5.0, 6.0])
     assert messages == [
-        "layer 1: mark_line: every row of c=null has a null or non-finite y, so it draws nothing"
+        _null_key_dropped_message("mark_point", 2, "c"),
+        _null_key_dropped_message("mark_line", 2, "c"),
     ]
-    assert ">null<" in svg
-    _, control = render([5.0, 6.0])
-    assert control == []
+    assert ">null<" not in svg
 
 
 def _hue_group_frame() -> pl.DataFrame:

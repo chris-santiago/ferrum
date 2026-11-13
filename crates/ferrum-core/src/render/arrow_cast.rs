@@ -27,13 +27,12 @@ use arrow::record_batch::RecordBatch;
 
 use super::RenderError;
 
-/// Category label for a null value in an ordinal/nominal column (FA-9).
+/// The label a null category is named by where something must spell it: the
+/// census (`c=null`) and the temporal stack's bin for a null instant.
 ///
-/// A null row in a categorical column becomes its own distinct category under
-/// this label, so a null groupby key stays separate from a real `0`/`false`/`""`
-/// value all the way to the category scale. `distinct_values_in_order` and
-/// `col_as_ordinal_category_str` both use this constant, so the per-row band
-/// lookup matches the domain entry.
+/// A null row belongs to no category, so no band, domain entry or per-row
+/// category carries this label; a literal `"null"` string is a real category
+/// of its own and a true null never joins it.
 pub(crate) const NULL_CATEGORY: &str = "null";
 
 /// Authoritative predicate: true iff `dtype` is in the set that
@@ -386,7 +385,7 @@ pub(crate) fn col_as_temporal_epoch_str(
 /// `apply_stack` did not know about it at all, so a stacked time series raised.
 ///
 /// Nulls stay `None`, as in both underlying readers; a caller that needs them
-/// placed (e.g. into the [`NULL_CATEGORY`] band) maps them itself.
+/// binned (the stack) maps them itself.
 pub(crate) fn col_as_identity_key_str(
     batch: &RecordBatch,
     field: &str,
@@ -398,114 +397,6 @@ pub(crate) fn col_as_identity_key_str(
         // temporal fallback also declines.
         Err(category_err) => col_as_temporal_epoch_str(batch, field).map_err(|_| category_err),
     }
-}
-
-/// Does the [`NULL_CATEGORY`] band hold anything? — the occupancy rule
-/// [`distinct_positional_categories`] bands on (`#247`B).
-///
-/// **A band exists if and only if something is drawn in it.** Deliberately the
-/// same principle the gutter rule applies to axis chrome: structure that no
-/// content occupies is not structure, it is a hole. The ordinal band ladder's
-/// version of "something is drawn here" is "some row of this category places a
-/// mark", and for a null category that reduces to the paired positional channel:
-/// with a null on both x and y a point has no centre, a bar has no height, and a
-/// rect has no extent, so no mark of any kind is placed — yet the null claimed a
-/// band anyway, stealing width from every real category (`#247`B: a `Chart +
-/// Chart` merge concatenates the layer frames diagonally and manufactures rows of
-/// exactly that shape, one per row of the other layer).
-///
-/// `paired_positional` is the field bound on the **opposite** positional channel
-/// (`y` while resolving `x`, and vice versa) — NOT the `x2`/`y2` span partner
-/// that `build_axis_scale`'s `paired_enc` names.
-///
-/// Three ways to answer "occupied", all of which preserve the standing FA-9
-/// banding policy that a genuine null category keeps its band:
-///
-/// - **No paired channel bound** (a single-axis `mark_rule`/`mark_tick`) — there
-///   is no second coordinate that could be missing, so every null row draws and
-///   the band is occupied. Today's behavior stands.
-/// - **The paired field is absent from this batch** — the pairing cannot be read
-///   row-wise here, so the question is unanswerable and the band is kept rather
-///   than guessed away. A domain never loses a category to a lookup miss.
-/// - **Both readable** — occupied iff some null-category row carries a non-null
-///   paired value. That is the FA-9 case by construction: a null groupby key
-///   carries its aggregate, an authored null row carries its measure.
-///
-/// Nullness only, deliberately: a non-finite paired value (NaN/±inf) counts as
-/// occupancy here, because the marks still resolve it to a pixel (clamped or
-/// off-panel) rather than skip the row, and a band the renderer aims at must
-/// exist. Only a *null* means "this row has no value at all".
-fn null_category_band_is_occupied(
-    batch: &RecordBatch,
-    category_col: &dyn Array,
-    paired_positional: Option<&str>,
-) -> bool {
-    let Some(paired_col) = paired_positional.and_then(|f| batch.column_by_name(f)) else {
-        return true;
-    };
-    if paired_col.null_count() == 0 {
-        return true;
-    }
-    (0..category_col.len()).any(|i| category_col.is_null(i) && paired_col.is_valid(i))
-}
-
-/// Distinct categories for a **positional** (x:N / y:N) ordinal domain, with a
-/// null row surfaced as its own [`NULL_CATEGORY`] category (FA-9) when that band
-/// is occupied — see [`null_category_band_is_occupied`] for the rule and for
-/// what `paired_positional` is.
-///
-/// This is the positional counterpart to [`distinct_values_in_order`]. The base
-/// helper drops nulls — correct for color/shape/legend domains, where a null
-/// must NOT consume a palette slot or legend entry. Positional axes are
-/// different: a null groupby key (e.g. an aggregate's null group) must occupy
-/// its own band so the bar renders as a distinct category, satisfying the FA-9
-/// invariant that a null group and a real `0`/`false`/`""` group are two
-/// categories. Null-free columns are byte-identical to [`distinct_values_in_order`].
-pub(crate) fn distinct_positional_categories(
-    batch: &RecordBatch,
-    field: &str,
-    paired_positional: Option<&str>,
-) -> Result<Vec<String>, RenderError> {
-    let mut out = distinct_values_in_order(batch, field)?;
-    let col = batch
-        .column_by_name(field)
-        .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    // Append the null category (first-appearance order keeps it after real
-    // values, matching how the per-row mapper places it). `distinct_values_in_order`
-    // never emits NULL_CATEGORY for real values (no dtype stringifies to "null"
-    // except a literal Utf8 "null", which is an accepted edge-case merge).
-    if col.null_count() > 0
-        && !out.iter().any(|s| s == NULL_CATEGORY)
-        && null_category_band_is_occupied(batch, col.as_ref(), paired_positional)
-    {
-        out.push(NULL_CATEGORY.to_string());
-    }
-    Ok(out)
-}
-
-/// Per-row category strings for a **positional** (x:N / y:N) axis, mapping a
-/// null row to [`NULL_CATEGORY`] so it lands in the null band produced by
-/// [`distinct_positional_categories`] (FA-9).
-///
-/// The positional counterpart to [`col_as_ordinal_category_str`], which keeps
-/// nulls as `None` (correct for color/shape, where a null row draws no mark and
-/// no legend entry).
-///
-/// Unconditional, unlike the domain side: when the null band is unoccupied and
-/// [`distinct_positional_categories`] therefore omits it, the [`NULL_CATEGORY`]
-/// string this returns simply misses the domain and the scale lookup yields no
-/// pixel, so the row places no mark. That is the same outcome the row already had
-/// (it had no paired coordinate to place against) reached one step earlier, which
-/// is why the two functions need no shared predicate between them.
-pub(crate) fn col_as_positional_category_str(
-    batch: &RecordBatch,
-    field: &str,
-) -> Result<Vec<Option<String>>, RenderError> {
-    let per_row = col_as_ordinal_category_str(batch, field)?;
-    Ok(per_row
-        .into_iter()
-        .map(|o| o.or_else(|| Some(NULL_CATEGORY.to_string())))
-        .collect())
 }
 
 /// A numeric extent folded over only the values on one side of zero
@@ -954,6 +845,9 @@ pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType) -> Result<(
             | DataType::Float32
             | DataType::Float64
             | DataType::Boolean
+            // A column with no dtype of its own has no value to key: it
+            // enumerates no category and keys every row to none.
+            | DataType::Null
     );
     if keyable {
         Ok(())
@@ -964,7 +858,7 @@ pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType) -> Result<(
 
 /// Enumerate distinct values in encounter order, stringified, from a column
 /// whose dtype is one of `Utf8`, `LargeUtf8`, `Int*`, `UInt*`, `Float32`,
-/// `Float64`, or `Boolean` — i.e. exactly the set
+/// `Float64`, `Boolean`, or `Null` (which has no value to enumerate) — i.e. exactly the set
 /// [`ensure_category_keyable`] admits. Returns `Err(UnsupportedDtype)` for any
 /// other dtype.
 ///
@@ -1009,6 +903,8 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
     } else if let Some(a) = col.as_any().downcast_ref::<Float32Array>() {
         // Same rule for Float32; widen to f64 first to reuse the same helper.
         for v in a.iter().flatten() { push(float_as_ordinal_str(v as f64)); }
+    } else if col.data_type() == &DataType::Null {
+        // Every value is null, so there is no category to enumerate.
     } else {
         // Non-Int64 integer variants — pandas/pyarrow users commonly have Int32, UInt8, etc.
         // Each arm stringifies the native value so downstream encoding treats them as nominal.
@@ -1408,14 +1304,9 @@ mod tests {
         // the color/shape domain helper drops nulls.
         assert_eq!(domain, vec!["2000", "2001", "1.5"]);
 
-        // FA-9: the positional variants surface the null as its own category so a
-        // null group renders a distinct x:N band. No paired positional channel is
-        // named, so `#247`B's occupancy rule cannot ask whether the band is empty
-        // and keeps it — the single-axis-mark case.
-        let pos_domain = distinct_positional_categories(&b, "yr", None).unwrap();
-        assert_eq!(pos_domain, vec!["2000", "2001", "1.5", NULL_CATEGORY]);
-        let pos_rows = col_as_positional_category_str(&b, "yr").unwrap();
-        assert_eq!(pos_rows[4], Some(NULL_CATEGORY.to_string()));
+        // A null row belongs to no category: it is not in the domain and its
+        // per-row category stays `None`, which places no pixel.
+        assert_eq!(per_row[4], None);
     }
 
     #[test]
@@ -1641,6 +1532,7 @@ mod tests {
         let field = Field::new("v", dtype.clone(), true);
         let schema = Arc::new(Schema::new(vec![field]));
         let col: Arc<dyn Array> = match dtype {
+            DataType::Null => A::new(arrow::array::NullArray::new(1)),
             DataType::Float64 => A::new(Float64Array::from(vec![Some(1.0f64)])),
             DataType::Float32 => A::new(arrow::array::Float32Array::from(vec![Some(1.0f32)])),
             DataType::Int64 => A::new(arrow::array::Int64Array::from(vec![Some(1i64)])),
@@ -1827,6 +1719,8 @@ mod tests {
             DataType::Float64,
             DataType::Float32,
             DataType::Boolean,
+            // A column with no dtype of its own: no category to enumerate.
+            DataType::Null,
             // Refused: not category keys. Timestamp is the live one — a
             // temporal column is a supported *numeric* dtype, so it reaches a
             // categorical color scale whenever the user declares `type="nominal"`.
@@ -1971,155 +1865,14 @@ mod tests {
             assert_eq!(domain.len(), 2, "{name}: the case must carry a duplicate to dedup");
             assert_eq!(per_row[3], None, "{name}: a null row must stay None for the base reader");
 
-            // The positional pair adds exactly one band for the null row and
-            // keys that row into it — the agreement `apply_stack` binds to. These
-            // one-column batches name no paired positional channel, so `#247`B's
-            // occupancy rule keeps the band and the agreement is unaffected.
-            let pos_domain = distinct_positional_categories(&batch, "v", None).unwrap();
-            let pos_rows = col_as_positional_category_str(&batch, "v").unwrap();
-            assert_eq!(
-                pos_domain,
-                [domain.as_slice(), &[NULL_CATEGORY.to_string()]].concat(),
-                "{name}: the positional ladder must be the base domain plus the null band"
-            );
-            for s in pos_rows.iter().flatten() {
-                assert!(
-                    pos_domain.contains(s),
-                    "{name}: per-row band {s:?} is absent from the ladder {pos_domain:?}"
-                );
-            }
         }
     }
 
-    // -----------------------------------------------------------------------
-    // #247B: the NULL_CATEGORY band is banded only when it is occupied.
-    //
-    // The unit-level half of the rule; the rendered observable (tick labels,
-    // band centres, bar widths, mark counts) is pinned in
-    // `tests/test_layer_merge_category_domain.py`, which is where the merge that
-    // manufactures unoccupied null rows in bulk can actually be built.
-    // -----------------------------------------------------------------------
-
-    /// A 4-row `(cat, val)` batch: three real categories plus one null category
-    /// whose paired value is `val3`.
-    fn paired_category_batch(val3: Option<f64>) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("cat", DataType::Utf8, true),
-            Field::new("val", DataType::Float64, true),
-        ]));
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![Some("a"), Some("b"), Some("c"), None])),
-                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0), val3])),
-            ],
-        )
-        .unwrap()
-    }
-
     #[test]
-    fn null_category_with_no_paired_value_claims_no_band() {
-        let b = paired_category_batch(None);
-        assert_eq!(
-            distinct_positional_categories(&b, "cat", Some("val")).unwrap(),
-            vec!["a", "b", "c"],
-            "a row null in BOTH positional channels places no mark, so its band would be empty"
-        );
-    }
-
-    #[test]
-    fn null_category_carrying_a_paired_value_keeps_its_band() {
-        let b = paired_category_batch(Some(4.0));
-        assert_eq!(
-            distinct_positional_categories(&b, "cat", Some("val")).unwrap(),
-            vec!["a", "b", "c", NULL_CATEGORY],
-            "the standing FA-9 policy: a null group with a real value is its own category"
-        );
-    }
-
-    #[test]
-    fn unoccupied_null_band_survives_an_unnameable_pairing() {
-        let b = paired_category_batch(None);
-        // Single-axis mark (`mark_rule().encode(x="cat")`): no second coordinate
-        // can be missing, so every null row draws and the band stands.
-        assert_eq!(
-            distinct_positional_categories(&b, "cat", None).unwrap(),
-            vec!["a", "b", "c", NULL_CATEGORY],
-            "with no paired channel bound the band is kept"
-        );
-        // Paired field named but absent from THIS batch: unanswerable here, so the
-        // band is kept rather than guessed away. A domain never loses a category
-        // to a lookup miss.
-        assert_eq!(
-            distinct_positional_categories(&b, "cat", Some("elsewhere")).unwrap(),
-            vec!["a", "b", "c", NULL_CATEGORY],
-            "an unreadable pairing must not silently delete a band"
-        );
-    }
-
-    #[test]
-    fn one_occupied_null_row_bands_for_all_of_them() {
-        // Two null-category rows, one with a value and one without. The band holds
-        // something, so it exists — the rule is existential over the null rows,
-        // not universal, which is exactly the merge's shape once a layer supplies
-        // a genuine null category of its own.
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("cat", DataType::Utf8, true),
-            Field::new("val", DataType::Float64, true),
-        ]));
-        let b = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec![Some("a"), None, None])),
-                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
-            ],
-        )
-        .unwrap();
-        assert_eq!(
-            distinct_positional_categories(&b, "cat", Some("val")).unwrap(),
-            vec!["a", NULL_CATEGORY],
-        );
-    }
-
-    #[test]
-    fn a_non_finite_paired_value_occupies_the_null_band() {
-        // NaN is not "no value": the marks still resolve it to a pixel rather
-        // than skip the row, so the band it aims at has to exist.
-        let b = paired_category_batch(Some(f64::NAN));
-        assert_eq!(
-            distinct_positional_categories(&b, "cat", Some("val")).unwrap(),
-            vec!["a", "b", "c", NULL_CATEGORY],
-        );
-    }
-
-    #[test]
-    fn a_null_free_category_column_is_unchanged_by_the_pairing() {
-        // The overwhelmingly common shape: no nulls in the category column at
-        // all, so the occupancy rule is never consulted and the ladder is
-        // byte-identical whatever the paired column holds.
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("cat", DataType::Utf8, false),
-            Field::new("val", DataType::Float64, true),
-        ]));
-        let b = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(StringArray::from(vec!["a", "b"])),
-                Arc::new(Float64Array::from(vec![None, None])),
-            ],
-        )
-        .unwrap();
-        assert_eq!(distinct_positional_categories(&b, "cat", Some("val")).unwrap(), vec!["a", "b"]);
-        assert_eq!(distinct_positional_categories(&b, "cat", None).unwrap(), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn a_literal_utf8_null_category_keeps_its_band_with_no_paired_value() {
-        // The accepted collision `distinct_positional_categories` documents: a
-        // real `"null"` STRING is a real category, so it bands off
-        // `distinct_values_in_order` and the occupancy rule never runs. Row 1 is
-        // both null-valued and spelled `"null"`; the band is the string's, not the
-        // null's.
+    fn a_literal_utf8_null_category_keeps_its_band_and_a_true_null_never_joins_it() {
+        // A real `"null"` STRING is a real category with its own band; a true
+        // null belongs to no category, so it neither adds a band nor is keyed
+        // into the string's.
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
@@ -2128,14 +1881,15 @@ mod tests {
             schema,
             vec![
                 Arc::new(StringArray::from(vec![Some("a"), Some("null"), None])),
-                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0)])),
             ],
         )
         .unwrap();
+        assert_eq!(distinct_values_in_order(&b, "cat").unwrap(), vec!["a", "null"]);
         assert_eq!(
-            distinct_positional_categories(&b, "cat", Some("val")).unwrap(),
-            vec!["a", NULL_CATEGORY],
-            "one band, spelled by the real string; the unoccupied null does not add a second"
+            col_as_ordinal_category_str(&b, "cat").unwrap(),
+            vec![Some("a".to_string()), Some("null".to_string()), None],
+            "the true null stays None, never the literal's band"
         );
     }
 

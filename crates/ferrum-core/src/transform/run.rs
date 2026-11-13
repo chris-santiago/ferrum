@@ -133,6 +133,11 @@ pub(crate) struct PassedStep {
     /// fit warnings, so a group the log warning already names is not also
     /// named as null.
     pub(crate) log_emptied: Vec<LogEmptied>,
+    /// Whether the step's partition pools a whole-batch fallback when every
+    /// grouping key is null ([`TransformSpec::pools_null_keys`]): its output
+    /// then keeps a null key on purpose, so the render's mark-level null-key
+    /// drop leaves the fields it grouped by alone.
+    pub(crate) pools_null_keys: bool,
 }
 
 /// What a run records beside one published batch ([`apply_transforms_named`]).
@@ -627,6 +632,7 @@ impl<'s> Run<'s, '_> {
             step: StepInstance::Chain(id.clone()),
             groupby: step_ctx.groupby.clone(),
             log_emptied: step_log_emptied.clone(),
+            pools_null_keys: spec.pools_null_keys(),
         };
         for (key, batch) in spec.secondary_outputs(&current.batch, &result, &step_ctx)? {
             let mut lineage = after(Lineage { swarm: None, ..forked(&current, own.clone(), &step_log_input) });
@@ -713,6 +719,7 @@ impl<'s> Run<'s, '_> {
             step: StepInstance::Composed(copy.group.clone()),
             groupby: step_ctx.groupby.clone(),
             log_emptied: Vec::new(),
+            pools_null_keys: copy.step.pools_null_keys(),
         };
         match spec_name(&copy.step) {
             Some(name) => {
@@ -1079,12 +1086,12 @@ mod tests {
         let (_, lineages) = apply_transforms_named(&spec, &rows(), &TransformContext::default()).unwrap();
         assert_eq!(
             lineages["f1"].steps,
-            vec![PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![], log_emptied: vec![] }],
+            vec![PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![], log_emptied: vec![], pools_null_keys: false }],
             "the named step's own output records its own step and its (empty) grouping"
         );
         assert_eq!(
             lineages[FINAL_OUTPUT_KEY].steps,
-            vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone(), log_emptied: vec![] }],
+            vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone(), log_emptied: vec![], pools_null_keys: false }],
             "the tail never ran the named step, so it only records its own (the count's) step and grouping"
         );
 
@@ -1093,8 +1100,8 @@ mod tests {
         assert_eq!(
             lineages[FINAL_OUTPUT_KEY].steps,
             vec![
-                PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![], log_emptied: vec![] },
-                PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone(), log_emptied: vec![] },
+                PassedStep { step: StepInstance::Chain(vec![0]), groupby: vec![], log_emptied: vec![], pools_null_keys: false },
+                PassedStep { step: StepInstance::Chain(vec![1]), groupby: g.clone(), log_emptied: vec![], pools_null_keys: false },
             ],
             "two unnamed steps in sequence each add their own step and grouping, in order"
         );
@@ -1103,7 +1110,7 @@ mod tests {
         let (_, lineages) = apply_transforms_named(&spec, &rows(), &TransformContext::default()).unwrap();
         assert_eq!(
             lineages[FINAL_OUTPUT_KEY].steps[0],
-            PassedStep { step: StepInstance::Composed("f".to_string()), groupby: vec![], log_emptied: vec![] },
+            PassedStep { step: StepInstance::Composed("f".to_string()), groupby: vec![], log_emptied: vec![], pools_null_keys: false },
             "the composition copy's own step and (empty) grouping precede the count's"
         );
     }

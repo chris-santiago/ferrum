@@ -22,6 +22,8 @@ use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+use crate::transform::context::TransformContext;
+use crate::transform::group_key::{report_skipped_null_keys, NullKeyCounts, NullKeyPolicy};
 use crate::transform::numeric_util::{coerce_to_float64, numeric_column_indices};
 use crate::transform::vocabulary::Vocabulary;
 
@@ -39,6 +41,13 @@ pub(crate) struct LinkageSpec {
     pub standard_scale: Option<StdScaleAxis>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
+    /// The column that labels each row (a clustermap's row labels). With it
+    /// set, a row whose label is null belongs to no row and is left out of
+    /// the matrix on either axis (its values must not move a column order
+    /// either), reported as every `Skip` statistic reports a null key. The
+    /// label column itself is never a feature.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub labels: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,9 +158,16 @@ const LINKAGE_REFS: &str = include_str!("fixtures/linkage_refs.json");
 /// warning.
 ///
 /// Returns (n_rows, n_features, flat row-major Vec<f64>).
-fn extract_matrix(batch: &RecordBatch) -> PyResult<(usize, usize, Vec<f64>)> {
+///
+/// `rows` restricts the matrix to those rows of `batch` (the rows whose label
+/// is not null), and `label` names a column that is never a feature.
+fn extract_matrix(
+    batch: &RecordBatch,
+    rows: Option<&[usize]>,
+    label: Option<&str>,
+) -> PyResult<(usize, usize, Vec<f64>)> {
     let schema = batch.schema();
-    let feature_cols: Vec<Float64Array> = numeric_column_indices(&schema, "linkage")?
+    let feature_cols: Vec<Float64Array> = feature_column_indices(&schema, label, "linkage")?
         .into_iter()
         .map(|i| coerce_to_float64(batch.column(i), "linkage", schema.field(i).name()))
         .collect::<PyResult<_>>()?;
@@ -160,12 +176,13 @@ fn extract_matrix(batch: &RecordBatch) -> PyResult<(usize, usize, Vec<f64>)> {
             "linkage: input must have at least one numeric column",
         ));
     }
-    let n_rows = batch.num_rows();
+    let kept: Vec<usize> = rows.map(<[usize]>::to_vec).unwrap_or_else(|| (0..batch.num_rows()).collect());
+    let n_rows = kept.len();
     let n_cols = feature_cols.len();
     let mut mat = vec![0.0f64; n_rows * n_cols];
     for (feat_idx, arr) in feature_cols.iter().enumerate() {
-        for row in 0..n_rows {
-            mat[row * n_cols + feat_idx] = arr.value(row);
+        for (out_row, &row) in kept.iter().enumerate() {
+            mat[out_row * n_cols + feat_idx] = arr.value(row);
         }
     }
     Ok((n_rows, n_cols, mat))
@@ -342,6 +359,77 @@ fn dfs_recurse(
 // ---------- Apply ----------
 
 pub(crate) fn apply(spec: &LinkageSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// The rows of `batch` whose `labels` value is not null, in input order. The
+/// label is read only for its nulls, so a column of any dtype serves; a
+/// missing one is refused in the keyword's own name.
+fn labelled_rows(batch: &RecordBatch, labels: &str) -> PyResult<Vec<usize>> {
+    let column = batch
+        .column_by_name(labels)
+        .ok_or_else(|| PyValueError::new_err(format!("linkage: labels column '{labels}' not found")))?;
+    let nulls = column.logical_nulls();
+    Ok((0..batch.num_rows()).filter(|&row| nulls.as_ref().is_none_or(|n| n.is_valid(row))).collect())
+}
+
+/// The numeric columns that are features: every column
+/// [`numeric_column_indices`] selects except `label`, the column naming each
+/// row, which is never clustered. `Linkage` and the column `Reorder` that
+/// reads its order share this one rule.
+pub(crate) fn feature_column_indices(
+    schema: &Schema,
+    label: Option<&str>,
+    context: &str,
+) -> PyResult<Vec<usize>> {
+    Ok(numeric_column_indices(schema, context)?
+        .into_iter()
+        .filter(|&i| Some(schema.field(i).name().as_str()) != label)
+        .collect())
+}
+
+/// What a `Linkage` with `labels` stamps on the schema of its `order` table so
+/// a `Reorder` reading it knows the label column and the rows the linkage read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkageOrderMeta {
+    pub(crate) label: String,
+    pub(crate) rows: usize,
+}
+
+const ORDER_LABEL_KEY: &str = "__linkage_labels__";
+const ORDER_ROWS_KEY: &str = "__linkage_rows__";
+
+impl LinkageOrderMeta {
+    /// The stamp on an `order` batch, or `None` when it has none (a
+    /// `Linkage` without `labels`, or a batch no `Linkage` wrote).
+    pub(crate) fn read(batch: &RecordBatch) -> Option<Self> {
+        let schema = batch.schema();
+        let meta = schema.metadata();
+        Some(Self { label: meta.get(ORDER_LABEL_KEY)?.clone(), rows: meta.get(ORDER_ROWS_KEY)?.parse().ok()? })
+    }
+
+    fn schema(&self) -> Arc<Schema> {
+        let metadata = std::collections::HashMap::from([
+            (ORDER_LABEL_KEY.to_string(), self.label.clone()),
+            (ORDER_ROWS_KEY.to_string(), self.rows.to_string()),
+        ]);
+        Arc::new(Schema::new_with_metadata(schema_from(ORDER_COLUMNS).fields().clone(), metadata))
+    }
+}
+
+/// The empty batch of `columns`' schema.
+fn empty_batch(columns: &[(&str, DataType)]) -> RecordBatch {
+    RecordBatch::new_empty(schema_from(columns))
+}
+
+/// [`apply`] with a context: with `labels` set, the rows whose label is null
+/// are left out of the clustering and reported through the context's sink; a
+/// frame whose every label is null warns and returns no rows.
+pub(crate) fn apply_with_context(
+    spec: &LinkageSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     // Validate preprocessing flags.
     if spec.z_score.is_some() && spec.standard_scale.is_some() {
         return Err(PyValueError::new_err(
@@ -349,8 +437,27 @@ pub(crate) fn apply(spec: &LinkageSpec, batch: &RecordBatch) -> PyResult<RecordB
         ));
     }
 
+    let kept = match &spec.labels {
+        Some(labels) => {
+            let kept = labelled_rows(batch, labels)?;
+            report_skipped_null_keys(
+                batch,
+                std::slice::from_ref(labels),
+                "linkage",
+                NullKeyPolicy::Skip,
+                NullKeyCounts { any_null: batch.num_rows() - kept.len(), fully_null: 0, n_rows: batch.num_rows() },
+                ctx,
+            );
+            Some(kept)
+        }
+        None => None,
+    };
+    if kept.as_ref().is_some_and(|rows| rows.is_empty()) && batch.num_rows() > 0 {
+        return Ok(empty_batch(LINKAGE_COLUMNS));
+    }
+
     // Extract matrix.
-    let (n_rows, n_feat, mut mat) = extract_matrix(batch)?;
+    let (n_rows, n_feat, mut mat) = extract_matrix(batch, kept.as_deref(), spec.labels.as_deref())?;
 
     // Axis transposition: if Columns, treat each column as an observation.
     let (n_obs, n_feat_for_dist) = match spec.axis {
@@ -478,10 +585,31 @@ fn schema_from(columns: &[(&str, DataType)]) -> Arc<Schema> {
 /// schema [node_id: Int64, left: Int64, right: Int64, distance: Float64, n_obs: Int64].
 /// We reconstruct the dendrogram tree directly from those columns rather than
 /// re-running the full distance computation.
+///
+/// `input` is the batch `apply` clustered: with `labels` set on the row axis,
+/// the leaves are the rows whose label is not null, so `order`'s
+/// `original_idx` is mapped back to the rows of `input` a reader can take.
+/// A frame with no labelled row publishes every table empty.
 pub(crate) fn secondary_outputs(
     spec: &LinkageSpec,
+    input: &RecordBatch,
     linkage_batch: &RecordBatch,
 ) -> PyResult<Vec<(String, RecordBatch)>> {
+    let meta = spec.labels.as_ref().map(|label| LinkageOrderMeta { label: label.clone(), rows: input.num_rows() });
+    let order_schema = meta.as_ref().map_or_else(|| schema_from(ORDER_COLUMNS), LinkageOrderMeta::schema);
+    if linkage_batch.num_rows() == 0 {
+        return Ok(secondary_keys(spec, [
+            linkage_batch.clone(),
+            RecordBatch::new_empty(order_schema),
+            empty_batch(COORDS_COLUMNS),
+            empty_batch(SEGMENTS_COLUMNS),
+        ]));
+    }
+    // The rows the row axis clustered, to map leaf indices back.
+    let kept: Option<Vec<usize>> = match (&spec.labels, spec.axis) {
+        (Some(labels), LinkageAxis::Rows) => Some(labelled_rows(input, labels)?),
+        _ => None,
+    };
     // Extract steps from the linkage batch.
     let n_steps = linkage_batch.num_rows();
     // n = n_obs, and n_steps = n - 1, so n = n_steps + 1.
@@ -522,10 +650,10 @@ pub(crate) fn secondary_outputs(
     let mut orig_idxs = Vec::with_capacity(n);
     let mut new_idxs = Vec::with_capacity(n);
     for (pos, &orig) in leaf_order.iter().enumerate() {
-        orig_idxs.push(orig as i64);
+        let original = kept.as_ref().map_or(orig, |rows| rows[orig]);
+        orig_idxs.push(original as i64);
         new_idxs.push(pos as i64);
     }
-    let order_schema = schema_from(ORDER_COLUMNS);
     let order_batch = RecordBatch::try_new(
         order_schema,
         vec![
@@ -631,23 +759,19 @@ pub(crate) fn secondary_outputs(
     )
     .map_err(|e| PyValueError::new_err(format!("linkage segments: {e}")))?;
 
-    // Build output keys based on the naming convention.
-    let name = spec.name.as_deref();
-    let (key_linkage, key_order, key_coords, key_segments) = (
-        crate::transform::registry::secondary_key(name, LINKAGE_KEY),
-        crate::transform::registry::secondary_key(name, ORDER_KEY),
-        crate::transform::registry::secondary_key(name, COORDS_KEY),
-        crate::transform::registry::secondary_key(name, SEGMENTS_KEY),
-    );
-
     // We also publish the linkage batch itself under the explicit key so that named
     // transforms have a stable key alongside the three derived outputs.
-    Ok(vec![
-        (key_linkage, linkage_batch.clone()),
-        (key_order, order_batch),
-        (key_coords, coords_batch),
-        (key_segments, segments_batch),
-    ])
+    Ok(secondary_keys(spec, [linkage_batch.clone(), order_batch, coords_batch, segments_batch]))
+}
+
+/// The four secondary batches under the naming convention's keys.
+fn secondary_keys(spec: &LinkageSpec, batches: [RecordBatch; 4]) -> Vec<(String, RecordBatch)> {
+    let name = spec.name.as_deref();
+    [LINKAGE_KEY, ORDER_KEY, COORDS_KEY, SEGMENTS_KEY]
+        .into_iter()
+        .zip(batches)
+        .map(|(key, batch)| (crate::transform::registry::secondary_key(name, key), batch))
+        .collect()
 }
 
 // ---------- PyO3 wrapper ----------
@@ -688,6 +812,15 @@ use crate::transform::core::TransformSpec;
 ///     distances. Mutually exclusive with ``z_score``.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
+/// labels : str, optional
+///     The column that labels each row. A row whose label is null belongs
+///     to no row: it is left out of the clustering on either axis, counted
+///     and warned like every grouped statistic's null key, and ``order``'s
+///     ``original_idx`` indexes the original rows. The label column is never
+///     a feature. A column of any dtype; only its nulls are read. The
+///     ``order`` table records the label column and the rows read, so a
+///     ``Reorder`` reading it leaves the label column out of the columns it
+///     permutes too. Without ``labels`` every row clusters.
 ///
 /// Examples
 /// --------
@@ -708,6 +841,7 @@ impl PyLinkage {
         z_score = None,
         standard_scale = None,
         name = None,
+        labels = None,
     ))]
     fn new(
         method: &str,
@@ -716,6 +850,7 @@ impl PyLinkage {
         z_score: Option<&str>,
         standard_scale: Option<&str>,
         name: Option<String>,
+        labels: Option<String>,
     ) -> PyResult<Self> {
         let method = LinkageMethod::parse_or_refuse("method", method)
             .map_err(|e| PyValueError::new_err(format!("Linkage: {e}")))?;
@@ -760,14 +895,15 @@ impl PyLinkage {
             z_score,
             standard_scale,
             name,
+            labels,
         })))
     }
 
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Linkage(s) => format!(
-                "Linkage(method={:?}, metric={:?}, axis={:?}, z_score={:?}, standard_scale={:?}, name={:?})",
-                s.method, s.metric, s.axis, s.z_score, s.standard_scale, s.name,
+                "Linkage(method={:?}, metric={:?}, axis={:?}, z_score={:?}, standard_scale={:?}, name={:?}, labels={:?})",
+                s.method, s.metric, s.axis, s.z_score, s.standard_scale, s.name, s.labels,
             ),
             #[allow(unreachable_patterns)]
             _ => unreachable!(),
@@ -827,7 +963,7 @@ mod tests {
             metric: DistanceMetric::Euclidean,
             axis: LinkageAxis::Rows,
             z_score: None,
-            standard_scale: None,
+            standard_scale: None, labels: None,
             name: None,
         }
     }
@@ -903,7 +1039,7 @@ mod tests {
         assert_eq!(schema.field(0).data_type(), &DataType::Int64);
         assert_eq!(schema.field(3).data_type(), &DataType::Float64);
 
-        let secondaries = secondary_outputs(&spec, &primary).unwrap();
+        let secondaries = secondary_outputs(&spec, &batch, &primary).unwrap();
         assert_eq!(secondaries.len(), 4, "expected 4 secondary outputs");
         let keys: Vec<&str> = secondaries.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"linkage"));
@@ -925,7 +1061,7 @@ mod tests {
         // euclidean distance between (0,0) and (3,4) = 5.0
         assert!((distances[0] - 5.0).abs() < 1e-10, "distance: {}", distances[0]);
 
-        let secondaries = secondary_outputs(&spec, &primary).unwrap();
+        let secondaries = secondary_outputs(&spec, &batch, &primary).unwrap();
         let (_, seg_batch) = secondaries.iter().find(|(k, _)| k == "segments").unwrap();
         assert_eq!(seg_batch.num_rows(), 3, "n=2 should produce 3 segments");
         let (_, order_batch) = secondaries.iter().find(|(k, _)| k == "orders").unwrap_or_else(|| {
@@ -952,7 +1088,7 @@ mod tests {
         let batch = make_matrix_batch(&data, 3, 2);
         let spec_unnamed = ward_spec();
         let primary = apply(&spec_unnamed, &batch).unwrap();
-        let secondaries = secondary_outputs(&spec_unnamed, &primary).unwrap();
+        let secondaries = secondary_outputs(&spec_unnamed, &batch, &primary).unwrap();
         let keys: Vec<&str> = secondaries.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys.contains(&"linkage"), "unnamed should use bare 'linkage'");
         assert!(keys.contains(&"order"));
@@ -962,7 +1098,7 @@ mod tests {
         // Named convention.
         let spec_named = LinkageSpec { name: Some("clust".to_string()), ..ward_spec() };
         let primary2 = apply(&spec_named, &batch).unwrap();
-        let secondaries2 = secondary_outputs(&spec_named, &primary2).unwrap();
+        let secondaries2 = secondary_outputs(&spec_named, &batch, &primary2).unwrap();
         let keys2: Vec<&str> = secondaries2.iter().map(|(k, _)| k.as_str()).collect();
         assert!(keys2.contains(&"clust_linkage"), "named should prefix: {keys2:?}");
         assert!(keys2.contains(&"clust_order"));
@@ -977,7 +1113,7 @@ mod tests {
         let batch = make_matrix_batch(&data, 3, 2);
         let spec = LinkageSpec {
             z_score: Some(ZScoreAxis::Rows),
-            standard_scale: Some(StdScaleAxis::Rows),
+            standard_scale: Some(StdScaleAxis::Rows), labels: None,
             ..ward_spec()
         };
         let err = apply(&spec, &batch).unwrap_err();
@@ -1020,7 +1156,7 @@ mod tests {
             ..ward_spec()
         };
         let primary = apply(&spec, &batch).unwrap();
-        let secondaries = secondary_outputs(&spec, &primary).unwrap();
+        let secondaries = secondary_outputs(&spec, &batch, &primary).unwrap();
         let (_, seg_batch) = secondaries.iter().find(|(k, _)| k == "segments").unwrap();
         // 3*(n-1) = 3*2 = 6 segments.
         assert_eq!(seg_batch.num_rows(), 6);
@@ -1108,7 +1244,7 @@ mod tests {
                 metric,
                 axis: LinkageAxis::Rows,
                 z_score: None,
-                standard_scale: None,
+                standard_scale: None, labels: None,
                 name: None,
             };
 
@@ -1157,7 +1293,7 @@ mod tests {
             }
 
             // Order output must match scipy leaves_list.
-            let secondaries = secondary_outputs(&spec, &primary).unwrap_or_else(|e| {
+            let secondaries = secondary_outputs(&spec, &batch, &primary).unwrap_or_else(|e| {
                 panic!("secondary_outputs failed for {case_name}: {e}");
             });
             let (_, order_batch) = secondaries.iter().find(|(k, _)| k == "order").unwrap();
@@ -1179,7 +1315,7 @@ mod tests {
         let batch = make_matrix_batch(&data, 4, 2);
         let spec = ward_spec();
         let primary = apply(&spec, &batch).unwrap();
-        let secondaries = secondary_outputs(&spec, &primary).unwrap();
+        let secondaries = secondary_outputs(&spec, &batch, &primary).unwrap();
         let (_, coords_batch) = secondaries.iter().find(|(k, _)| k == "coords").unwrap();
         // 2n-1 = 7 for n=4.
         assert_eq!(coords_batch.num_rows(), 7);
@@ -1247,5 +1383,288 @@ mod tests {
         .unwrap();
         let err = apply(&ward_spec(), &batch).unwrap_err();
         assert!(err.to_string().contains("at least one numeric column"));
+    }
+
+    // ---------- labels: null-labelled rows are left out ----------
+
+    use arrow::array::StringArray;
+
+    /// Rows 0 to 3 labelled `a`, null, `b`, `c`; row 1 is far from the others.
+    fn labelled_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, true),
+            Field::new("f0", DataType::Float64, false),
+            Field::new("f1", DataType::Float64, false),
+            Field::new("f2", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("a"), None, Some("b"), Some("c")])),
+                Arc::new(Float64Array::from(vec![1.0, 100.0, 1.2, 5.0])),
+                Arc::new(Float64Array::from(vec![2.0, -100.0, 2.1, 9.0])),
+                Arc::new(Float64Array::from(vec![3.0, 50.0, 3.3, 1.0])),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn labelled_spec(axis: LinkageAxis) -> LinkageSpec {
+        LinkageSpec { axis, labels: Some("label".into()), ..ward_spec() }
+    }
+
+    fn warnings_of(ctx: &TransformContext) -> Vec<String> {
+        ctx.warnings.borrow().iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn null_labelled_rows_are_skipped_counted_and_the_order_indexes_the_original_rows() {
+        pyo3::Python::initialize();
+        let batch = labelled_batch();
+        let spec = labelled_spec(LinkageAxis::Rows);
+        let ctx = TransformContext::default();
+        let primary = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(primary.num_rows(), 2, "three labelled rows make two merges");
+        assert_eq!(
+            warnings_of(&ctx),
+            ["Linkage: 1 row has a null 'label' and belongs to no group, so it was dropped; fill or filter the nulls in 'label'"]
+        );
+        let secondaries = secondary_outputs(&spec, &batch, &primary).unwrap();
+        let order = &secondaries.iter().find(|(k, _)| k == "order").unwrap().1;
+        let mut original = col_i64(order, "original_idx");
+        assert_eq!(original.len(), 3);
+        original.sort_unstable();
+        assert_eq!(original, vec![0, 2, 3], "original_idx names rows of the original batch, never the skipped one");
+        assert_eq!(col_i64(order, "new_idx"), vec![0, 1, 2]);
+        let coords = &secondaries.iter().find(|(k, _)| k == "coords").unwrap().1;
+        assert_eq!(coords.num_rows(), 5, "coords and segments cover the three kept leaves");
+    }
+
+    #[test]
+    fn the_kept_rows_cluster_exactly_as_the_frame_without_the_null_row_does() {
+        pyo3::Python::initialize();
+        let batch = labelled_batch();
+        let with_labels = apply(&labelled_spec(LinkageAxis::Rows), &batch).unwrap();
+        let tail = RecordBatch::try_new(
+            batch.schema(),
+            batch.columns().iter().map(|c| arrow::compute::concat(&[&c.slice(0, 1), &c.slice(2, 2)]).unwrap()).collect(),
+        )
+        .unwrap();
+        let plain = apply(&ward_spec(), &tail.project(&[1, 2, 3]).unwrap()).unwrap();
+        assert_eq!(col_f64(&with_labels, "distance"), col_f64(&plain, "distance"));
+    }
+
+    #[test]
+    fn every_label_null_warns_once_and_returns_no_rows_anywhere() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, true),
+            Field::new("f0", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(StringArray::from(vec![None::<&str>, None, None])), Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]))],
+        )
+        .unwrap();
+        let spec = labelled_spec(LinkageAxis::Rows);
+        let ctx = TransformContext::default();
+        let primary = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(primary.num_rows(), 0);
+        assert_eq!(
+            warnings_of(&ctx),
+            ["Linkage: every row has a null in its groupby key (label), so the data could not be split into groups; the grouped output is empty"]
+        );
+        for (key, table) in secondary_outputs(&spec, &batch, &primary).unwrap() {
+            assert_eq!(table.num_rows(), 0, "{key}");
+        }
+    }
+
+    #[test]
+    fn every_label_null_on_the_column_axis_warns_and_publishes_empty_tables() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, true),
+            Field::new("f0", DataType::Float64, false),
+            Field::new("f1", DataType::Float64, false),
+            Field::new("f2", DataType::Float64, false),
+        ]));
+        let col = |v: Vec<f64>| -> Arc<dyn arrow::array::Array> { Arc::new(Float64Array::from(v)) };
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![None::<&str>, None])),
+                col(vec![1.0, 2.0]),
+                col(vec![3.0, 4.0]),
+                col(vec![5.0, 7.0]),
+            ],
+        )
+        .unwrap();
+        let spec = labelled_spec(LinkageAxis::Columns);
+        let ctx = TransformContext::default();
+        let primary = apply_with_context(&spec, &batch, &ctx).unwrap();
+        assert_eq!(primary.num_rows(), 0);
+        assert_eq!(warnings_of(&ctx).len(), 1, "the every-row sentence, once");
+        for (key, table) in secondary_outputs(&spec, &batch, &primary).unwrap() {
+            assert_eq!(table.num_rows(), 0, "{key}");
+        }
+    }
+
+    #[test]
+    fn without_labels_the_bytes_are_unchanged_and_a_label_column_with_no_null_changes_nothing() {
+        pyo3::Python::initialize();
+        let batch = labelled_batch();
+        let plain = apply(&ward_spec(), &batch).unwrap();
+        let features_only = apply(&ward_spec(), &batch.project(&[1, 2, 3]).unwrap()).unwrap();
+        assert_eq!(plain, features_only, "a string column is never a feature");
+        let no_nulls = RecordBatch::try_new(
+            batch.schema(),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "z", "b", "c"])),
+                batch.column(1).clone(),
+                batch.column(2).clone(),
+                batch.column(3).clone(),
+            ],
+        )
+        .unwrap();
+        let ctx = TransformContext::default();
+        let labelled = apply_with_context(&labelled_spec(LinkageAxis::Rows), &no_nulls, &ctx).unwrap();
+        assert_eq!(labelled, plain);
+        assert!(warnings_of(&ctx).is_empty());
+    }
+
+    #[test]
+    fn on_the_column_axis_the_null_labelled_rows_do_not_move_the_column_order() {
+        pyo3::Python::initialize();
+        // Columns f0 and f1 agree on the labelled rows and f2 differs; the null
+        // row makes f0 and f2 look alike, so it would change the order.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Utf8, true),
+            Field::new("f0", DataType::Float64, false),
+            Field::new("f1", DataType::Float64, false),
+            Field::new("f2", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("a"), Some("b"), None])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 100.0])),
+                Arc::new(Float64Array::from(vec![1.1, 2.1, -100.0])),
+                Arc::new(Float64Array::from(vec![9.0, 0.0, 100.0])),
+            ],
+        )
+        .unwrap();
+        let spec = labelled_spec(LinkageAxis::Columns);
+        let ctx = TransformContext::default();
+        let primary = apply_with_context(&spec, &batch, &ctx).unwrap();
+        let kept = batch.slice(0, 2);
+        let plain_spec = LinkageSpec { axis: LinkageAxis::Columns, ..ward_spec() };
+        let expected = apply(&plain_spec, &kept).unwrap();
+        assert_eq!(primary, expected, "the null-labelled row's values never reach the column clustering");
+        assert_eq!(
+            warnings_of(&ctx),
+            ["Linkage: 1 row has a null 'label' and belongs to no group, so it was dropped; fill or filter the nulls in 'label'"]
+        );
+        let order = secondary_outputs(&spec, &batch, &primary).unwrap().into_iter().find(|(k, _)| k == "order").unwrap().1;
+        let mut columns = col_i64(&order, "original_idx");
+        columns.sort_unstable();
+        assert_eq!(columns, vec![0, 1, 2], "column indices are the original columns");
+    }
+
+    #[test]
+    fn a_labels_column_the_batch_lacks_is_refused_naming_labels() {
+        pyo3::Python::initialize();
+        let spec = LinkageSpec { labels: Some("nope".into()), ..ward_spec() };
+        let err = apply(&spec, &labelled_batch()).unwrap_err().to_string();
+        assert_eq!(err, "ValueError: linkage: labels column 'nope' not found");
+    }
+
+    #[test]
+    fn a_label_column_of_any_dtype_is_read_for_its_nulls() {
+        use arrow::array::{Date32Array, DictionaryArray, TimestampMillisecondArray};
+        use arrow::datatypes::Int32Type;
+        pyo3::Python::initialize();
+        let base = labelled_batch();
+        let expected = apply(&labelled_spec(LinkageAxis::Rows), &base).unwrap();
+        let labels: [(&str, ArrayRef); 3] = [
+            ("Date32", Arc::new(Date32Array::from(vec![Some(1), None, Some(3), Some(4)]))),
+            ("Timestamp", Arc::new(TimestampMillisecondArray::from(vec![Some(1), None, Some(3), Some(4)]))),
+            ("Dictionary", Arc::new(vec![Some("a"), None, Some("b"), Some("c")].into_iter().collect::<DictionaryArray<Int32Type>>())),
+        ];
+        for (dtype, label) in labels {
+            let mut fields: Vec<Field> = base.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
+            fields[0] = Field::new("label", label.data_type().clone(), true);
+            let mut cols = base.columns().to_vec();
+            cols[0] = label;
+            let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap();
+            let ctx = TransformContext::default();
+            let got = apply_with_context(&labelled_spec(LinkageAxis::Rows), &batch, &ctx).unwrap();
+            assert_eq!(got, expected, "{dtype}");
+            assert_eq!(
+                warnings_of(&ctx),
+                ["Linkage: 1 row has a null 'label' and belongs to no group, so it was dropped; fill or filter the nulls in 'label'"],
+                "{dtype}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_numeric_label_column_is_never_a_feature() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("label", DataType::Int64, true),
+            Field::new("f0", DataType::Float64, false),
+            Field::new("f1", DataType::Float64, false),
+            Field::new("f2", DataType::Float64, false),
+        ]));
+        let col = |v: Vec<f64>| -> ArrayRef { Arc::new(Float64Array::from(v)) };
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![7, 3, 90, 1])), col(vec![1.0, 100.0, 1.2, 5.0]), col(vec![2.0, -100.0, 2.1, 9.0]), col(vec![3.0, 50.0, 3.3, 1.0])],
+        )
+        .unwrap();
+        let features = batch.project(&[1, 2, 3]).unwrap();
+        for axis in [LinkageAxis::Rows, LinkageAxis::Columns] {
+            let labelled = apply(&labelled_spec(axis), &batch).unwrap();
+            let plain = LinkageSpec { axis, ..ward_spec() };
+            assert_eq!(labelled, apply(&plain, &features).unwrap(), "{axis:?}: the label is not clustered");
+            assert_ne!(apply(&plain, &batch).unwrap(), labelled, "{axis:?}: control, unlabelled the id is a feature");
+        }
+    }
+
+    #[test]
+    fn a_labelled_order_records_its_label_and_the_rows_it_read() {
+        pyo3::Python::initialize();
+        let batch = labelled_batch();
+        for axis in [LinkageAxis::Rows, LinkageAxis::Columns] {
+            let spec = labelled_spec(axis);
+            let primary = apply(&spec, &batch).unwrap();
+            let order = secondary_outputs(&spec, &batch, &primary).unwrap().into_iter().find(|(k, _)| k == "order").unwrap().1;
+            assert_eq!(LinkageOrderMeta::read(&order), Some(LinkageOrderMeta { label: "label".into(), rows: 4 }), "{axis:?}");
+        }
+        let unlabelled = ward_spec();
+        let primary = apply(&unlabelled, &batch).unwrap();
+        let order = secondary_outputs(&unlabelled, &batch, &primary).unwrap().into_iter().find(|(k, _)| k == "order").unwrap().1;
+        assert_eq!(LinkageOrderMeta::read(&order), None);
+        assert!(order.schema().metadata().is_empty());
+        let every_null = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("label", DataType::Utf8, true), Field::new("f0", DataType::Float64, false)])),
+            vec![Arc::new(StringArray::from(vec![None::<&str>; 3])), Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0]))],
+        )
+        .unwrap();
+        let spec = labelled_spec(LinkageAxis::Rows);
+        let primary = apply(&spec, &every_null).unwrap();
+        let order = secondary_outputs(&spec, &every_null, &primary).unwrap().into_iter().find(|(k, _)| k == "order").unwrap().1;
+        assert_eq!(order.num_rows(), 0);
+        assert_eq!(LinkageOrderMeta::read(&order), Some(LinkageOrderMeta { label: "label".into(), rows: 3 }));
+    }
+
+    #[test]
+    fn labels_round_trips_through_the_wire_and_is_omitted_when_unset() {
+        let with = TransformSpec::Linkage(labelled_spec(LinkageAxis::Rows));
+        let json = serde_json::to_string(&with).unwrap();
+        assert!(json.contains(r#""labels":"label""#), "{json}");
+        assert_eq!(serde_json::from_str::<TransformSpec>(&json).unwrap(), with);
+        let without = serde_json::to_string(&TransformSpec::Linkage(ward_spec())).unwrap();
+        assert!(!without.contains("labels"), "{without}");
     }
 }

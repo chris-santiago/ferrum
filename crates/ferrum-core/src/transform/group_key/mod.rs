@@ -710,10 +710,10 @@ pub(crate) fn group_partition_multi(
 ///   [`NullKeyPolicy::FillFromWholeBatch`] its rows are fit (or filled)
 ///   pooled, not dropped, so they are not counted.
 ///
-/// Called by [`group_partition_multi`] for every skipping policy, and by
-/// `LetterValue`, whose partition pools a null `group` and drops the
-/// combinations holding a null on its `groupby` fields itself, reporting them
-/// here with its own counts under [`NullKeyPolicy::Skip`].
+/// Called by [`group_partition_multi`] for every skipping policy, and by the
+/// render's mark-level drop of rows with a null key on a drawn channel
+/// (`render::prepare::null_keys`), which reports its counts here under
+/// [`NullKeyPolicy::Skip`] with the layer's entry as the label.
 pub(crate) fn report_skipped_null_keys(
     batch: &RecordBatch,
     group_cols: &[String],
@@ -881,6 +881,8 @@ fn display_name_for_label(label: &str) -> &str {
         "stat_kde" => "Kde",
         "stat_qq" => "QQ",
         "stat_letter_value" => "LetterValue",
+        "stat_swarm" => "Swarm",
+        "linkage" => "Linkage",
         "data_impute" => "Impute",
         "data_window" => "DataWindow",
         // `robust.rs` already passes the Python-facing name as its `label`
@@ -954,7 +956,7 @@ fn warn_null_groupby_rows_dropped(
     warn_ctx: &TransformContext,
 ) {
     for field in fields {
-        let rows = batch.column_by_name(field).map_or(0, |column| column.null_count());
+        let rows = batch.column_by_name(field).map_or(0, |column| column.logical_null_count());
         if rows > 0 {
             warn_ctx.warn(TransformWarning::NullKeyRowsDropped {
                 scope: crate::transform::context::NullKeyScope::Groupby {

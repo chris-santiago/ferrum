@@ -1,14 +1,13 @@
 """A boxen whose group keys are null warns and draws what is left, on every door.
 
 ``LetterValue`` splits a boxen by its category and by every other grouping channel (``color``,
-``detail``, a caller's ``groupby``). A null category pools into one ``null`` band. A row with a
-null on any other grouping key belongs to no group and is dropped, as every grouped statistic
-drops it. When that drop removes every row the boxen draws its empty frame and says so with the
-shared sentence ``mark_density`` gives (``every row has a null in its groupby key (h), ...; the
-grouped output is empty``), instead of failing the whole chart. Faceted, the sentence is given
-once when every panel is emptied, and a panel alone emptied keeps its place beside the drop
-count. A drop that leaves groups keeps its count and draws them. A boxen with usable keys, and a
-boxen whose category alone is null, are unchanged.
+``detail``, a caller's ``groupby``). A row with a null on any of them belongs to no group and is
+dropped, as every grouped statistic drops it, the category included. When that drop removes every
+row the boxen draws its empty frame and says so with the shared sentence ``mark_density`` gives
+(``every row has a null in its groupby key (h), ...; the grouped output is empty``), instead of
+failing the whole chart. Faceted, the sentence is given once when every panel is emptied, and a
+panel alone emptied keeps its place beside the drop count. A drop that leaves groups keeps its
+count and draws them. A boxen with usable keys is unchanged.
 
 Net-new coverage for a mark, so it lives in its own module under the repo's test-file
 convention (see ``test_boxen_palette.py``). The empty frame an all-null boxen draws is compared
@@ -32,7 +31,6 @@ from tests.test_null_group_warning import (
     _NO_FACET_ROWS_WARNING,
     _NO_ROWS_TO_DRAW,
     _all_keys_null_message,
-    _all_keys_null_pooled_message,
     _layer_message,
     _null_key_dropped_message,
     _panel_message,
@@ -112,24 +110,24 @@ def _band_rects(svg: str) -> int:
     return mark_layer(svg).count("<rect")
 
 
-def _assert_empty_frame(svg: str, sibling_svg: str) -> None:
+def _assert_empty_frame(svg: str, sibling_svg: str, titles: tuple[str, ...] = ("c", "v")) -> None:
     """``svg`` draws the plot area, axes and titles ``sibling_svg`` draws, with no mark, no
-    legend entry and no hue title."""
+    legend entry and no hue title. ``titles`` are the axis titles both carry."""
     frames = mark_groups_by_frame(svg)
     assert frames, "no plot area was drawn"
     assert frames == mark_groups_by_frame(sibling_svg)
     assert all(content == "" for _, content in frames)
     assert text_runs(svg) == text_runs(sibling_svg)
-    assert {"c", "v"} <= set(text_runs(svg))
+    assert set(titles) <= set(text_runs(svg))
     assert ">h<" not in svg
 
 
-def _assert_plot_area(svg: str, panels: int = 1) -> None:
-    """``svg`` draws ``panels`` plot areas, each with no mark, and the ``c`` and ``v`` axis titles."""
+def _assert_plot_area(svg: str, panels: int = 1, titles: tuple[str, ...] = ("c", "v")) -> None:
+    """``svg`` draws ``panels`` plot areas, each with no mark, and the axis ``titles``."""
     frames = mark_groups_by_frame(svg)
     assert len(frames) == panels
     assert all(content == "" for _, content in frames)
-    assert {"c", "v"} <= set(text_runs(svg))
+    assert set(titles) <= set(text_runs(svg))
 
 
 def _chart_and_sibling(door: Callable[[pl.DataFrame, str], Any], df: pl.DataFrame):
@@ -152,7 +150,7 @@ def test_a_boxen_whose_every_hue_key_is_null_draws_its_empty_frame_and_names_the
     df = _NULL_HUE_FRAMES[frame]()
     boxen, box = _chart_and_sibling(_UNFACETED_DOORS[door], df)
     svg, shown = _render_capturing(boxen.to_svg)
-    assert shown == [_all_keys_null_message(_STATISTIC, "h"), _NO_ROWS_TO_DRAW]
+    assert shown == [_all_keys_null_message(_STATISTIC, "c, h"), _NO_ROWS_TO_DRAW]
     _assert_empty_frame(svg, _render_capturing(box.to_svg)[0])
 
 
@@ -176,7 +174,7 @@ def test_a_boxen_whose_hue_is_null_on_every_row_of_any_dtype_names_the_split_and
     df = _frame().with_columns(_NULL_HUE_DTYPES[dtype].alias("h"))
     chart = fm.Chart(df).mark_boxen().encode(x="c", y="v", color="h")
     svg, shown = _render_capturing((chart.facet("f") if faceted else chart).to_svg)
-    expected = [_all_keys_null_message(_STATISTIC, "h")]
+    expected = [_all_keys_null_message(_STATISTIC, "c, h")]
     assert shown == (expected if faceted else expected + [_NO_ROWS_TO_DRAW])
     assert _band_rects(svg) == 0
     _assert_plot_area(svg, 2 if faceted else 1)
@@ -198,7 +196,7 @@ def test_a_boxen_whose_hue_and_detail_nulls_together_cover_every_row_names_both_
     df = _frame(h=["x", "x", None, None] * 2, d=[None, None, "p", "q"] * 2)
     chart = fm.Chart(df).mark_boxen().encode(x="c", y="v", color="h", detail="d")
     svg, shown = _render_capturing(chart.to_svg)
-    assert shown == [_all_keys_null_message(_STATISTIC, "h, d"), _NO_ROWS_TO_DRAW]
+    assert shown == [_all_keys_null_message(_STATISTIC, "c, h, d"), _NO_ROWS_TO_DRAW]
     sibling = fm.Chart(df).mark_boxplot().encode(x="c", y="v", color="h", detail="d")
     _assert_empty_frame(svg, _render_capturing(sibling.to_svg)[0])
 
@@ -218,7 +216,7 @@ def test_a_faceted_boxen_whose_every_hue_key_is_null_names_the_split_once_and_dr
     df = _NULL_HUE_FRAMES[frame]()
     boxen, box = _chart_and_sibling(_FACETED_DOORS[door], df)
     svg, shown = _render_capturing(boxen.to_svg)
-    assert shown == [_all_keys_null_message(_STATISTIC, "h")]
+    assert shown == [_all_keys_null_message(_STATISTIC, "c, h")]
     assert len(mark_groups_by_frame(svg)) == 2
     assert {"F1", "F2"} <= set(text_runs(svg))
     _assert_empty_frame(svg, _render_capturing(box.to_svg)[0])
@@ -307,66 +305,95 @@ def test_a_faceted_boxen_panel_whose_valued_rows_all_have_a_null_hue_keeps_its_p
 
 
 # ---------------------------------------------------------------------------
-# The null category is not a group key: it pools into one band, as before
+# The null category is a group key: its rows are dropped, as every other key's are
 # ---------------------------------------------------------------------------
 
-_POOLED_C = _all_keys_null_pooled_message(_STATISTIC, "c")
+_ALL_NULL_C = _all_keys_null_message(_STATISTIC, "c")
 
-_POOLED_DOORS = {
+_CATEGORY_DOORS = {
     "mark": lambda df: fm.Chart(df).mark_boxen().encode(x="c", y="v"),
-    "facet": lambda df: fm.Chart(df).mark_boxen().encode(x="c", y="v").facet("f"),
     "catplot": lambda df: fm.catplot(df, x="c", y="v", kind="boxen"),
+}
+
+_FACETED_CATEGORY_DOORS = {
+    "facet": lambda df: fm.Chart(df).mark_boxen().encode(x="c", y="v").facet("f"),
     "catplot-col": lambda df: fm.catplot(df, x="c", y="v", col="f", kind="boxen"),
 }
 
 
-@pytest.mark.parametrize("door", sorted(_POOLED_DOORS))
-def test_a_boxen_whose_every_category_is_null_draws_one_null_band_and_names_the_pooling(
+@pytest.mark.parametrize("door", sorted(_CATEGORY_DOORS))
+def test_a_boxen_whose_every_category_is_null_warns_and_draws_its_empty_frame(door: str):
+    """No category is usable, so the boxen has no group: the empty-split and empty-chart sentences
+    and the frame its box sibling draws, with no ``null`` band."""
+    df = _frame(c=None)
+    svg, shown = _render_capturing(_CATEGORY_DOORS[door](df).to_svg)
+    assert shown == [_ALL_NULL_C, _NO_ROWS_TO_DRAW]
+    assert ">null<" not in svg
+    sibling = fm.Chart(df).mark_boxplot().encode(x="c", y="v")
+    _assert_empty_frame(svg, _render_capturing(sibling.to_svg)[0])
+
+
+@pytest.mark.parametrize("door", sorted(_FACETED_CATEGORY_DOORS))
+def test_a_faceted_boxen_whose_every_category_is_null_names_it_once_and_draws_every_panel(
     door: str,
 ):
-    svg, shown = _render_capturing(_POOLED_DOORS[door](_frame(c=None)).to_svg)
-    assert shown == [_POOLED_C]
-    assert ">null<" in svg
-    one_category = _render_capturing(_POOLED_DOORS[door](_frame(c=["a"] * 8)).to_svg)[0]
-    assert _band_rects(svg) == _band_rects(one_category) > 0
+    df = _frame(c=None)
+    svg, shown = _render_capturing(_FACETED_CATEGORY_DOORS[door](df).to_svg)
+    assert shown == [_ALL_NULL_C]
+    assert ">null<" not in svg
+    assert {"F1", "F2"} <= set(text_runs(svg))
+    _assert_plot_area(svg, 2)
+    assert _band_rects(svg) == 0
 
 
-def test_a_boxen_whose_every_category_is_null_gives_the_interactive_route_the_same_band():
+def test_a_boxen_whose_every_category_is_null_gives_the_interactive_route_the_static_warnings():
     """The interactive route renders at each of its two steps (``.interactive()`` and
-    ``to_html()``), so its warnings are the static route's, once per step, and the scene holds
-    the band's marks."""
-    chart = _POOLED_DOORS["mark"](_frame(c=None))
+    ``to_html()``), so its warnings are the static route's, once per step, and the scene holds no
+    mark and no ``null`` label."""
+    chart = _CATEGORY_DOORS["mark"](_frame(c=None))
     static = _render_capturing(chart.to_svg)[1]
-    assert static == [_POOLED_C]
+    assert static == [_ALL_NULL_C, _NO_ROWS_TO_DRAW]
     scene: dict[str, Any] = {}
 
     def build() -> str:
         interactive = chart.interactive()
-        scene.update(json.loads(interactive.scene_json))
+        scene["json"] = interactive.scene_json
         return interactive.to_html()
 
     assert _render_capturing(build)[1] == static + static
-    assert sum(len(b["nodes"]) for p in scene["panels"] for b in p["marks"]) > 0
+    panels = json.loads(scene["json"])["panels"]
+    assert sum(len(b["nodes"]) for p in panels for b in p["marks"]) == 0
+    assert '"null"' not in scene["json"]
 
 
-def test_a_boxen_whose_color_field_column_is_null_on_every_row_draws_one_null_band():
-    """``color_field=`` moves the category to ``h``, so its nulls pool as the category's do."""
+def test_a_boxen_whose_color_field_column_is_null_on_every_row_warns_and_draws_its_empty_frame():
+    """``color_field=`` moves the category to ``h``, so its nulls are dropped as the category's
+    are."""
     chart = fm.Chart(_frame(h=None)).mark_boxen(color_field="h").encode(x="c", y="v")
     svg, shown = _render_capturing(chart.to_svg)
-    assert shown == [_all_keys_null_pooled_message(_STATISTIC, "h")]
-    assert ">null<" in svg
-    one_category = fm.Chart(_frame(h=["x"] * 8)).mark_boxen(color_field="h").encode(x="c", y="v")
-    assert _band_rects(svg) == _band_rects(_render_capturing(one_category.to_svg)[0]) > 0
+    assert shown == [_all_keys_null_message(_STATISTIC, "h"), _NO_ROWS_TO_DRAW]
+    assert ">null<" not in svg
+    sibling_svg = _render_capturing(
+        fm.Chart(_frame(h=None)).mark_boxplot().encode(x="h", y="v").to_svg
+    )[0]
+    frames = mark_groups_by_frame(svg)
+    assert frames and all(content == "" for _, content in frames)
+    assert frames == mark_groups_by_frame(sibling_svg)
+    assert text_runs(svg) == text_runs(sibling_svg)
+    assert {"h", "v"} <= set(text_runs(svg)), (
+        "the category the colour field names is the axis title"
+    )
 
 
-def test_a_boxen_with_some_null_categories_draws_them_as_a_null_band_without_a_warning():
+def test_a_boxen_with_some_null_categories_drops_and_counts_them_and_draws_the_rest():
     df = _frame(c=["a", "a", "b", "b", "a", "a", None, None])
     svg, shown = _render_capturing(fm.Chart(df).mark_boxen().encode(x="c", y="v").to_svg)
-    assert shown == []
-    assert ">null<" in svg
-    three = _frame(c=["a", "a", "b", "b", "a", "a", "z", "z"])
-    three_svg = _render_capturing(fm.Chart(three).mark_boxen().encode(x="c", y="v").to_svg)[0]
-    assert _band_rects(svg) == _band_rects(three_svg) > 0
+    assert shown == [_null_key_dropped_message(_STATISTIC, 2, "c")]
+    assert ">null<" not in svg
+    kept = _render_capturing(fm.Chart(df.head(6)).mark_boxen().encode(x="c", y="v").to_svg)
+    assert kept[1] == []
+    assert svg == kept[0]
+    assert _band_rects(svg) > 0
 
 
 def test_a_nan_hue_is_a_key_of_its_own_and_is_not_dropped():
@@ -412,7 +439,7 @@ def test_a_caller_written_letter_value_step_whose_every_group_key_is_null_return
 
     df = _NULL_HUE_FRAMES[frame]()
     svg, shown = _render_capturing(chart(df).to_svg)
-    assert shown == [_all_keys_null_message(_STATISTIC, "h"), _NO_ROWS_TO_DRAW]
+    assert shown == [_all_keys_null_message(_STATISTIC, "c, h"), _NO_ROWS_TO_DRAW]
     zero_rows = _render_capturing(chart(df.head(0)).to_svg)[0]
     assert mark_groups_by_frame(svg) == mark_groups_by_frame(zero_rows)
     assert text_runs(svg) == text_runs(zero_rows)
@@ -450,7 +477,7 @@ def test_an_all_null_boxen_beside_another_chart_renders_with_its_warning_and_the
 ):
     build, leaf_messages = _COMPOSED_DOORS[door]
     svg, shown = _render_capturing(build(_all_null_boxen(), _points()).to_svg)
-    assert shown == [_all_keys_null_message(_STATISTIC, "h"), *leaf_messages]
+    assert shown == [_all_keys_null_message(_STATISTIC, "c, h"), *leaf_messages]
     assert mark_layer(svg).count("<circle") == len(_OTHER_ROWS)
     assert _band_rects(svg) == 0
     assert ">h<" not in svg and ">null<" not in svg
@@ -484,7 +511,7 @@ def test_an_all_null_boxen_gives_the_interactive_route_what_its_sibling_statisti
     density = route(fm.Chart(df).mark_density().encode(x="v", color="h"))
     kde = _all_keys_null_message("Kde", "h")
     assert kde in density
-    expected = [_all_keys_null_message(_STATISTIC, "h") if m == kde else m for m in density]
+    expected = [_all_keys_null_message(_STATISTIC, "c, h") if m == kde else m for m in density]
     assert route(fm.Chart(df).mark_boxen().encode(x="c", y="v", color="h")) == expected
 
 

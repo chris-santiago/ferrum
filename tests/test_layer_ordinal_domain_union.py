@@ -17,8 +17,9 @@ in the same place for the disjoint case and fail `partial_overlap` and
 `right_layer_first`.
 
 Scoped to the cross-layer union. The sibling module `test_layer_merge_category_domain.py`
-owns `#247`B (when a null claims the `null` band) and its policy controls; this
-module asserts the union preserves that rule rather than re-litigating it.
+owns `#247`B (the merge's padding opens no `null` band, and a null category belongs to no
+band) and its policy controls; this module asserts the union preserves that rule rather than
+re-litigating it.
 
 Two later sections extend the same subject from the wave-5 close review: which
 coordinate space a layer's column is read in when the LAYER carries its own
@@ -41,6 +42,7 @@ import ferrum as fm
 
 from _svg_extents import axis_tick_dash_label_pairs, axis_tick_labels, tick_along
 from _svg_rects import data_bar_rects, mark_layer, plot_rect
+from tests.test_null_group_warning import _null_key_dropped_message, _render_capturing
 
 LEFT = pl.DataFrame({"cat": ["a", "b", "c"], "val": [1.0, 2.0, 3.0]})
 #: Disjoint categories, and a value range well clear of LEFT's so a dropped
@@ -222,7 +224,7 @@ def test_disjoint_column_names_with_identical_categories_still_band_once():
 
 # ---------------------------------------------------------------------------
 # `#247`B's null rule, through the union. The union must not become a second way
-# to manufacture a `null` band, and must not suppress a genuine one.
+# to manufacture a `null` band, and must not let a genuine null category into the ladder.
 # ---------------------------------------------------------------------------
 
 
@@ -239,32 +241,31 @@ def test_the_merge_padding_still_bands_nothing_when_categories_are_disjoint():
     assert "null" not in axis_tick_labels(svg, axis="x")
 
 
-def test_a_genuine_null_in_the_right_layer_bands_and_draws():
-    """A null the RIGHT layer's own data supplies is not padding, and bands.
+def test_a_genuine_null_in_the_right_layer_is_dropped_and_counted_on_that_layer():
+    """A null the RIGHT layer's own data supplies is not padding, and belongs to no band.
 
-    This is the case the union makes reachable: before it, the right layer's
-    categories -- null included -- never reached the ladder at all. The layer
-    binds both positional channels, so `#247`B can tell its authored
-    null-with-a-value from the merge's padding, and does: one null band, and a
-    mark drawn in it.
+    The layer binds both positional channels, so `#247`B can tell its authored
+    null-with-a-value from the merge's padding, and does: the row is dropped and
+    counted on that layer, and the ladder gains no `null` band.
     """
     right = pl.DataFrame({"cat": ["x", None], "val": [40.0, 50.0]})
-    svg = (points(LEFT) + points(right)).to_svg()
+    svg, messages = _render_capturing((points(LEFT) + points(right)).to_svg)
 
-    assert axis_tick_labels(svg, axis="x") == ["a", "b", "c", "x", "null"]
-    # Five bands, five marks: three left, two right (the null-category row draws
-    # at the null band because it carries a real value).
-    assert circle_count(svg) == 5
+    assert messages == [_null_key_dropped_message("mark_point", 1, "cat")]
+    assert axis_tick_labels(svg, axis="x") == ["a", "b", "c", "x"]
+    # Four bands, four marks: three left, one right (the null-category row is dropped).
+    assert circle_count(svg) == 4
 
 
 def test_a_reference_line_layers_structural_nulls_open_no_band():
-    """A layer binding ONE positional channel cannot open the null band.
+    """A layer binding ONE positional channel counts no null category of its own.
 
     `mark_rule(y=…)` over a constant-injected column is one authored value in a
     column of structural nulls, with no opposite coordinate of its own -- it
     inherits the chart-level one, whose values say nothing about this layer's
-    rows. Judging the band against that inherited channel would open it and draw
-    a rule per null row. One rule is the answer.
+    rows. Judging those nulls against that inherited channel would count them as
+    rows the caller wrote and drop a rule per null row with a warning. One rule,
+    and no warning, is the answer.
     """
     frame = pl.DataFrame({"cat": ["a", "b", "c"], "val": [1.0, 2.0, 3.0]})
     chart = fm.Chart(frame).mark_bar().encode(x=fm.X("cat", type_="N"), y="val") + fm.Chart(

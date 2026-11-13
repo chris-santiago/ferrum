@@ -50,7 +50,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, KeyValue};
+use crate::transform::context::TransformContext;
+use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, report_skipped_null_keys, KeyValue, NullKeyCounts, NullKeyPolicy};
 use crate::transform::numeric_util::coerce_to_float64;
 
 fn default_point_size() -> f64 {
@@ -119,10 +120,20 @@ pub(crate) struct SwarmPacking<'a> {
 }
 
 pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    apply_with_context(spec, batch, &TransformContext::default())
+}
+
+/// [`apply`] with a context: the rows a null `dodge` value leaves in no
+/// sub-band are dropped and counted through the shared null-key reporter.
+pub(crate) fn apply_with_context(
+    spec: &SwarmSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
     let filtered;
     let batch = match &spec.dodge {
         Some(dodge_field) => {
-            filtered = drop_null_dodge_rows(batch, dodge_field)?;
+            filtered = drop_null_dodge_rows(batch, dodge_field, ctx)?;
             &filtered
         }
         None => batch,
@@ -151,8 +162,10 @@ pub(crate) fn apply(spec: &SwarmSpec, batch: &RecordBatch) -> PyResult<RecordBat
     Ok(batch.clone())
 }
 
-/// Validate the dodge column and drop the rows it leaves in no sub-band.
-fn drop_null_dodge_rows(batch: &RecordBatch, dodge_field: &str) -> PyResult<RecordBatch> {
+/// Validate the dodge column and drop the rows it leaves in no sub-band,
+/// reported through the shared null-key reporter: a count under the dodge
+/// field, or the every-row sentence when every row is null-keyed.
+fn drop_null_dodge_rows(batch: &RecordBatch, dodge_field: &str, ctx: &TransformContext) -> PyResult<RecordBatch> {
     let col = batch.column_by_name(dodge_field).ok_or_else(|| {
         PyValueError::new_err(format!("stat_swarm: dodge column '{}' not found", dodge_field))
     })?;
@@ -163,6 +176,14 @@ fn drop_null_dodge_rows(batch: &RecordBatch, dodge_field: &str) -> PyResult<Reco
     }
     let keep = arrow::compute::is_not_null(col.as_ref())
         .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge filter: {e}")))?;
+    report_skipped_null_keys(
+        batch,
+        &[dodge_field.to_string()],
+        "stat_swarm",
+        NullKeyPolicy::Skip,
+        NullKeyCounts { any_null: col.logical_null_count(), fully_null: 0, n_rows: batch.num_rows() },
+        ctx,
+    );
     arrow::compute::filter_record_batch(batch, &keep)
         .map_err(|e| PyValueError::new_err(format!("stat_swarm dodge filter: {e}")))
 }
@@ -612,9 +633,33 @@ mod tests {
         )
         .unwrap();
         let s = SwarmSpec { dodge: Some("grp".into()), ..spec(5.0, 1.0, SwarmSide::Both) };
-        let out = apply(&s, &b).unwrap();
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&s, &b, &ctx).unwrap();
         assert_eq!(out.num_rows(), 3, "the null-dodge row is dropped");
         assert_eq!(out, b.slice(0, 3), "every other row passes through unchanged");
+        let warnings: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            warnings,
+            ["Swarm: 1 row has a null 'grp' and belongs to no group, so it was dropped; fill or filter the nulls in 'grp'"]
+        );
+
+        // Every row null on the dodge: the shared every-row sentence.
+        let all_null = RecordBatch::try_new(
+            b.schema(),
+            vec![
+                b.column(0).clone(),
+                b.column(1).clone(),
+                Arc::new(StringArray::from(vec![None::<&str>; 4])),
+            ],
+        )
+        .unwrap();
+        let ctx = TransformContext::default();
+        assert_eq!(apply_with_context(&s, &all_null, &ctx).unwrap().num_rows(), 0);
+        let warnings: Vec<String> = ctx.warnings.borrow().iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            warnings,
+            ["Swarm: every row has a null in its groupby key (grp), so the data could not be split into groups; the grouped output is empty"]
+        );
     }
 
     #[test]

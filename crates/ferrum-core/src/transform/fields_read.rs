@@ -161,9 +161,9 @@ impl FieldsRead for QQSpec {
 }
 
 impl FieldsRead for LinkageSpec {
-    /// Every numeric column, none by name.
+    /// Every numeric column, none by name, and the label column when set.
     fn fields_read(&self) -> BTreeSet<String> {
-        BTreeSet::new()
+        set(self.labels.iter())
     }
 }
 

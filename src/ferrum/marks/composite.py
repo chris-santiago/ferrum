@@ -1065,17 +1065,16 @@ def _boxen_materialized_depth(
         dict.fromkeys([group_field, *(f for f in extra_groupby_fields if f in frame.columns)])
     )
 
-    # Mirror `letter_value::extract_values` exactly (quality-review S1,
-    # cycle 3): Rust drops a row when its VALUE is null or NaN, but keeps a
-    # null GROUP as its own group (BTreeMap keyed by `Option<String>`) --
-    # `drop_nulls()` over both columns previously did the opposite on both
-    # counts (dropped null-group rows, kept NaN values), which measurably
-    # overcounted a group's real size whenever its value column carried
-    # NaN (400 rows with 200 NaN estimated depth 5, Rust materializes 4).
+    # Mirror `letter_value::extract_values`: a row whose VALUE is null or NaN
+    # is dropped, and so is a row with a null in any group column (the
+    # category or a facet field), which belongs to no group. A NaN group key
+    # is not null, so it stays a group of its own. Counting a null-keyed row
+    # would size a group the transform never draws and flatten the ramp.
     value_col = pl.col(value_field)
     valid = value_col.is_not_null()
     if frame.schema[value_field] in (pl.Float32, pl.Float64):
         valid = valid & value_col.is_not_nan()
+    valid = valid & pl.all_horizontal([pl.col(name).is_not_null() for name in group_cols])
     try:
         sizes = (
             frame.select([*group_cols, value_field])
@@ -1346,8 +1345,8 @@ def desugar_boxen(
     # one: an empty band slot reads `group=z` where the caller bound `c`.
     # Carried through `groupby` instead, the key is also published under the
     # caller's own name in every batch (a `groupby` field equal to `group` adds
-    # no partition and keeps its null pooling), as desugar_boxplot carries its
-    # category, and every layer binds that column. `groupby` may not name one
+    # no partition; a null in it drops the row, as in any key column), as
+    # desugar_boxplot carries its category, and every layer binds that column. `groupby` may not name one
     # of the transform's own output columns (it refuses the field, since the
     # group column it appends would shadow the output), so a category named
     # like one keeps reading `group`; the live registry says which names.

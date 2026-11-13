@@ -2152,7 +2152,7 @@ pub(crate) fn apply_stack(
 
     // The category column is read through `arrow_cast::col_as_identity_key_str`,
     // the crate's one answer to "which value is this row" — the ordinal-category
-    // reader the band ladder is enumerated with (`distinct_positional_categories`
+    // reader the band ladder is enumerated with (`distinct_values_in_order`
     // produces exactly these strings, both delegating to
     // `col_as_ordinal_category_str`/`float_as_ordinal_str`), falling back to the
     // temporal epoch reader for `Timestamp`. Two rows therefore share a stack bin
@@ -2160,17 +2160,14 @@ pub(crate) fn apply_stack(
     // construction, and bin by exact instant where one does not (#184, category
     // half).
     //
-    // One asymmetry, deliberate (`#247`B): the ladder can omit the
-    // `NULL_CATEGORY` band when nothing is drawn in it, while the bins below are
-    // a partition of ROWS and always keep their null bin. It is the safe
-    // direction. A stack only rewrites the VALUE column, never the category, so
-    // an extra bin cannot move a real category's cumulative tops off its tick —
-    // the null bin's rows are precisely the rows no other bin contains, and each
-    // of them is one whose value was null (that is why the ladder dropped the
-    // band), so the segment it stacks is the zero-height one below and the
-    // scale lookup then places no mark for it at all. Giving the bins the
-    // ladder's occupancy rule would buy nothing and would make the stack's
-    // binning depend on the axis it does not read.
+    // A null category belongs to no category and the ladder holds no band for
+    // it, while the bins below are a partition of ROWS and keep one null bin.
+    // The mark-level null-key drop removes the rows that would have drawn into
+    // it before a stack runs; the rows it leaves (null on both channels, a
+    // merge's padding) stack a zero-height segment in that bin, which the
+    // scale lookup then places no mark for. A stack only rewrites the VALUE
+    // column, never the category, so the extra bin cannot move a real
+    // category's cumulative tops off its tick.
     //
     // The temporal arm is what makes a stacked time series render — an ordinary
     // `mark_area(position=Stack())` over a date x, which raised for every input
@@ -2191,7 +2188,7 @@ pub(crate) fn apply_stack(
     // Two `Float64` partitions differ from the old `to_bits` key, both toward
     // the ladder rather than away from it: `-0.0`/`0.0` (two bit patterns, one
     // band) now share a bin instead of stacking twice at one pixel, and a null
-    // category row keys to its own `NULL_CATEGORY` band instead of merging into
+    // category row keys to its own `NULL_CATEGORY` bin instead of merging into
     // the real `0.0` bin that `Float64Array::value` on a null used to return.
     // Existing `Utf8` stacks are byte-identical: their nulls used to key on the
     // `""` that `StringArray::value` returns, which partitioned them together
@@ -2214,9 +2211,8 @@ pub(crate) fn apply_stack(
             }
         })?
         .into_iter()
-        // A null category row bins under the `NULL_CATEGORY` label, which is the
-        // band `distinct_positional_categories` gives it (FA-9) — so a null
-        // group stacks in its own band rather than merging into the real `0.0`
+        // A null category row bins under the `NULL_CATEGORY` label, so a null
+        // group stacks in its own bin rather than merging into the real `0.0`
         // bin `Float64Array::value` returns for a null, and a null instant on a
         // temporal axis lands in one bin rather than several.
         .map(|c| c.unwrap_or_else(|| crate::render::arrow_cast::NULL_CATEGORY.to_string()))
@@ -4782,11 +4778,11 @@ mod tests {
     // hash of the bytes, and every other dtype was a typed `CategoryDtype`
     // refusal — so an `Int64` column declared `:N` raised "x column must be
     // Float64 or Utf8" while the identical column dodged, jittered and banded.
-    // It now keys through `arrow_cast::col_as_positional_category_str`, which is
-    // the reader the ordinal band ladder (`distinct_positional_categories`) is
-    // enumerated with, so the bins and the bands agree on which value is which.
-    // (Not on WHICH bands exist — see the `#247`B note in `apply_stack` for why
-    // an unoccupied null band the ladder omits still gets a row bin here.)
+    // It now keys through `arrow_cast::col_as_identity_key_str`, which reads
+    // the category as the ordinal band ladder (`distinct_values_in_order`) is
+    // enumerated, so the bins and the bands agree on which value is which.
+    // (Not on WHICH bands exist: a null category has no band but still gets a
+    // row bin here, see the note in `apply_stack`.)
     // -----------------------------------------------------------------------
 
     /// One 4-row category column per dtype the band ladder can enumerate, each
@@ -5016,17 +5012,10 @@ mod tests {
     /// pattern.
     ///
     /// `x = [0.0, -0.0, null, null]` is one band `"0"` (`float_as_ordinal_str`
-    /// formats both signed zeros as `"0"`) plus the `NULL_CATEGORY` band the
-    /// positional reader places a null row in — so `distinct_positional_categories`
-    /// enumerates `["0", "null"]`, two bands, and the cumulation must be two
-    /// bins: 10 → 30 in the first, 30 → 70 in the second.
-    ///
-    /// The premise below names `y` as the paired positional channel, which is
-    /// what the axis resolver passes for an `x` ladder, so `#247`B's occupancy
-    /// rule is exercised rather than sidestepped: both null-`x` rows carry a real
-    /// `y` (30, 40), so the null band is occupied and stays. Drop the `y` values
-    /// and the band goes — and those two rows would then draw nothing, which is
-    /// why binning them separately here costs the other bin nothing.
+    /// formats both signed zeros as `"0"`), and the two null rows form a bin of
+    /// their own, so the cumulation is two bins: 10 → 30 in the first, 30 → 70
+    /// in the second (a null category has no band, so the second bin's rows
+    /// place no mark; they never merge into the `0.0` bin).
     ///
     /// RED against the retired `to_bits` key, which answered a third thing
     /// again: `-0.0` keyed apart from `0.0` (one band, two bins — two segments
@@ -5051,10 +5040,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::render::arrow_cast::distinct_positional_categories(&batch, "x", Some("y"))
-                .unwrap(),
-            vec!["0".to_string(), "null".to_string()],
-            "premise: the ladder this stack must agree with has two bands here"
+            crate::render::arrow_cast::distinct_values_in_order(&batch, "x").unwrap(),
+            vec!["0".to_string()],
+            "premise: the ladder this stack must agree with has one band here, and a null has none"
         );
 
         let pos = PositionAdjust::Stack {

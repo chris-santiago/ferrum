@@ -37,8 +37,9 @@ pub(in crate::render) fn locate_field<'a>(field: &str, primary_batch: &'a Record
 }
 
 /// Where the batch a layer draws lives: the chart's data (the primary batch,
-/// joined on a faceted shared axis by the all-panels batch at
-/// [`FINAL_OUTPUT_KEY`]), the one named output its `data_source` names, a
+/// joined on a faceted shared axis by the all-panels batch at the key the
+/// source carries, [`FINAL_OUTPUT_KEY`] unless the null-key drop gave the
+/// layer rows of its own), the one named output its `data_source` names, a
 /// layer's own position-adjusted preview batch, or, for a member of an
 /// overlay group of leaves, the batch that member draws together with the
 /// [`OutputLineage`] the read's own key named before the group collapsed it
@@ -51,7 +52,12 @@ pub(in crate::render) fn locate_field<'a>(field: &str, primary_batch: &'a Record
 /// beside the merged frame).
 #[derive(Clone, Copy, PartialEq)]
 enum LayerSource<'a> {
-    Chart,
+    /// The chart's data, read panel by panel: carries the key holding its
+    /// all-panel rows. The panel's own rows are `primary_batch` for
+    /// [`FINAL_OUTPUT_KEY`], else the slice published under
+    /// [`crate::render::prepare::null_keys::panel_key`] (or, in a pass that
+    /// reads the whole chart, the all-panel rows themselves).
+    Chart(&'a str),
     Output(&'a str),
     Batch(&'a RecordBatch),
     Member(&'a RecordBatch, Option<&'a OutputLineage>),
@@ -59,7 +65,38 @@ enum LayerSource<'a> {
 
 impl<'a> LayerSource<'a> {
     fn of(layer: &'a Layer) -> Self {
-        layer.data_source.as_deref().map_or(LayerSource::Chart, LayerSource::Output)
+        match layer.data_source {
+            None => LayerSource::Chart(layer.rows_key()),
+            Some(_) => LayerSource::Output(layer.rows_key()),
+        }
+    }
+
+    /// The chart's final rows as a source: what an unlayered spec reads.
+    fn chart() -> LayerSource<'static> {
+        LayerSource::Chart(FINAL_OUTPUT_KEY)
+    }
+
+    /// Whether this source is the chart's data (read panel by panel).
+    fn is_chart(self) -> bool {
+        matches!(self, LayerSource::Chart(_))
+    }
+
+    /// The key a chart-data source's all-panel rows are published under;
+    /// [`FINAL_OUTPUT_KEY`] for every other source.
+    fn all_panel_key(self) -> &'a str {
+        match self {
+            LayerSource::Chart(key) => key,
+            _ => FINAL_OUTPUT_KEY,
+        }
+    }
+
+    /// A chart-data source's all-panel rows, `None` when nothing is
+    /// published under its key.
+    fn all_panel_rows<'b>(self, transform_outputs: &'b HashMap<String, RecordBatch>) -> Option<&'b RecordBatch>
+    where
+        'a: 'b,
+    {
+        transform_outputs.get(self.all_panel_key())
     }
 
     /// The batch itself, or `None` for an output nothing published (refused
@@ -73,7 +110,12 @@ impl<'a> LayerSource<'a> {
         'a: 'b,
     {
         match self {
-            LayerSource::Chart => Some(primary_batch),
+            LayerSource::Chart(FINAL_OUTPUT_KEY) => Some(primary_batch),
+            // A moved chart-data layer's panel rows: its slice, published
+            // beside its rows when the pass cuts panels, else the rows whole.
+            LayerSource::Chart(key) => transform_outputs
+                .get(crate::render::prepare::null_keys::panel_key(key).as_str())
+                .or_else(|| transform_outputs.get(key)),
             LayerSource::Output(key) => transform_outputs.get(key),
             LayerSource::Batch(batch) | LayerSource::Member(batch, _) => Some(batch),
         }
@@ -101,8 +143,7 @@ impl<'a> LayerSource<'a> {
     /// an already-collapsed [`LayerSource::Member`]).
     fn lineage_key(self) -> Option<&'a str> {
         match self {
-            LayerSource::Chart => Some(FINAL_OUTPUT_KEY),
-            LayerSource::Output(key) => Some(key),
+            LayerSource::Chart(key) | LayerSource::Output(key) => Some(key),
             LayerSource::Batch(_) | LayerSource::Member(..) => None,
         }
     }
@@ -132,7 +173,6 @@ enum TallyRead<'a> {
 
 /// One read of a layered axis's seed: the batch, and the fields a layer draws
 /// there on the axis: the value `field`, its paired `x2`/`y2` `span`, and the
-/// `opposite` positional field the ordinal null-band rule judges rows by.
 /// `inheritor` is the index of the later layer whose inherited field this
 /// read is, judged like that layer's own column; `None` for the bound field.
 /// `tally` is [`TallyRead`] for this seed's own layer's VALUE field;
@@ -146,7 +186,6 @@ struct SeedRead<'a> {
     field: &'a str,
     span: Option<&'a str>,
     span_tally: TallyRead<'a>,
-    opposite: Option<&'a str>,
     inheritor: Option<usize>,
 }
 
@@ -167,14 +206,14 @@ fn seed_reads<'a>(
     spec: &'a ChartSpec,
     layers: &'a [Layer],
     channel: &str,
-    bound: (&'a str, Option<&'a str>, Option<&'a str>),
+    bound: (&'a str, Option<&'a str>),
     reads: &AxisReads<'a>,
 ) -> Vec<SeedRead<'a>> {
-    let (field, span, opposite) = bound;
+    let (field, span) = bound;
     let Some((index, establisher)) = establishing_axis_layer(spec, layers, channel) else { return Vec::new() };
     let first = if index == 0 {
         let span = reads.span(index, span);
-        SeedRead { source: reads.source(index), tally: reads.tally(index), field, span, span_tally: reads.span_tally(index, span), opposite, inheritor: None }
+        SeedRead { source: reads.source(index), tally: reads.tally(index), field, span, span_tally: reads.span_tally(index, span), inheritor: None }
     } else {
         let drawn = drawn_channel_slots(spec, establisher, channel);
         let span = reads.span(index, span.and(drawn.span));
@@ -184,7 +223,6 @@ fn seed_reads<'a>(
             field,
             span,
             span_tally: reads.span_tally(index, span),
-            opposite: opposite.and(drawn.opposite),
             inheritor: None,
         }
     };
@@ -210,7 +248,6 @@ fn seed_reads<'a>(
             field,
             span,
             span_tally: reads.span_tally(index, span),
-            opposite: drawn.opposite,
             inheritor: Some(index),
         });
     }
@@ -379,8 +416,9 @@ fn axis_previews<'a>(
         // draws nothing on this channel, which already took the `None`
         // branches above or below.
         let field = drawn_channel_slots(spec, layer, channel).value;
-        let (result, layer_adjusted) = match LayerSource::of(layer) {
-            LayerSource::Chart => match preview(primary_batch)? {
+        let source = LayerSource::of(layer);
+        let (result, layer_adjusted) = match source {
+            LayerSource::Chart(_) => match preview(source.batch(primary_batch, transform_outputs).unwrap_or(primary_batch))? {
                 None => (None, None),
                 Some(rows) => {
                     // The all-panels preview of `FINAL_OUTPUT_KEY`, computed
@@ -391,7 +429,7 @@ fn axis_previews<'a>(
                     // `whole_frame_batch` picks `FINAL` over `primary_batch`,
                     // which happens on an independent facet and on no facet
                     // at all too (`field` published only in `FINAL`).
-                    let final_preview = match transform_outputs.get(FINAL_OUTPUT_KEY) {
+                    let final_preview = match source.all_panel_rows(transform_outputs) {
                         Some(all_panels) => preview(all_panels)?,
                         None => None,
                     };
@@ -432,8 +470,9 @@ fn axis_previews<'a>(
                     // same outcome `axis_batch`'s own handling of this case
                     // gives.
                     let tally_pair = field.and_then(|field| {
-                        let whole_frame = whole_frame_batch(primary_batch, transform_outputs, field);
-                        if std::ptr::eq(whole_frame, primary_batch) {
+                        let panel_rows = source.batch(primary_batch, transform_outputs).unwrap_or(primary_batch);
+                        let whole_frame = whole_frame_batch_at(panel_rows, transform_outputs, source.all_panel_key(), field);
+                        if std::ptr::eq(whole_frame, panel_rows) {
                             Some(crate::render::position::AdjustedRows { unadjusted: whole_frame, adjusted: rows, base })
                         } else {
                             final_preview.clone().map(|adjusted| crate::render::position::AdjustedRows { unadjusted: whole_frame, adjusted, base })
@@ -481,13 +520,13 @@ fn axis_previews<'a>(
 /// y axis rather than this one, so it draws nothing on the shared y.
 fn drawn_channel_slots<'a>(spec: &'a ChartSpec, layer: &'a Layer, channel: &str) -> ChannelSlots<'a> {
     use crate::spec::layer::PositionalChannel::{X, X2, Y, Y2};
-    let none = ChannelSlots { value: None, span: None, opposite: None };
+    let none = ChannelSlots { value: None, span: None };
     if channel == "y" && layer.independent_y {
         return none;
     }
-    let (value, span, opposite) = match (channel, layer_flips(layer, spec.coord.as_ref())) {
-        ("x", false) | ("y", true) => (X, X2, Y),
-        ("y", false) | ("x", true) => (Y, Y2, X),
+    let (value, span) = match (channel, layer_flips(layer, spec.coord.as_ref())) {
+        ("x", false) | ("y", true) => (X, X2),
+        ("y", false) | ("x", true) => (Y, Y2),
         _ => return none,
     };
     let completed = layer.completed_encoding(&spec.encoding);
@@ -497,7 +536,7 @@ fn drawn_channel_slots<'a>(spec: &'a ChartSpec, layer: &'a Layer, channel: &str)
         }
         c.slot(&layer.encoding).as_ref().or(c.slot(&spec.encoding).as_ref()).map(|e| e.field.as_str())
     };
-    ChannelSlots { value: field(value), span: field(span), opposite: field(opposite) }
+    ChannelSlots { value: field(value), span: field(span) }
 }
 
 /// The rows a data-aware sort of a layered `channel` aggregates over, and the
@@ -566,16 +605,31 @@ pub(in crate::render) fn layer_sort_rows<'a>(
     lineages: &'a OutputLineages,
     include_final: bool,
 ) -> Result<SortRows<'a>, RenderError> {
+    // A layer the null-key drop gave rows of its own reads them: a layer on
+    // another output reads them as that output, whole; a layer on the chart's
+    // data reads them as the chart's data, its all-panel rows when the sort
+    // spans every panel, else this panel's slice.
+    let (data_source, primary_batch, include_final) = match (layer.own_rows.as_deref(), layer.data_source.as_deref()) {
+        (Some(key), None) => {
+            let rows = match include_final {
+                true => transform_outputs.get(key),
+                false => transform_outputs.get(crate::render::prepare::null_keys::panel_key(key).as_str()).or_else(|| transform_outputs.get(key)),
+            };
+            (None, rows.unwrap_or(primary_batch), false)
+        }
+        (Some(key), Some(_)) => (Some(key), primary_batch, include_final),
+        (None, data_source) => (data_source, primary_batch, include_final),
+    };
     let batch = crate::render::prepare::pre_statistic_rows(
         layer_index,
-        layer.data_source.as_deref(),
+        data_source,
         lineages,
         primary_batch,
         transform_outputs,
         include_final,
     )?;
     let fallback =
-        crate::render::prepare::layer_final_rows(layer_index, layer.data_source.as_deref(), primary_batch, transform_outputs, include_final)?;
+        crate::render::prepare::layer_final_rows(layer_index, data_source, primary_batch, transform_outputs, include_final)?;
     Ok(SortRows {
         batch,
         fallback: Some(fallback),
@@ -836,8 +890,9 @@ impl<'a> AuxRead<'a> {
             return None;
         }
         let batch = match self.source {
-            LayerSource::Chart => {
-                super::shared_categorical_batch(primary_batch, self.field, transform_outputs, facet_shared)
+            LayerSource::Chart(key) => {
+                let panel = self.source.batch(primary_batch, transform_outputs)?;
+                super::shared_batch_at(panel, self.field, transform_outputs, facet_shared, key)
             }
             LayerSource::Output(_) | LayerSource::Batch(_) | LayerSource::Member(..) => {
                 self.source.batch(primary_batch, transform_outputs)?
@@ -857,7 +912,7 @@ impl<'a> AuxRead<'a> {
         'a: 'b,
     {
         match self.source {
-            LayerSource::Chart | LayerSource::Output(_) => transform_lineages.get(self.source.lineage_key()?),
+            LayerSource::Chart(_) | LayerSource::Output(_) => transform_lineages.get(self.source.lineage_key()?),
             LayerSource::Member(_, lineage) => lineage,
             LayerSource::Batch(_) => None,
         }
@@ -953,7 +1008,7 @@ impl<'a> AuxRead<'a> {
                 let Some(located) = self.source.locate(self.field, primary_batch, transform_outputs) else {
                     return Ok(None);
                 };
-                if facet_shared && self.source == LayerSource::Chart {
+                if facet_shared && self.source.is_chart() {
                     if let FacetExtentPolicy::GlobalAlone = policy {
                         // The all-panels column ALONE is
                         // the shared extent for a numeric auxiliary channel —
@@ -962,7 +1017,7 @@ impl<'a> AuxRead<'a> {
                         // panel via its own `(0.0, 1.0)` default. Falls back
                         // to the panel's own read when the global batch or
                         // the field is absent.
-                        if let Some(global_col) = transform_outputs.get(FINAL_OUTPUT_KEY).and_then(|b| b.column_by_name(self.field)) {
+                        if let Some(global_col) = self.source.all_panel_rows(transform_outputs).and_then(|b| b.column_by_name(self.field)) {
                             let global_extent = extent(global_col.as_ref(), self.field)?;
                             return Ok(Some(ReadExtent {
                                 extent: global_extent,
@@ -972,8 +1027,8 @@ impl<'a> AuxRead<'a> {
                     }
                 }
                 let mut read_extent = extent(located.col, self.field)?;
-                if facet_shared && self.source == LayerSource::Chart && policy == FacetExtentPolicy::UnionWithPanel {
-                    read_extent = super::union_panel_with_global_extent(read_extent, self.field, transform_outputs);
+                if facet_shared && self.source.is_chart() && policy == FacetExtentPolicy::UnionWithPanel {
+                    read_extent = super::union_panel_with_global_extent_at(read_extent, self.field, transform_outputs, self.source.all_panel_key());
                 }
                 Ok(Some(ReadExtent { extent: read_extent, has_values: located.col.null_count() != located.col.len() }))
             }
@@ -1151,7 +1206,7 @@ pub(in crate::render) fn raster_cell_reads<'a>(
                 undrawn(layer.mark, &layer.encoding, chart_encoding, style, layer.entry.as_deref(), LayerSource::of(layer), index)
             })
             .collect(),
-        None => undrawn(spec.mark, &spec.encoding, &spec.encoding, spec.mark_style.as_ref(), spec.entry.as_deref(), LayerSource::Chart, 0)
+        None => undrawn(spec.mark, &spec.encoding, &spec.encoding, spec.mark_style.as_ref(), spec.entry.as_deref(), LayerSource::chart(), 0)
             .into_iter()
             .collect(),
     }
@@ -1560,11 +1615,10 @@ pub(in crate::render) fn finite_sorted(values: impl IntoIterator<Item = f64>) ->
 }
 
 /// The positional bindings of one encoding for the post-flip `channel`: the
-/// value, its paired `x2`/`y2` span and the opposite channel's value.
+/// value and its paired `x2`/`y2` span.
 struct ChannelSlots<'a> {
     value: Option<&'a str>,
     span: Option<&'a str>,
-    opposite: Option<&'a str>,
 }
 
 /// `encoding`'s [`ChannelSlots`] for the post-flip `channel`, read through
@@ -1572,13 +1626,13 @@ struct ChannelSlots<'a> {
 fn channel_slots<'a>(encoding: &'a crate::spec::encoding::Encoding, flipped: bool, channel: &str) -> ChannelSlots<'a> {
     let field = |e: &'a Option<crate::spec::encoding::EncodingSpec>| e.as_ref().map(|e| e.field.as_str());
     let (x, y) = (
-        ChannelSlots { value: field(&encoding.x), span: field(&encoding.x2), opposite: field(&encoding.y) },
-        ChannelSlots { value: field(&encoding.y), span: field(&encoding.y2), opposite: field(&encoding.x) },
+        ChannelSlots { value: field(&encoding.x), span: field(&encoding.x2) },
+        ChannelSlots { value: field(&encoding.y), span: field(&encoding.y2) },
     );
     match (channel, flipped) {
         ("x", false) | ("y", true) => x,
         ("y", false) | ("x", true) => y,
-        _ => ChannelSlots { value: None, span: None, opposite: None },
+        _ => ChannelSlots { value: None, span: None },
     }
 }
 
@@ -2464,7 +2518,18 @@ pub(in crate::render) fn whole_frame_batch<'a>(
     outputs: &'a HashMap<String, RecordBatch>,
     field: &str,
 ) -> &'a RecordBatch {
-    outputs.get(FINAL_OUTPUT_KEY).filter(|b| b.column_by_name(field).is_some()).unwrap_or(primary)
+    whole_frame_batch_at(primary, outputs, FINAL_OUTPUT_KEY, field)
+}
+
+/// [`whole_frame_batch`] for a chart-data read whose all-panel rows are
+/// published under `key` (a layer the null-key drop gave rows of its own).
+fn whole_frame_batch_at<'a>(
+    primary: &'a RecordBatch,
+    outputs: &'a HashMap<String, RecordBatch>,
+    key: &str,
+    field: &str,
+) -> &'a RecordBatch {
+    outputs.get(key).filter(|b| b.column_by_name(field).is_some()).unwrap_or(primary)
 }
 
 /// Which of `spec.layers` [`numeric_domain_union_over`] reads beyond the bound
@@ -3026,10 +3091,17 @@ pub(in crate::render) fn numeric_domain_union_over(
                     TallyRead::ExtentOnly => {}
                 }
             }
-            Some(LayerSource::Chart) | None => {
-                let final_col = transform_outputs.get(FINAL_OUTPUT_KEY).and_then(|b| b.column_by_name(f));
+            Some(LayerSource::Chart(_)) | None => {
+                // The panel's rows and the key holding the all-panel rows of
+                // the chart's data this layer reads: `primary_batch` and
+                // `FINAL_OUTPUT_KEY`, or a moved layer's own cut of both.
+                let (primary_batch, global_key) = match source {
+                    Some(chart) => (chart.batch(primary_batch, transform_outputs).unwrap_or(primary_batch), chart.all_panel_key()),
+                    None => (primary_batch, FINAL_OUTPUT_KEY),
+                };
+                let final_col = transform_outputs.get(global_key).and_then(|b| b.column_by_name(f));
                 let final_batch = transform_outputs
-                    .get(FINAL_OUTPUT_KEY)
+                    .get(global_key)
                     .filter(|_| include_final && final_col.is_some());
                 // Consumed exactly once here: `plain_tally` and
                 // `adjusted_rows` cover every later read of `tally_read` in
@@ -3055,7 +3127,7 @@ pub(in crate::render) fn numeric_domain_union_over(
                     // `FINAL` is read for the tally.
                     take_extent_only(primary_batch, &mut found)?;
                     for (key, batch) in transform_outputs {
-                        let key_is_final = include_final && key == FINAL_OUTPUT_KEY;
+                        let key_is_final = include_final && key == global_key;
                         if key_is_final {
                             take_extent_only(batch, &mut found)?;
                         } else if source.is_none() && !primary_has {
@@ -3108,7 +3180,7 @@ pub(in crate::render) fn numeric_domain_union_over(
     let layers = spec.layers.as_deref().unwrap_or_default();
     let (previews, bases, layer_adjusted) = axis_previews(spec, layers, channel, primary_batch, transform_outputs, include_final, color)?;
     let reads = AxisReads::over(layers, &previews, bases, layer_adjusted);
-    let seeds: Vec<SeedRead<'_>> = seed_reads(spec, layers, channel, (field, paired_field, None), &reads);
+    let seeds: Vec<SeedRead<'_>> = seed_reads(spec, layers, channel, (field, paired_field), &reads);
     let mut seed_found: Vec<(SeedRead<'_>, bool)> = Vec::with_capacity(seeds.len());
     // Unlayered ([`ChartSpec::is_layered`]): with no layer there is no
     // seed, so the chart's one batch is the read. `adjusted` pairs the
@@ -3475,7 +3547,7 @@ pub(in crate::render) fn fold_log_input_into_tally(
 ///
 /// - `panel_batch` is the located per-panel batch the non-shared path uses.
 /// - When `include_final` is false this is byte-identical to
-///   [`crate::render::arrow_cast::distinct_positional_categories`] on
+///   [`crate::render::arrow_cast::distinct_values_in_order`] on
 ///   `panel_batch` — non-faceted and `Independent`-mode callers see no change.
 /// - When `include_final` is true (faceted, this channel resolves
 ///   `ResolveMode::Shared`) the domain is the union of the panel's categories
@@ -3489,13 +3561,6 @@ pub(in crate::render) fn fold_log_input_into_tally(
 /// Order semantics for the non-shared path are unchanged: it returns the
 /// per-panel first-appearance order untouched.
 ///
-/// `paired_positional` is the opposite positional channel's field, threaded
-/// straight through to [`crate::render::arrow_cast::distinct_positional_categories`]'s
-/// null-band occupancy rule (`#247`B) — see
-/// `arrow_cast::null_category_band_is_occupied`. It is resolved against each
-/// batch separately (panel and global), because absence in one says nothing about
-/// the other and a batch that cannot answer keeps the band.
-///
 /// Private to this module: [`positional_category_union`] and
 /// [`establishing_categories`] are the entries the scale paths call, so "the
 /// ordinal domain of this axis" has a single answer per reading: the layer
@@ -3503,19 +3568,15 @@ pub(in crate::render) fn fold_log_input_into_tally(
 fn distinct_positional_categories_shared(
     panel_batch: &RecordBatch,
     field: &str,
-    paired_positional: Option<&str>,
     transform_outputs: &HashMap<String, RecordBatch>,
     include_final: bool,
+    global_key: &str,
 ) -> Result<Vec<String>, RenderError> {
-    let panel_domain = crate::render::arrow_cast::distinct_positional_categories(
-        panel_batch,
-        field,
-        paired_positional,
-    )?;
+    let panel_domain = crate::render::arrow_cast::distinct_values_in_order(panel_batch, field)?;
     if !include_final {
         return Ok(panel_domain);
     }
-    let Some(global_batch) = transform_outputs.get(FINAL_OUTPUT_KEY) else {
+    let Some(global_batch) = transform_outputs.get(global_key) else {
         return Ok(panel_domain);
     };
     if global_batch.column_by_name(field).is_none() {
@@ -3523,11 +3584,7 @@ fn distinct_positional_categories_shared(
     }
     // Global first-appearance order is the shared domain: a superset of every
     // panel, so it is identical across panels and preserves the global order.
-    let mut domain = crate::render::arrow_cast::distinct_positional_categories(
-        global_batch,
-        field,
-        paired_positional,
-    )?;
+    let mut domain = crate::render::arrow_cast::distinct_values_in_order(global_batch, field)?;
     // Defensive union: append any panel category absent from the global set so a
     // category can never disappear from a panel's scale (no-op in practice).
     for cat in panel_domain {
@@ -3553,7 +3610,6 @@ fn distinct_positional_categories_shared(
 pub(in crate::render) fn establishing_categories(
     channel: &str,
     field: &str,
-    paired_positional: Option<&str>,
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
@@ -3561,17 +3617,18 @@ pub(in crate::render) fn establishing_categories(
 ) -> Result<Vec<String>, RenderError> {
     let seed = locate_seed_field(channel, field, spec, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    let reads_chart_rows = spec
+    let source = spec
         .layers
         .as_deref()
         .and_then(|layers| establishing_axis_layer(spec, layers, channel))
-        .is_none_or(|(_, layer)| LayerSource::of(layer) == LayerSource::Chart);
+        .map(|(_, layer)| LayerSource::of(layer));
+    let reads_chart_rows = source.is_none_or(LayerSource::is_chart);
     distinct_positional_categories_shared(
         seed.batch,
         field,
-        paired_positional,
         transform_outputs,
         include_final && reads_chart_rows,
+        source.map_or(FINAL_OUTPUT_KEY, LayerSource::all_panel_key),
     )
 }
 
@@ -3622,42 +3679,21 @@ pub(in crate::render) fn establishing_categories(
 ///
 /// An unlayered spec reads its seed from its one batch ([`locate_field`]).
 ///
-/// `include_final` and `paired_positional` mean what they mean for
+/// `include_final` means what it means for
 /// [`distinct_positional_categories_shared`], and every contribution goes
 /// through that same helper. A faceted+Shared axis takes the chart data's
 /// categories from the global all-panels batch, keeping the ladder identical in
 /// every panel rather than panel-local; a layer on its own named output reads
 /// that output, which already spans every panel.
 ///
-/// # A layer never opens the null band on an inherited coordinate
-///
-/// `#247`B decides the null band by occupancy: it exists iff some null-category
-/// row carries a non-null value on the opposite positional channel, and where no
-/// opposite channel is bound at all the band is kept (nothing can be missing, so
-/// every null row draws). That reading is sound for the axis's OWN column and
-/// unsound for a layer's, because a layer's opposite channel is frequently
-/// *inherited* — its values are the chart-level frame's, and say nothing about
-/// whether this layer places a mark. So a layer's contribution is judged against
-/// the field the layer itself binds on the opposite channel, and when it binds
-/// none, [`crate::render::arrow_cast::NULL_CATEGORY`] is dropped from what that
-/// layer contributes: with no coordinate pair of its own, the layer has no
-/// evidence to open a band with, and the axis's own column still decides the
-/// band exactly as `#247`B left it.
-///
-/// This is not a hypothetical. `_inject_constant`'s reference-line column is one
-/// authored value in a sea of structural nulls (`z = ["b", null, null, null]`),
-/// bound on one positional channel with the other inherited. Judging it against
-/// the inherited channel opens the null band and the reference-line layer draws
-/// a line per null row instead of the one line the user asked for — pinned by
-/// `scene_build`'s `coord_flipped_layered_rule_draws_its_own_channel_not_the_inherited_one`.
-/// A cross-frame `a + b` merge, by contrast, binds BOTH channels on every layer,
-/// so its genuine null-category-with-a-value row still opens the band and its
-/// padding rows still do not — `#247`B applies to a layer's own column with full
-/// force wherever the layer has the pair to answer with.
+/// A null category belongs to no category, so it never joins the ladder: the
+/// mark-level null-key drop (`render::prepare::null_keys`) removes the rows
+/// that would have drawn into it, and the rows left in a batch that place
+/// nothing (a merge's padding, an injected reference column's structural
+/// nulls) open no band.
 pub(in crate::render) fn positional_category_union(
     channel: &str,
     field: &str,
-    paired_positional: Option<&str>,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     spec: &ChartSpec,
@@ -3666,7 +3702,7 @@ pub(in crate::render) fn positional_category_union(
     // Unlayered ([`ChartSpec::is_layered`]): the chart's own categories.
     let layers = spec.layers.as_deref().unwrap_or_default();
     if !spec.is_layered() {
-        return establishing_categories(channel, field, paired_positional, spec, primary_batch, transform_outputs, include_final);
+        return establishing_categories(channel, field, spec, primary_batch, transform_outputs, include_final);
     }
     // The precondition [`establishing_categories`] checks for an unlayered
     // spec: the locator the caller types this axis with finds the bound field
@@ -3690,7 +3726,7 @@ pub(in crate::render) fn positional_category_union(
     // batch; a named output is already the all-panels one. An inherited field
     // is a later layer's column, so a column that cannot be a category key
     // contributes nothing, as it does from that layer's own binding below.
-    let seeds = seed_reads(spec, layers, channel, (field, None, paired_positional), &AxisReads::unstacked(layers));
+    let seeds = seed_reads(spec, layers, channel, (field, None), &AxisReads::unstacked(layers));
     for seed in &seeds {
         let Some(located) = seed.source.locate(seed.field, primary_batch, transform_outputs) else { continue };
         if seed.inheritor.is_some()
@@ -3701,9 +3737,9 @@ pub(in crate::render) fn positional_category_union(
         join(distinct_positional_categories_shared(
             located.batch,
             seed.field,
-            seed.opposite,
             transform_outputs,
-            include_final && seed.source == LayerSource::Chart,
+            include_final && seed.source.is_chart(),
+            seed.source.all_panel_key(),
         )?);
     }
     for layer in layers {
@@ -3741,10 +3777,10 @@ pub(in crate::render) fn positional_category_union(
             drawn.flip_positional();
         }
         let encoding = &drawn;
-        let (layer_enc, own_paired_enc) = match channel {
-            "x" => (encoding.x.as_ref(), encoding.y.as_ref()),
-            "y" => (encoding.y.as_ref(), encoding.x.as_ref()),
-            _ => (None, None),
+        let layer_enc = match channel {
+            "x" => encoding.x.as_ref(),
+            "y" => encoding.y.as_ref(),
+            _ => None,
         };
         let Some(layer_enc) = layer_enc else { continue };
         let layer_field = layer_enc.field.as_str();
@@ -3797,23 +3833,13 @@ pub(in crate::render) fn positional_category_union(
         {
             continue;
         }
-        let own_paired = own_paired_enc.map(|e| e.field.as_str());
-        let mut cats = distinct_positional_categories_shared(
+        join(distinct_positional_categories_shared(
             located.batch,
             layer_field,
-            own_paired,
             transform_outputs,
-            include_final && source == LayerSource::Chart,
-        )?;
-        if own_paired.is_none() {
-            // The layer binds no opposite coordinate of its own, so it has no
-            // evidence to open the null band with — see this function's doc. The
-            // helper's own "unanswerable → keep the band" arm is right for the
-            // axis's column and wrong for a layer's, and this is where the two
-            // readings part.
-            cats.retain(|c| c != crate::render::arrow_cast::NULL_CATEGORY);
-        }
-        join(cats);
+            include_final && source.is_chart(),
+            source.all_panel_key(),
+        )?);
     }
     Ok(domain)
 }
@@ -3841,7 +3867,7 @@ mod tests {
         let outputs = HashMap::new();
         let ladder = |layers: Option<Vec<Layer>>| {
             let spec = ChartSpec { layers, ..Default::default() };
-            positional_category_union("x", "group", None, &primary, &outputs, &spec, false)
+            positional_category_union("x", "group", &primary, &outputs, &spec, false)
                 .expect("the bound column enumerates")
         };
         assert_eq!(ladder(None), ["A", "B"]);
@@ -5685,12 +5711,12 @@ mod tests {
     /// The ladder for `spec_json` over [`merged_category_batch`]. The RHS
     /// layers read `_ident_0`, the named Identity of the merged frame the `+`
     /// lowering publishes, so the fixture publishes it too.
-    fn category_ladder(spec_json: &str, channel: &str, field: &str, paired: Option<&str>) -> Vec<String> {
+    fn category_ladder(spec_json: &str, channel: &str, field: &str) -> Vec<String> {
         let spec: ChartSpec =
             serde_json::from_str(spec_json).expect("lowered spec JSON must deserialize");
         let batch = merged_category_batch();
         let outputs = HashMap::from([("_ident_0".to_string(), batch.clone())]);
-        positional_category_union(channel, field, paired, &batch, &outputs, &spec, false)
+        positional_category_union(channel, field, &batch, &outputs, &spec, false)
             .expect("every category column in the fixture is Utf8")
     }
 
@@ -5707,20 +5733,19 @@ mod tests {
     #[test]
     fn layer_categories_join_the_ladder_in_first_appearance_order() {
         assert_eq!(
-            category_ladder(MERGED_LAYERS_SPEC_JSON, "x", "cat", Some("val")),
+            category_ladder(MERGED_LAYERS_SPEC_JSON, "x", "cat"),
             vec!["c".to_string(), "a".to_string(), "b".to_string()],
         );
     }
 
     /// The `null`s the merge's padding leaves in BOTH category columns open no
-    /// band: each layer binds its own paired value column, and every
-    /// null-category row of each is null there too (`#247`B).
+    /// band: a null category belongs to no category.
     #[test]
     fn merge_padding_opens_no_null_band_on_either_column() {
-        let ladder = category_ladder(MERGED_LAYERS_SPEC_JSON, "x", "cat", Some("val"));
+        let ladder = category_ladder(MERGED_LAYERS_SPEC_JSON, "x", "cat");
         assert!(
             !ladder.iter().any(|c| c == crate::render::arrow_cast::NULL_CATEGORY),
-            "padding nulls carry no paired value and must claim no band; got {ladder:?}"
+            "padding nulls belong to no category and must claim no band; got {ladder:?}"
         );
     }
 
@@ -5732,12 +5757,12 @@ mod tests {
     fn a_layer_widens_only_the_channel_it_binds() {
         const BOTH_CATEGORICAL: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"grp__rhs_0001","type":"nominal"}},"data_source":"_ident_0"}]}"#;
         assert_eq!(
-            category_ladder(BOTH_CATEGORICAL, "x", "cat", Some("grp")),
+            category_ladder(BOTH_CATEGORICAL, "x", "cat"),
             vec!["c".to_string(), "a".to_string(), "b".to_string()],
             "the x ladder takes the layers' x fields"
         );
         assert_eq!(
-            category_ladder(BOTH_CATEGORICAL, "y", "grp", Some("cat")),
+            category_ladder(BOTH_CATEGORICAL, "y", "grp"),
             vec!["p".to_string(), "q".to_string(), "r".to_string()],
             "the y ladder takes the layers' y fields, never the x ones"
         );
@@ -5750,7 +5775,7 @@ mod tests {
     fn same_field_layers_leave_the_ladder_exactly_as_seeded() {
         const SAME_FIELD: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"rule","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}}]}"#;
         assert_eq!(
-            category_ladder(SAME_FIELD, "x", "cat", Some("val")),
+            category_ladder(SAME_FIELD, "x", "cat"),
             vec!["c".to_string(), "a".to_string()],
         );
     }
@@ -5761,32 +5786,26 @@ mod tests {
     fn an_unlayered_spec_is_the_seed_alone() {
         const FLAT: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}}"#;
         assert_eq!(
-            category_ladder(FLAT, "x", "cat", Some("val")),
+            category_ladder(FLAT, "x", "cat"),
             vec!["c".to_string(), "a".to_string()],
         );
     }
 
-    /// A layer binding ONE positional channel opens no null band, even though
-    /// its category column carries nulls and the helper's unanswerable arm would
-    /// keep them. This is `_inject_constant`'s reference-line shape: the layer's
-    /// only other coordinate would be an inherited one, whose values say nothing
-    /// about this layer's rows.
-    ///
-    /// RED (verified in place): drop the `own_paired.is_none()` retain and this
-    /// returns `["c", "a", "b", "null"]`, and the rule layer draws a line per
-    /// structural null row.
+    /// A layer binding ONE positional channel opens no null band: its category
+    /// column carries nulls (`_inject_constant`'s reference-line shape, one
+    /// authored value among structural nulls) and a null category belongs to
+    /// no category.
     #[test]
     fn a_single_channel_layer_opens_no_null_band() {
         const RULE_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"rule","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"}}}]}"#;
         assert_eq!(
-            category_ladder(RULE_LAYER, "x", "cat", Some("val")),
+            category_ladder(RULE_LAYER, "x", "cat"),
             vec!["c".to_string(), "a".to_string(), "b".to_string()],
         );
     }
 
     /// Under `CoordFlip` the authored `y` occupies the rendered x axis, so the
-    /// layer's authored `y` field is the one that widens x — and its authored
-    /// `x` is the opposite coordinate the null band is judged against. Reading
+    /// layer's authored `y` field is the one that widens x. Reading
     /// `layer.encoding` unflipped would union the wrong column onto the wrong
     /// axis, silently: the two answers below would simply trade places.
     #[test]
@@ -5794,12 +5813,12 @@ mod tests {
         const FLIPPED: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"grp__rhs_0001","type":"nominal"}}}],"coord":{"kind":"flip"}}"#;
         // `channel`/`field` arrive POST-flip: rendered x holds the authored `grp`.
         assert_eq!(
-            category_ladder(FLIPPED, "x", "grp", Some("cat")),
+            category_ladder(FLIPPED, "x", "grp"),
             vec!["p".to_string(), "q".to_string(), "r".to_string()],
             "the authored y field must widen the axis it occupies post-flip"
         );
         assert_eq!(
-            category_ladder(FLIPPED, "y", "cat", Some("grp")),
+            category_ladder(FLIPPED, "y", "cat"),
             vec!["c".to_string(), "a".to_string(), "b".to_string()],
             "the authored x field must widen the post-flip y axis"
         );
@@ -5829,12 +5848,12 @@ mod tests {
         );
 
         assert_eq!(
-            category_ladder(LAYER_FLIP, "x", "cat", Some("grp")),
+            category_ladder(LAYER_FLIP, "x", "cat"),
             vec!["c".to_string(), "a".to_string(), "r".to_string()],
             "the flipped member's authored y (`grp__rhs`) is what occupies x"
         );
         assert_eq!(
-            category_ladder(LAYER_FLIP, "y", "grp", Some("cat")),
+            category_ladder(LAYER_FLIP, "y", "grp"),
             vec!["p".to_string(), "q".to_string(), "b".to_string()],
             "…and its authored x (`cat__rhs`) is what occupies y"
         );
@@ -5847,7 +5866,7 @@ mod tests {
     fn a_layer_without_its_own_coord_still_takes_the_charts_flip() {
         const CHART_FLIP_ONLY: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"grp","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"grp__rhs_0001","type":"nominal"}}}],"coord":{"kind":"flip"}}"#;
         assert_eq!(
-            category_ladder(CHART_FLIP_ONLY, "x", "grp", Some("cat")),
+            category_ladder(CHART_FLIP_ONLY, "x", "grp"),
             vec!["p".to_string(), "q".to_string(), "r".to_string()],
         );
     }
@@ -5883,7 +5902,7 @@ mod tests {
         const TEMPORAL_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"line","encoding":{"x":{"field":"when","type":"temporal"},"y":{"field":"val"}}}]}"#;
         let spec: ChartSpec = serde_json::from_str(TEMPORAL_LAYER).unwrap();
         assert_eq!(
-            positional_category_union("x", "cat", Some("val"), &batch, &HashMap::new(), &spec, false)
+            positional_category_union("x", "cat", &batch, &HashMap::new(), &spec, false)
                 .expect("a temporal layer field must skip, not refuse the whole ladder"),
             vec!["c".to_string(), "a".to_string()],
         );
@@ -5915,7 +5934,7 @@ mod tests {
         const QUANTITATIVE_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"n","type":"quantitative"},"y":{"field":"val"}}}]}"#;
         let spec: ChartSpec = serde_json::from_str(QUANTITATIVE_LAYER).unwrap();
         assert_eq!(
-            positional_category_union("x", "cat", Some("val"), &batch, &HashMap::new(), &spec, false)
+            positional_category_union("x", "cat", &batch, &HashMap::new(), &spec, false)
                 .unwrap(),
             vec!["c".to_string(), "a".to_string(), "10".to_string(), "20".to_string()],
         );
@@ -5928,14 +5947,14 @@ mod tests {
     fn an_independent_y_layer_widens_x_but_never_the_primary_y() {
         const INDEPENDENT: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"cat__rhs_0001","type":"nominal"},"y":{"field":"val__rhs_0001"}},"independent_y":true}]}"#;
         assert_eq!(
-            category_ladder(INDEPENDENT, "x", "cat", Some("val")),
+            category_ladder(INDEPENDENT, "x", "cat"),
             vec!["c".to_string(), "a".to_string(), "b".to_string()],
         );
         // A categorical y with an independent-y layer: the layer's own y field
         // must stay out of the primary ladder.
         const INDEPENDENT_CAT_Y: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"val"},"y":{"field":"cat","type":"nominal"}},"layers":[{"mark":"point","encoding":{"x":{"field":"val"},"y":{"field":"cat","type":"nominal"}}},{"mark":"point","encoding":{"x":{"field":"val__rhs_0001"},"y":{"field":"cat__rhs_0001","type":"nominal"}},"independent_y":true}]}"#;
         assert_eq!(
-            category_ladder(INDEPENDENT_CAT_Y, "y", "cat", Some("val")),
+            category_ladder(INDEPENDENT_CAT_Y, "y", "cat"),
             vec!["c".to_string(), "a".to_string()],
         );
     }
@@ -5947,7 +5966,7 @@ mod tests {
     fn a_layer_field_in_no_batch_is_skipped_not_raised() {
         const PHANTOM: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"point","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"nowhere","type":"nominal"},"y":{"field":"val"}}}]}"#;
         assert_eq!(
-            category_ladder(PHANTOM, "x", "cat", Some("val")),
+            category_ladder(PHANTOM, "x", "cat"),
             vec!["c".to_string(), "a".to_string()],
         );
     }
@@ -6185,7 +6204,7 @@ mod tests {
     fn each_layers_categories_come_from_its_own_batch() {
         let spec = spec_from(OPERAND_CATEGORIES_SPEC_JSON);
         let (merged, outputs) = operand_category_batches();
-        let ladder = positional_category_union("x", "g", Some("v"), &merged, &outputs, &spec, false)
+        let ladder = positional_category_union("x", "g", &merged, &outputs, &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["a", "b", "c", "x", "y", "z"]));
     }
@@ -6222,7 +6241,7 @@ mod tests {
         let spec = spec_from(NON_DRAWING_LEAD_SPEC_JSON);
         let (merged, outputs) =
             non_drawing_lead_batches(opt_str_col(&[Some("a"), Some("b"), Some("c")]));
-        let ladder = positional_category_union("x", "g", Some("y"), &merged, &outputs, &spec, false)
+        let ladder = positional_category_union("x", "g", &merged, &outputs, &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["a", "b"]));
     }
@@ -6386,12 +6405,10 @@ mod tests {
     }
 
     /// A one-axis reference rule over its own rows, `x=ref`, with a `y`
-    /// Python filled from the bar and listed as inherited: the rule draws no
-    /// `y` (`Mark::inherited_positional`), so the band judge does not read
-    /// that filled `val`, which the rule's rows lack. The rejected reading,
-    /// the authored encoding with the filled `y`, opens a `null` band.
+    /// Python filled from the bar and listed as inherited: its null `ref`
+    /// rows open no band.
     #[test]
-    fn a_one_axis_rule_judges_its_null_band_without_a_filled_opposite_channel() {
+    fn a_one_axis_rule_opens_no_null_band() {
         const SPEC: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"data_source":"lhs"},{"mark":"rule","encoding":{"x":{"field":"ref","type":"nominal"},"y":{"field":"val"}},"data_source":"rhs","inherited_positional":["y"]}]}"#;
         let spec = spec_from(SPEC);
         let lhs = columns_batch(vec![
@@ -6404,9 +6421,43 @@ mod tests {
             ("rhs".to_string(), rhs),
             (FINAL_OUTPUT_KEY.to_string(), lhs.clone()),
         ]);
-        let ladder = positional_category_union("x", "cat", Some("val"), &lhs, &outputs, &spec, false)
+        let ladder = positional_category_union("x", "cat", &lhs, &outputs, &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["a", "b", "c"]));
+    }
+
+    /// A layer on the chart's data that the null-key drop gave rows of its own
+    /// is read as the chart's data it is a subset of: its panel's categories
+    /// are its panel slice (`panel_key`), its all-panel categories its own key's
+    /// rows under a facet-shared axis, never the pipeline tail's.
+    #[test]
+    fn a_moved_chart_data_layer_reads_its_own_all_panel_rows_not_the_tails() {
+        use crate::render::prepare::null_keys::{layer_key, panel_key};
+        const CHART_DATA_LAYERS: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}}},{"mark":"point","encoding":{"x":{"field":"h","type":"nominal"},"y":{"field":"v"}}}]}"#;
+        let mut spec = spec_from(CHART_DATA_LAYERS);
+        let key = layer_key(1);
+        spec.layers.as_mut().unwrap()[1].own_rows = Some(key.clone());
+        let rows = |g: &[Option<&str>], h: &[Option<&str>]| {
+            columns_batch(vec![("g", opt_str_col(g)), ("h", opt_str_col(h)), ("v", f64_col(&vec![1.0; g.len()]))])
+        };
+        // The tail spans every panel and holds an `r` the moved layer dropped;
+        // the moved layer's own rows span every panel too; this panel holds `p`.
+        let tail = rows(&[Some("a"), Some("a"), Some("a")], &[Some("p"), Some("q"), Some("r")]);
+        let own_all = rows(&[Some("a"), Some("a")], &[Some("p"), Some("q")]);
+        let own_panel = rows(&[Some("a")], &[Some("p")]);
+        let panel = rows(&[Some("a")], &[Some("p")]);
+        let outputs = HashMap::from([
+            (FINAL_OUTPUT_KEY.to_string(), tail),
+            (key.clone(), own_all.clone()),
+            (panel_key(&key), own_panel),
+        ]);
+        let shared = positional_category_union("x", "g", &panel, &outputs, &spec, true).unwrap();
+        assert_eq!(shared, strings(&["a", "p", "q"]), "a shared axis spans the moved layer's all-panel rows, never the dropped `r`");
+        let independent = positional_category_union("x", "g", &panel, &outputs, &spec, false).unwrap();
+        assert_eq!(independent, strings(&["a", "p"]), "an independent axis spans this panel's slice of the moved layer");
+        let whole = HashMap::from([(FINAL_OUTPUT_KEY.to_string(), panel.clone()), (key, own_all)]);
+        let whole = positional_category_union("x", "g", &panel, &whole, &spec, false).unwrap();
+        assert_eq!(whole, strings(&["a", "p", "q"]), "a pass that publishes no panel slice reads the moved layer's rows whole");
     }
 
     /// The ordinal counterpart: the inheriting layer's categories are those of
@@ -6421,7 +6472,7 @@ mod tests {
             ("h", opt_str_col(&[Some("r"), Some("s")])),
             ("v", opt_f64_col(&[Some(1.0), Some(2.0)])),
         ]);
-        let ladder = positional_category_union("x", "g", Some("v"), &batch, &HashMap::new(), &spec, false)
+        let ladder = positional_category_union("x", "g", &batch, &HashMap::new(), &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["p", "q", "r", "s"]));
     }
@@ -6434,7 +6485,7 @@ mod tests {
         const PHANTOM_SEED: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"nowhere","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"nowhere","type":"nominal"},"y":{"field":"v"}}}]}"#;
         let spec = spec_from(PHANTOM_SEED);
         let batch = columns_batch(vec![("v", f64_col(&[1.0, 2.0]))]);
-        let err = positional_category_union("x", "nowhere", Some("v"), &batch, &HashMap::new(), &spec, false)
+        let err = positional_category_union("x", "nowhere", &batch, &HashMap::new(), &spec, false)
             .expect_err("a bound field no batch holds is refused");
         assert_eq!(err, RenderError::UnknownColumn { name: "nowhere".to_string() });
     }

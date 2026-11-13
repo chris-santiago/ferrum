@@ -32,7 +32,7 @@
 //! value channels — goes through the one shared [`positional_pixels`], which
 //! matches on the RESOLVED [`ScaleKind`] exactly as `point.rs`/`bar.rs` do:
 //! an `Ordinal` scale takes the categorical reading
-//! (`col_as_positional_category_str` + [`ScaleKind::to_pixel_str`]), every
+//! (`col_as_ordinal_category_str` + [`ScaleKind::to_pixel_str`]), every
 //! continuous scale (Linear/Log/Symlog/Pow/Time) the numeric reading
 //! (`col_as_f64` + [`ScaleKind::to_pixel_f64`], non-finite rows skipped).
 //! Consequences, matching what `mark_point`/`mark_bar` already give the same
@@ -67,7 +67,7 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_positional_category_str, resolve_stroke_paint, stroke_width_column, DrawCtx,
+    col_as_f64, col_as_ordinal_category_str, resolve_stroke_paint, stroke_width_column, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{
@@ -190,10 +190,10 @@ fn positional_pixels(
     match scale {
         // Same reader `point.rs`/`bar.rs`/`tick.rs` use for an ordinal
         // positional channel: Int/Float/Boolean/Utf8 all stringify exactly the
-        // way the ordinal domain was built, and a null row lands in the null
-        // band (FA-9).
+        // way the ordinal domain was built, and a null row has no band and
+        // draws nothing.
         ScaleKind::Ordinal(_) => {
-            let cats = col_as_positional_category_str(ctx.batch, field)?;
+            let cats = col_as_ordinal_category_str(ctx.batch, field)?;
             Ok(cats
                 .iter()
                 .map(|c| c.as_deref().and_then(|v| scale.to_pixel_str(v)))
@@ -1611,7 +1611,7 @@ mod tests {
     // the axis drew the ordinal band ticks. Boolean, a legal ordinal category
     // dtype everywhere else in this crate, hard-raised. `positional_pixels`
     // matches on the scale kind (`point.rs`/`bar.rs`'s canonical discriminant)
-    // and reads through `col_as_positional_category_str`, so rule now
+    // and reads through `col_as_ordinal_category_str`, so rule now
     // positions every dtype exactly as its sibling marks do.
     //
     // Fixtures mirror the Python lowering they stand for: `type_:
@@ -1686,7 +1686,7 @@ mod tests {
     }
 
     /// Float64 column on an ordinal y-scale: the mirror of the Int64 case, on
-    /// the other axis. `col_as_positional_category_str` formats an
+    /// the other axis. `col_as_ordinal_category_str` formats an
     /// integer-valued float the way the ordinal domain does (`2000.0` →
     /// `"2000"`), so the per-row strings always match the domain entries.
     #[test]
@@ -1771,22 +1771,11 @@ mod tests {
         }
     }
 
-    /// A NULL ordinal anchor row bands at the null category, exactly as
-    /// `mark_point`/`mark_bar` position it (FA-9) — spec §4.4, "Extended
-    /// 2026-09-02, T13 quality review", ruling 2. This is a deliberate
-    /// behavior change: rule's dtype-keyed read used `col_as_str`, whose
-    /// `None` for a null row silently SKIPPED it, so
-    /// `mark_rule().encode(x=fm.X("cat", type_="ordinal"), y="lo", y2="hi")`
-    /// over a `cat` column with one null drew 2 segments where the ordinal
-    /// axis showed 3 bands (`"a"`, `"b"`, and the `null` band every sibling
-    /// mark already positions rows in). It now draws 3.
-    ///
-    /// RED (verified in place): read the anchor through `col_as_str` instead
-    /// of `col_as_positional_category_str` in `positional_pixels` and this
-    /// fails with 2 lines — the null row silently absent from a scale that
-    /// reserved a band for it.
+    /// A NULL ordinal anchor row belongs to no category: the axis holds no
+    /// band for it, so its segment is not drawn, exactly as `mark_point` and
+    /// `mark_bar` place nothing for it.
     #[test]
-    fn null_ordinal_anchor_bands_at_the_null_category_like_point() {
+    fn a_null_ordinal_anchor_draws_nothing_like_point() {
         use crate::spec::encoding::DataType as SDT;
         let spec = rule_spec(
             Some(("cat", Some(SDT::Ordinal))),
@@ -1806,11 +1795,11 @@ mod tests {
         ]).unwrap();
 
         let (lines, scales) = build_rule_lines(&spec, &spec, &batch);
-        assert_eq!(lines.len(), 3,
-            "the null anchor row must band at the null category, not be skipped (2 lines)");
-        for (line, cat) in lines.iter().zip(["a", "b", crate::render::arrow_cast::NULL_CATEGORY]) {
+        assert_eq!(lines.len(), 2, "the null anchor row has no band and draws no segment");
+        assert!(scales.x.to_pixel_str(crate::render::arrow_cast::NULL_CATEGORY).is_none(), "no band for a null category");
+        for (line, cat) in lines.iter().zip(["a", "b"]) {
             let expected = scales.x.to_pixel_str(cat)
-                .expect("the ordinal domain carries a band for the null category too");
+                .expect("the ordinal domain carries a band for every real category");
             assert_eq!(line.0, expected, "segment must be anchored at {cat}'s band center");
             assert_eq!(line.0, line.2, "a vertical segment keeps one x for both endpoints");
         }

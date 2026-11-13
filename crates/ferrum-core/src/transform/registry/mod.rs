@@ -558,7 +558,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             // The first key re-publishes the primary batch under a stable
             // name; the other three are the dendrogram geometry.
             secondary_outputs: linkage_secondary_outputs(),
-            params: vec!["method", "metric", "axis", "z_score", "standard_scale", "name"],
+            params: vec!["method", "metric", "axis", "z_score", "standard_scale", "name", "labels"],
         },
         "raster" => TransformRegistryEntry {
             methods: RasterAggregate::all(),

@@ -34,6 +34,7 @@ from ferrum.layer import Layer
 from _svg_corpus import path_points
 from _svg_extents import pixel_for, value_axis_ladder, value_axis_ladders
 from _svg_rects import data_bar_rects, mark_layer, plot_rect, svg_elements
+from tests.test_null_group_warning import _null_key_dropped_message, _render_capturing
 
 # Pixel coordinates are emitted to 3 decimals; the 0.05 tolerance is the
 # acceptance bound for "the base sits on the 0 tick".
@@ -563,22 +564,46 @@ UNDECLARED_CATEGORICAL_Y = {
 }
 
 
+#: The undeclared categorical columns holding a null: its row (a positive ``val``) belongs to no
+#: category, so it is dropped and counted and no bar is drawn for it.
+NULL_CATEGORY_DTYPES = {"Boolean"}
+
+
+def _undeclared_categorical_case(dtype: str):
+    """The frame, the count of positive bars it draws and whether its category holds a null."""
+    data = pl.DataFrame({"val": [3.0, -2.0, 1.0], "c": UNDECLARED_CATEGORICAL_Y[dtype]})
+    has_null = dtype in NULL_CATEGORY_DTYPES
+    return data, 1 if has_null else 2, has_null
+
+
 @pytest.mark.parametrize("dtype", list(UNDECLARED_CATEGORICAL_Y))
 def test_an_undeclared_categorical_y_draws_a_horizontal_bar_from_the_zero_tick(dtype):
-    data = pl.DataFrame({"val": [3.0, -2.0, 1.0], "c": UNDECLARED_CATEGORICAL_Y[dtype]})
+    data, n_positive, has_null = _undeclared_categorical_case(dtype)
     chart = C(data).mark_bar().encode(x="val", y="c")
     enc = _encoding(chart)
     assert enc["x"]["scale"]["zero"] is True
     assert "scale" not in enc["y"]
-    assert_grow_from_zero(render(chart), "x", n_positive=2, n_negative=1)
+    svg, shown = _render_capturing(lambda: render(chart))
+    assert shown == ([_null_key_dropped_message("mark_bar", 1, "c")] if has_null else [])
+    assert_grow_from_zero(svg, "x", n_positive=n_positive, n_negative=1)
 
 
 @pytest.mark.parametrize("dtype", list(UNDECLARED_CATEGORICAL_Y))
 def test_a_layered_undeclared_categorical_y_bar_agrees(dtype):
-    """``bar + point`` reaches the same orientation through Rust's layered rule."""
-    data = pl.DataFrame({"val": [3.0, -2.0, 1.0], "c": UNDECLARED_CATEGORICAL_Y[dtype]})
+    """``bar + point`` reaches the same orientation through Rust's layered rule, and each layer
+    counts the null category it would otherwise draw."""
+    data, n_positive, has_null = _undeclared_categorical_case(dtype)
     chart = C(data).mark_bar().encode(x="val", y="c") + C(data).mark_point().encode(x="val", y="c")
-    assert_grow_from_zero(render(chart), "x", n_positive=2, n_negative=1)
+    svg, shown = _render_capturing(lambda: render(chart))
+    assert shown == (
+        [
+            _null_key_dropped_message("mark_bar", 1, "c"),
+            _null_key_dropped_message("mark_point", 1, "c"),
+        ]
+        if has_null
+        else []
+    )
+    assert_grow_from_zero(svg, "x", n_positive=n_positive, n_negative=1)
 
 
 def test_an_undeclared_date_y_keeps_its_value_on_y():

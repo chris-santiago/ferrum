@@ -25,6 +25,7 @@ from enum import Enum
 from typing import Any, Callable, Optional
 
 from ferrum._coerce import to_arrow_table
+from ferrum._levels import distinct_non_null_levels
 
 
 class FacetDeclaration(str, Enum):
@@ -490,8 +491,21 @@ _DECLARATION_HANDLERS: dict[FacetDeclaration, _DeclarationHandler] = {
 }
 
 
+def _facet_levels(column: Any) -> int:
+    """Return the facet's level count: distinct non-null values, and at least 1.
+
+    A grid needs one cell even when the column holds no usable value, so a column that is null
+    on every row, or holds no row, reports 1: the frame draws no panel and says so.
+    """
+    return max(len(distinct_non_null_levels(column)), 1)
+
+
 def infer_facet_cardinality(data: Any, col_name: Optional[str]) -> int:
-    """Return the number of distinct values in *col_name* within *data*.
+    """Return the number of distinct non-null values in *col_name* within *data*.
+
+    A null facet value has no panel, so it is not a level. A column with no level (null on every
+    row, or no row at all) reports 1, like a column that is not found: the grid needs one cell,
+    and that frame draws no panel.
 
     Falls back to 1 when *col_name* is ``None``, *data* is absent, or the column
     is not found — preserving the existing behaviour for cases where inference is
@@ -504,7 +518,7 @@ def infer_facet_cardinality(data: Any, col_name: Optional[str]) -> int:
 
         if isinstance(data, pl.DataFrame):
             if col_name in data.columns:
-                return data[col_name].n_unique()
+                return _facet_levels(data[col_name])
             return 1
         # PyArrow fallback
         import pyarrow as pa
@@ -512,7 +526,7 @@ def infer_facet_cardinality(data: Any, col_name: Optional[str]) -> int:
         tbl = data if isinstance(data, pa.Table) else to_arrow_table(data)
         if col_name in tbl.schema.names:
             col = tbl.column(col_name)
-            return len(col.unique())
+            return _facet_levels(col)
         return 1
     except Exception:
         return 1

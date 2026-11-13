@@ -19,6 +19,7 @@ from typing import Any, Iterable
 
 import polars as pl
 
+from ferrum._levels import distinct_non_null_levels
 from ferrum.encoding.base import ChannelBase
 
 
@@ -199,7 +200,7 @@ def _build_ordinal_norm_map(domain: list) -> dict[str, float]:
 
 
 def _extract_ordinal_domain(chart: Any, channel: str) -> list:
-    """Return the ordered unique values for *channel* in *chart*, or an empty list.
+    """Return the ordered distinct non-null values for *channel* in *chart*, or an empty list.
 
     Checks the chart's ``_data`` attribute against the field name(s) bound to
     *channel* in ``_encoding`` (single-mark path) and ``_layers`` (layered path).
@@ -216,7 +217,7 @@ def _extract_ordinal_domain(chart: Any, channel: str) -> list:
     Returns
     -------
     list
-        Unique values in first-appearance order.
+        Distinct non-null values in first-appearance order.
     """
 
     data = getattr(chart, "_data", None)
@@ -232,8 +233,9 @@ def _extract_ordinal_domain(chart: Any, channel: str) -> list:
             continue
         if col.dtype not in (pl.Utf8, pl.String, pl.Categorical):
             continue
-        # Preserve appearance order using unique(maintain_order=True)
-        return col.unique(maintain_order=True).to_list()
+        # A null category has no band, so it is not a level: the annotation's band centre is
+        # read over the levels the axis draws, in order of first appearance.
+        return distinct_non_null_levels(col)
 
     return []
 

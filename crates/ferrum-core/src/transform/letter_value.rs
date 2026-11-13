@@ -18,17 +18,15 @@
 //! combination of `group` and every `groupby` field, and every output batch
 //! (primary and secondary) appends one column per `groupby` field, named and
 //! typed as its input column, after its own columns. An empty `groupby`
-//! appends nothing. A row with a null on a `groupby` field belongs to no
-//! combination and is dropped, with one warning per field naming the
-//! dropped-row count; a `groupby` field equal to `group` is `group`'s own
-//! dimension and keeps its pooling. The drop is reported through the shared
-//! null-key reporter under [`NullKeyPolicy::Skip`]
-//! ([`report_skipped_null_keys`]), so a call whose drop removed every row
-//! warns that the data could not be split into groups and returns no rows,
-//! and a facet partition it empties is recorded for the facet run to draw
-//! empty, as every other grouped transform's drop is. A call that dropped
-//! nothing returns whatever it computes, an empty batch included, exactly as
-//! the ungrouped call does.
+//! appends nothing. A row with a null on `group` or on a `groupby` field
+//! belongs to no combination and is dropped, with one warning per field
+//! naming the dropped-row count. Every key column partitions under
+//! [`NullKeyPolicy::Skip`], so the shared partitioner reports the drop: a
+//! call whose drop removed every row warns that the data could not be split
+//! into groups and returns no rows, and a facet partition it empties is
+//! recorded for the facet run to draw empty, as every other grouped
+//! transform's drop is. A call that dropped nothing returns whatever it
+//! computes, an empty batch included, exactly as the ungrouped call does.
 //!
 //! A group (or combination) whose rows hold no usable value, every one null
 //! or NaN, keeps its key as one placeholder row: depth 1, the median's
@@ -60,15 +58,8 @@ use crate::transform::context::{describe_group_keys, TransformContext, Transform
 use crate::transform::group_key::{
     batch_with_groupby_columns, deserialize_groupby_vec, group_partition_multi, groupby_key_at,
     materialize_groupby_col, refuse_groupby_output_collision, refuse_repeated_groupby_names,
-    report_skipped_null_keys, GroupKeyReader, KeyValue, NullKeyCounts, NullKeyPolicy,
+    GroupKeyReader, KeyValue, NullKeyPolicy,
 };
-
-/// The policy [`report_skipped_null_keys`] reports the null-key drop under:
-/// the rows holding a null on a dropping field belong to no group, as under
-/// every other grouped transform's `Skip`. The partition itself pools `group`
-/// ([`NullKeyPolicy::Pool`]), so this is the policy of the drop, not of the
-/// partition.
-const DROPPED_KEYS: NullKeyPolicy = NullKeyPolicy::Skip;
 
 /// Maximum depth for per-depth named outputs.
 pub(crate) const K_MAX_NAMED: usize = 12;
@@ -242,7 +233,7 @@ impl KeyColumns {
     /// `group`'s value and the `groupby` values, in `spec.groupby` order.
     /// `no_group` stands for `group` when the call has none: a null key, or
     /// the Utf8 dtype of an ungrouped call's all-null `group` column.
-    /// `values` holds one entry per column for every key the `Pool`
+    /// `values` holds one entry per column for every key the
     /// partition or [`extract_values`] builds.
     fn split<T: Clone + std::fmt::Debug>(&self, values: &[T], no_group: T) -> PyResult<(T, Vec<T>)> {
         let at = |i: usize| {
@@ -259,27 +250,6 @@ impl KeyColumns {
 
     fn combo(&self, key: &[KeyValue]) -> PyResult<ComboKey> {
         self.split(key, KeyValue::Null)
-    }
-
-    /// The `groupby` fields whose null keys are dropped with a warning:
-    /// every one but a field equal to `group`, which is `group`'s own
-    /// dimension and keeps its pooling policy.
-    fn dropping_fields(&self, spec: &LetterValueSpec) -> Vec<String> {
-        spec.groupby
-            .iter()
-            .filter(|field| spec.group.as_ref() != Some(*field))
-            .cloned()
-            .collect()
-    }
-
-    /// Whether a combination holds a null on one of the
-    /// [`KeyColumns::dropping_fields`] dimensions, so its rows belong to no
-    /// combination.
-    fn drops(&self, (_, by): &ComboKey) -> bool {
-        self.by_positions
-            .iter()
-            .zip(by)
-            .any(|(&at, value)| !(self.has_group && at == 0) && matches!(value, KeyValue::Null))
     }
 
     /// The `"col=value"` label naming one combination in a
@@ -326,12 +296,10 @@ struct DepthRow {
 /// The key columns ([`KeyColumns`]) are resolved, dtype-checked and read
 /// through the shared [`GroupKeyReader`] (the reader `group_partition_multi`
 /// itself keys rows with, under the same `ctx`, so a binned color's bins key
-/// these rows as they keyed the partition), so a null `group` VALUE maps to
-/// `KeyValue::Null` and pools with the other null-`group` rows, exactly as
-/// [`compute_depths`]' `Pool` partition does, while a row with a null on a
-/// [`KeyColumns::dropping_fields`] dimension is dropped, as
-/// [`compute_depths`] drops it. With no `group` and no `groupby`, every row's
-/// key is `(Null, [])`.
+/// these rows as they keyed the partition). A row is kept exactly when the
+/// partition of [`compute_depths`] holds it: a row with a null on any key
+/// column belongs to no group and is dropped here too. With no `group` and no
+/// `groupby`, every row's key is `(Null, [])`.
 fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<Vec<(ComboKey, f64)>> {
     let schema = batch.schema();
     let vi = schema.index_of(&spec.value)
@@ -355,11 +323,10 @@ fn extract_values(spec: &LetterValueSpec, batch: &RecordBatch, ctx: &TransformCo
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let combo = key_columns.combo(&key)?;
-        if key_columns.drops(&combo) {
+        if key.iter().any(|value| matches!(value, KeyValue::Null)) {
             continue;
         }
-        out.push((combo, v));
+        out.push((key_columns.combo(&key)?, v));
     }
     Ok(out)
 }
@@ -472,56 +439,13 @@ fn group_order(
 /// validation, and row-to-group assignment all live there once, not
 /// re-hand-rolled here), then compute each group's letter-value depths.
 ///
-/// **`NullKeyPolicy::Pool`, not the more common `Skip`.** MOST
-/// `group_partition_multi` callers in the crate use `Skip` (a null-keyed row
-/// belongs to no group and is dropped), because those transforms append the
-/// group key as an output column and a row with no key has no row to write
-/// it to (GH #197). But `Pool` is not exceptional in the crate — three
-/// siblings already use it: `data_stack.rs` and `join_aggregate.rs` (named
-/// directly in [`NullKeyPolicy::Pool`]'s own doc, `group_key/mod.rs`) are
-/// row-preserving transforms whose contract is one output value per INPUT
-/// row and which therefore append NO group column at all — for them,
-/// skipping a null-keyed row would leave it silently holding a default
-/// value instead of a computed one. `data_window.rs` takes the same
-/// exemption for the same row-preserving reason. letter_value's reason for
-/// `Pool` is different from all three: unlike them, it DOES append a group
-/// column, and its pre-existing, tested contract is different from `Skip`
-/// on two points `Skip` would break silently:
-///   - **Null-group pooling.** A null-valued group row has always joined a
-///     single null-keyed group (materialized as an Arrow null in the `group`
-///     output column) rather than being dropped — this is what lets a boxen
-///     chart draw a "no category" box instead of silently losing those rows.
-///     `Pool` reproduces this exactly: `group_partition_multi`'s partitioning
-///     loop only `continue`s past a null-keyed row when
-///     `null_keys.skips_null_rows()` is true, which is `!matches!(self,
-///     Pool)` — so under `Pool` every null-valued-group row still gets
-///     pushed into the `[KeyValue::Null]` group instead of being excluded.
-///   - **Emission order.** `group_partition_multi` returns groups in
-///     FIRST-APPEARANCE order (GH #179's disclosed policy for its Skip
-///     callers). letter_value's `sort = None` contract is
-///     LEXICOGRAPHIC/numeric order
-///     (`test_letter_value_sort_none_is_lexicographic`, unchanged since
-///     before this migration), and `sort = Some(...)` ranks groups by a
-///     per-group value aggregate `group_partition_multi` has no equivalent
-///     for. Neither depends on partition-return order: [`group_order`] is
-///     applied AFTER partitioning, as a deliberate post-partition reorder
-///     over the same `BTreeMap<KeyValue, Vec<f64>>` shape used pre-migration
-///     — the partitioner supplies WHICH rows belong to which group and its
-///     null policy; `group_order` decides emission order. `Skip` +
-///     first-appearance order was ruled out, not left untried: swapping to
-///     it would have to also drop the null-pooling contract (no test pins
-///     it, but nothing asked to change it) and would have made
-///     first-appearance order the ordering [`group_order`] has to override
-///     unconditionally for both its branches — replacing a real policy this
-///     module already owns with a policy borrowed from a different transform
-///     shape, not a simplification.
-///
-/// `Pool` covers `group` only. The partition runs over `group` and the
-/// `groupby` fields under the one policy, and the combinations holding a null
-/// on a [`KeyColumns::dropping_fields`] dimension are then dropped here and
-/// reported through [`report_skipped_null_keys`] under [`DROPPED_KEYS`]: a
-/// null `groupby` key, unlike a null `group`, is not drawn as its own
-/// combination. A drop that removes every row warns and returns no rows.
+/// Every key column (`group`, then each `groupby` field not equal to it)
+/// partitions under [`NullKeyPolicy::Skip`], as `BoxStats` does: a row with a
+/// null on any key column belongs to no group and is dropped, and the shared
+/// partitioner reports the count per field (or, when every row is null-keyed,
+/// the all-null warning naming every key column). [`group_order`] reorders the
+/// groups after partitioning, so `sort = None` stays lexicographic and
+/// `sort = Some(...)` ranks as it always has.
 fn compute_depths(
     spec: &LetterValueSpec,
     batch: &RecordBatch,
@@ -535,19 +459,12 @@ fn compute_depths(
     refuse_repeated_groupby_names("stat_letter_value", &spec.groupby)?;
     refuse_groupby_output_collision("stat_letter_value", &spec.groupby, &output_column_names())?;
     let key_columns = KeyColumns::of(spec);
-    let dropping_fields = key_columns.dropping_fields(spec);
-    // With a dropping field, the partition's all-null warning could only
-    // fire when that field is null on every row, where it would claim the
-    // rows were pooled; they are dropped instead, and the drop report below
-    // says so. Without one, the partition reports for `group`.
-    let quiet = TransformContext::default();
-    let partition_ctx = if dropping_fields.is_empty() { ctx } else { &quiet };
     let partition = group_partition_multi(
         batch,
         &key_columns.columns,
         "stat_letter_value",
-        NullKeyPolicy::Pool,
-        partition_ctx,
+        NullKeyPolicy::Skip,
+        ctx,
     )?;
     let dtypes = key_columns.split(&partition.dtypes, DataType::Utf8)?;
 
@@ -572,13 +489,8 @@ fn compute_depths(
     // slot, legend entry and facet panel stay and the render can name it.
     let mut groups: BTreeMap<ComboKey, Vec<f64>> = BTreeMap::new();
     let mut emptied: Vec<ComboKey> = Vec::new();
-    let mut dropped_rows = 0_usize;
     for (key, rows) in &partition.groups {
         let g = key_columns.combo(key)?;
-        if key_columns.drops(&g) {
-            dropped_rows += rows.len();
-            continue;
-        }
         let mut vs: Vec<f64> = rows.iter().filter_map(|&r| {
             if varr.is_null(r) { return None; }
             let v = varr.value(r);
@@ -592,16 +504,6 @@ fn compute_depths(
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         groups.insert(g, vs);
     }
-    // Under `Pool` every row is in some partition group, and the groups the
-    // loop skipped are exactly the rows a dropping field's null removed.
-    report_skipped_null_keys(
-        batch,
-        &dropping_fields,
-        "stat_letter_value",
-        DROPPED_KEYS,
-        NullKeyCounts { any_null: dropped_rows, fully_null: 0, n_rows: batch.num_rows() },
-        ctx,
-    );
     let order = group_order(&spec.sort, &groups);
 
     let mut rows = Vec::new();
@@ -1810,14 +1712,11 @@ mod tests {
         assert_eq!(d_groups.value(0), 7);
     }
 
-    /// Evidence for the `NullKeyPolicy::Pool` design choice in
-    /// `compute_depths`'s doc comment: a null-valued group row still forms
-    /// its OWN group (materialized as a null `group` entry), rather than
-    /// being dropped the way `NullKeyPolicy::Skip` would drop it. 5 rows key
-    /// to `"a"`, 5 key to a null group column value; both must survive as
-    /// distinct groups.
+    /// A null-valued `group` row belongs to no group: it is dropped, with one
+    /// warning naming the field and the count, and never forms a group of its
+    /// own. 5 rows key to `"a"`, 5 key to a null group value.
     #[test]
-    fn letter_value_null_group_value_pools_into_one_null_keyed_group() {
+    fn letter_value_null_group_value_rows_are_dropped_and_counted() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Utf8, true),
             Field::new("v", DataType::Float64, true),
@@ -1842,18 +1741,39 @@ mod tests {
             name: None,
             sort: None,
         };
-        let out = apply(&spec, &batch).unwrap();
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).unwrap();
         let g_arr = out.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let mut seen: std::collections::HashSet<Option<String>> = std::collections::HashSet::new();
-        for i in 0..out.num_rows() {
-            seen.insert(if g_arr.is_null(i) { None } else { Some(g_arr.value(i).to_string()) });
-        }
+        let seen: std::collections::HashSet<Option<String>> = (0..out.num_rows())
+            .map(|i| if g_arr.is_null(i) { None } else { Some(g_arr.value(i).to_string()) })
+            .collect();
+        assert_eq!(seen, std::collections::HashSet::from([Some("a".to_string())]), "no null-keyed group is drawn");
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
         assert_eq!(
-            seen,
-            std::collections::HashSet::from([Some("a".to_string()), None]),
-            "the null-valued-group rows must survive as their own group (a null 'group' \
-             entry), not be silently dropped (NullKeyPolicy::Skip's behavior) or scattered"
+            warnings,
+            ["LetterValue: 5 rows have a null 'g' and belong to no group, so they were dropped; \
+              fill or filter the nulls in 'g'"]
         );
+        let outs = secondary_outputs(&spec, &batch, &out, &TransformContext::default()).unwrap();
+        assert!(
+            floats(secondary(&outs, OUTLIERS_KEY), "value").iter().all(|v| *v < 10.0),
+            "a null-group row is no outlier"
+        );
+    }
+
+    /// Every `group` value null: the call warns that the data could not be
+    /// split into groups, naming `group`, and returns no rows.
+    #[test]
+    fn letter_value_every_group_value_null_warns_and_returns_no_rows() {
+        let batch = keyed_batch(&[("g", vec![None, None, None])], vec![1.0, 2.0, 3.0]);
+        let spec = lv_spec(serde_json::json!({
+            "value": "v", "group": "g", "k_depth": {"type": "tukey"},
+        }));
+        let ctx = TransformContext::default();
+        let out = apply_with_context(&spec, &batch, &ctx).expect("an emptied call does not refuse");
+        assert_eq!(out.num_rows(), 0);
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(warnings, [all_null_warning("g")]);
     }
 
     /// FA-7-style byte-stability guard for #185: a Utf8 group column produces
@@ -2067,11 +1987,10 @@ mod tests {
         assert_eq!(strs(outliers, "group"), some(&["a"; 4]), "z has no value to be an outlier");
     }
 
-    /// A null `group` value pools into one null-keyed group, and when none of
-    /// its rows has a usable value that group keeps its placeholder too, with
-    /// a null key.
+    /// A null `group` value belongs to no group, so a null-keyed row whose
+    /// value is unusable is dropped too and keeps no placeholder.
     #[test]
-    fn an_emptied_null_keyed_group_keeps_its_null_key() {
+    fn a_null_keyed_row_with_no_usable_value_keeps_no_placeholder() {
         let batch = keyed_batch(
             &[("g", vec![None, None, Some("a"), Some("a"), Some("a")])],
             vec![f64::NAN, f64::NAN, 1.0, 2.0, 3.0],
@@ -2080,8 +1999,8 @@ mod tests {
             "value": "v", "group": "g", "k_depth": {"type": "tukey"},
         }));
         let out = apply(&spec, &batch).unwrap();
-        assert_eq!(strs(&out, "group"), vec![Some("a".to_string()), None]);
-        assert!(floats(&out, "lower")[1].is_nan());
+        assert_eq!(strs(&out, "group"), vec![Some("a".to_string())]);
+        assert!(!floats(&out, "lower")[0].is_nan());
     }
 
     /// A `groupby` field equal to `group` is `group`'s own dimension, so the
@@ -2417,7 +2336,7 @@ mod tests {
 
     /// A null `groupby` key belongs to no combination: its rows are dropped
     /// from the primary, outlier and depth batches alike, with one warning
-    /// naming the field and the count. Pooled into a null combination, the
+    /// naming the field and the count. Kept as a null combination, the
     /// two null rows would draw their own box, and 100 and 200 would sit in
     /// no fence of `x`'s.
     #[test]
@@ -2470,7 +2389,7 @@ mod tests {
         let out = apply_with_context(&spec, &batch, &ctx).expect("an emptied call does not refuse");
         assert_eq!(out.num_rows(), 0);
         let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
-        assert_eq!(warnings, [all_null_warning("h")]);
+        assert_eq!(warnings, [all_null_warning("g, h")]);
         assert!(ctx.all_null_partitions.borrow().is_empty(), "a whole frame records no partition");
 
         let outs = secondary_outputs(&spec, &batch, &out, &TransformContext::default()).unwrap();
@@ -2513,7 +2432,7 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].step, StepInstance::Chain(vec![1]));
         match &recorded[0].outcome {
-            AllNullOutcome::Emptied(warning) => assert_eq!(warning.to_string(), all_null_warning("h")),
+            AllNullOutcome::Emptied(warning) => assert_eq!(warning.to_string(), all_null_warning("g, h")),
             other => panic!("expected the emptied outcome, got {other:?}"),
         }
     }
@@ -2560,13 +2479,14 @@ mod tests {
         let out = apply_with_context(&spec, &batch, &ctx).expect("an emptied call does not refuse");
         assert_eq!(out.num_rows(), 0);
         let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
-        assert_eq!(warnings, [all_null_warning("h, d")]);
+        assert_eq!(warnings, [all_null_warning("g, h, d")]);
     }
 
-    /// A null `group` with a usable `groupby` field is no drop: the null
-    /// category pools into its own combination and nothing is reported.
+    /// A null `group` drops its rows even beside a usable `groupby` field:
+    /// every row here is null-keyed, so the call warns once, naming both key
+    /// columns, and returns no rows.
     #[test]
-    fn a_null_group_with_a_usable_groupby_field_pools_and_warns_nothing() {
+    fn a_null_group_drops_its_rows_though_a_groupby_field_is_usable() {
         let batch = keyed_batch(
             &[("g", vec![None, None]), ("h", vec![Some("x"), Some("x")])],
             vec![1.0, 2.0],
@@ -2574,11 +2494,11 @@ mod tests {
         let spec = lv_spec(serde_json::json!({
             "value": "v", "group": "g", "groupby": ["h"], "k_depth": {"type": "full"},
         }));
-        let ctx = TransformContext { is_partition: true, ..TransformContext::default() };
+        let ctx = TransformContext::default();
         let out = apply_with_context(&spec, &batch, &ctx).unwrap();
-        assert_eq!(strs(&out, "group"), vec![None]);
-        assert!(ctx_warnings(&ctx).is_empty(), "got {:?}", ctx_warnings(&ctx));
-        assert!(ctx.all_null_partitions.borrow().is_empty());
+        assert_eq!(out.num_rows(), 0);
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(warnings, [all_null_warning("g, h")]);
     }
 
     /// The null-key drop reports through the shared reporter before the
@@ -2630,25 +2550,29 @@ mod tests {
     }
 
     /// A `groupby` field equal to `group` is `group`'s own dimension: a null
-    /// `group` still pools into its own combination, unwarned, exactly as
-    /// without `groupby`.
+    /// `group` drops its rows, counted once under the one column.
     #[test]
-    fn letter_value_groupby_equal_to_group_keeps_group_null_pooling() {
+    fn letter_value_groupby_equal_to_group_drops_a_null_group_once() {
         let batch = keyed_batch(&[("g", vec![None, None, Some("a")])], vec![1.0, 3.0, 9.0]);
         let grouped = lv_spec(serde_json::json!({
             "value": "v", "group": "g", "groupby": ["g"], "k_depth": {"type": "full"},
         }));
         let ctx = TransformContext::default();
         let out = apply_with_context(&grouped, &batch, &ctx).unwrap();
-        assert_eq!(strs(&out, "group"), vec![None, Some("a".to_string())]);
-        assert_eq!(strs(&out, "g"), vec![None, Some("a".to_string())]);
-        assert_eq!(floats(&out, "lower"), vec![2.0, 9.0]);
-        assert!(ctx_warnings(&ctx).is_empty(), "got {:?}", ctx_warnings(&ctx));
+        assert_eq!(strs(&out, "group"), vec![Some("a".to_string())]);
+        assert_eq!(strs(&out, "g"), vec![Some("a".to_string())]);
+        assert_eq!(floats(&out, "lower"), vec![9.0]);
+        let warnings: Vec<String> = ctx_warnings(&ctx).iter().map(|w| w.to_string()).collect();
+        assert_eq!(
+            warnings,
+            ["LetterValue: 2 rows have a null 'g' and belong to no group, so they were dropped; \
+              fill or filter the nulls in 'g'"]
+        );
     }
 
     /// The depth-cap label names each distinct key column once, so
     /// `groupby=[group]` labels exactly as `group` alone does, for a real and
-    /// for a null `group` value alike.
+    /// for a null `group` value alike (a null `group` is dropped, so it labels nothing).
     #[test]
     fn letter_value_groupby_equal_to_group_labels_as_group_alone() {
         let clamped_labels = |spec: &LetterValueSpec, batch: &RecordBatch| -> Vec<Option<String>> {
@@ -2673,7 +2597,7 @@ mod tests {
         assert_eq!(clamped_labels(&grouped, &named), vec![Some("g=big".to_string())]);
         assert_eq!(clamped_labels(&grouped, &named), clamped_labels(&alone, &named));
         let null = keyed_batch(&[("g", vec![None; 10_000])], values);
-        assert_eq!(clamped_labels(&grouped, &null), vec![None]);
+        assert_eq!(clamped_labels(&grouped, &null), Vec::<Option<String>>::new(), "a null group is dropped, so it has no depth to clamp");
         assert_eq!(clamped_labels(&grouped, &null), clamped_labels(&alone, &null));
     }
 

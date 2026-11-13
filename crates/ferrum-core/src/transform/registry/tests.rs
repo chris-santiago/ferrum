@@ -469,7 +469,7 @@ fn linkage_outputs_match_actual_schema() {
         metric: DistanceMetric::Euclidean,
         axis: LinkageAxis::Rows,
         z_score: None,
-        standard_scale: None,
+        standard_scale: None, labels: None,
         name: None,
     };
     let batch = f64_batch(&[("a", &[1.0, 2.0, 3.0]), ("b", &[4.0, 1.0, 0.0])]);
@@ -923,7 +923,7 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
         })),
         ("linkage", Linkage(LinkageSpec {
             method: LinkageMethod::Ward, metric: DistanceMetric::Euclidean, axis: LinkageAxis::Rows,
-            z_score: None, standard_scale: None, name: None,
+            z_score: None, standard_scale: None, labels: None, name: None,
         })),
         ("raster", Raster(RasterSpec {
             x: "x".into(), y: "y".into(), aggregate: Default::default(), field: None,
@@ -2236,7 +2236,7 @@ fn linkage_secondary_outputs_match_actual_batches() {
             metric: DistanceMetric::Euclidean,
             axis: LinkageAxis::Rows,
             z_score: None,
-            standard_scale: None,
+            standard_scale: None, labels: None,
             name: None,
         }),
         &batch,
@@ -2286,7 +2286,7 @@ fn a_spec_name_prefixes_every_declared_secondary_key() {
             metric: DistanceMetric::Euclidean,
             axis: LinkageAxis::Rows,
             z_score: None,
-            standard_scale: None,
+            standard_scale: None, labels: None,
             name: Some("clust".into()),
         });
         let primary = spec.apply(&batch).unwrap();
@@ -2460,7 +2460,7 @@ fn pinned_secondary_keys_captured_from_head() {
             metric: DistanceMetric::Euclidean,
             axis: LinkageAxis::Rows,
             z_score: None,
-            standard_scale: None,
+            standard_scale: None, labels: None,
             name: None,
         });
         let primary = unnamed.apply(&batch).unwrap();
@@ -2477,7 +2477,7 @@ fn pinned_secondary_keys_captured_from_head() {
             metric: DistanceMetric::Euclidean,
             axis: LinkageAxis::Rows,
             z_score: None,
-            standard_scale: None,
+            standard_scale: None, labels: None,
             name: Some("pinned".into()),
         });
         let primary = named.apply(&batch).unwrap();
@@ -2567,7 +2567,7 @@ fn secondary_key_pyfunction_agrees_with_every_internal_caller() {
                 metric: DistanceMetric::Euclidean,
                 axis: LinkageAxis::Rows,
                 z_score: None,
-                standard_scale: None,
+                standard_scale: None, labels: None,
                 name: name.map(String::from),
             });
             let primary = spec.apply(&batch).unwrap();

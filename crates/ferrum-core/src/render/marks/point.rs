@@ -19,7 +19,7 @@
 //! default exactly as before. `Utf8` shape columns are byte-identical.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_positional_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
@@ -358,12 +358,12 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     };
 
     let xs_f64 = col_as_f64(ctx.batch, xf).ok();
-    // Use col_as_positional_category_str so integer-typed ordinal columns (e.g.
-    // Int64 year values) stringify the same way the ordinal domain was built, and
-    // a null positional category lands in its own band (FA-9).
-    let xs_str = col_as_positional_category_str(ctx.batch, xf).ok();
+    // Use col_as_ordinal_category_str so integer-typed ordinal columns (e.g.
+    // Int64 year values) stringify the same way the ordinal domain was built; a
+    // null positional category has no band and places no point.
+    let xs_str = col_as_ordinal_category_str(ctx.batch, xf).ok();
     let ys_f64 = col_as_f64(ctx.batch, yf).ok();
-    let ys_str = col_as_positional_category_str(ctx.batch, yf).ok();
+    let ys_str = col_as_ordinal_category_str(ctx.batch, yf).ok();
     let n = xs_f64
         .as_ref().map(|v| v.len())
         .or_else(|| xs_str.as_ref().map(|v| v.len()))
@@ -1517,14 +1517,11 @@ mod tests {
         }
     }
 
-    /// T12 fix round (spec §4.3, amended 2026-09-01, Issue 2 pin): the spec
-    /// reviewer's missing pin — `mark_point(filled=False, stroke_dash=[6,3])`
-    /// with no `stroke_dash` encoding — through the full `render_svg`
-    /// pipeline, not just the internal `ShapeStyle` field the test above
-    /// pins. `filled=False` is the realistic usage this ruling names: a
-    /// hollow marker's visible outline IS its stroke, so the dash pattern is
-    /// only meaningful there. Proves the literal reaches the actual
-    /// `stroke-dasharray` SVG attribute end to end.
+    /// `mark_point(filled=False, stroke_dash=[6,3])` with no `stroke_dash`
+    /// encoding, through the full `render_svg` pipeline, not just the internal
+    /// `ShapeStyle` field the test above pins. A hollow marker's visible
+    /// outline is its stroke, so the dash pattern is only meaningful there:
+    /// the literal must reach the actual `stroke-dasharray` SVG attribute.
     #[test]
     fn stroke_dash_literal_filled_false_no_encoding_emits_svg_dasharray() {
         let mut spec = three_row_spec();
@@ -1547,23 +1544,16 @@ mod tests {
             "every hollow point must carry the literal stroke_dash as a real SVG dasharray attribute: {svg}");
     }
 
-    /// T12 fix round (spec §4.3, amended 2026-09-01, Issue 2 pin): the
-    /// reviewer's other missing pin — a NUMERIC `stroke_dash` encoding whose
-    /// per-row index is null falls back to the mark's literal `stroke_dash`,
-    /// per `resolve_row_stroke_dash`'s numeric branch
-    /// (`channels.rs`: `.or_else(|| base.map(<[f64]>::to_vec))`). Pre-T12,
-    /// point.rs read no literal at all, so a null numeric index row drew
-    /// solid; this fix round's ruling is to KEEP this fallback (the reviewer
-    /// judged it consistent with line/bar's own `.or(base_dash)` idiom) and
-    /// pin it. Reproduces the reviewer's live repro exactly:
-    /// `mark_point(filled=False, stroke_dash=[9,1])` +
-    /// `StrokeDash('sd', type_='quantitative')` with `sd=[1.0, None, 2.0]`
-    /// through the full `render_svg` pipeline, asserting the actual SVG
-    /// dasharrays in row order: `["6,3", "9,1", "2,3"]` — row 0 resolves
-    /// `DASH_PALETTE[0]` via its own index, row 1 (null index) inherits the
-    /// literal `[9,1]`, row 2 resolves `DASH_PALETTE[1]`.
+    /// A NUMERIC `stroke_dash` encoding draws one dash per index level, so a
+    /// row whose index is null belongs to no level: the null-key drop removes
+    /// it and counts it (`mark_point: 1 row has a null 'sd' ...`), and the
+    /// other rows keep the dashes their own indexes give. The literal
+    /// `stroke_dash=[9,1]` of the mark is still the fallback for a row whose
+    /// index is present but not a finite number. Through the full `render_svg`
+    /// pipeline with `sd=[1.0, None, 2.0]`: two circles, dasharrays
+    /// `["6,3", "2,3"]` (`DASH_PALETTE[0]` and `[1]`).
     #[test]
-    fn stroke_dash_numeric_null_index_row_inherits_literal_fallback() {
+    fn stroke_dash_numeric_null_index_row_is_dropped() {
         use arrow::array::Float64Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -1602,7 +1592,7 @@ mod tests {
         let svg = &result.bytes;
 
         let circle_tags: Vec<&str> = svg.split("<circle ").skip(1).collect();
-        assert_eq!(circle_tags.len(), 3, "expected 3 circle elements: {svg}");
+        assert_eq!(circle_tags.len(), 2, "the null-index row is dropped: {svg}");
         let extract_dash = |tag: &str| -> Option<String> {
             let attrs = &tag[..tag.find('>').unwrap_or(tag.len())];
             attrs.find("stroke-dasharray=\"").map(|start| {
@@ -1613,8 +1603,8 @@ mod tests {
         let dashes: Vec<Option<String>> = circle_tags.iter().map(|t| extract_dash(t)).collect();
         assert_eq!(
             dashes,
-            vec![Some("6,3".to_string()), Some("9,1".to_string()), Some("2,3".to_string())],
-            "row order must match the reviewer's live repro shape [\"6,3\",\"9,1\",\"2,3\"]: {svg}"
+            vec![Some("6,3".to_string()), Some("2,3".to_string())],
+            "the kept rows resolve their own index levels in row order: {svg}"
         );
     }
 

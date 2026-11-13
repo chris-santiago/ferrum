@@ -4549,9 +4549,10 @@ fn prepare_and_layout(
     // An independent-x/y facet panel draws its own axis, from its own scale:
     // resolve those axis inputs now, so layout reserves each axis band for
     // what the panels draw.
+    let routed = prep.routed_spec(spec);
     prep.axes.panels = scene_build::independent_panel_axis_inputs(
         &scene_build::PanelResolveCtx {
-            spec,
+            spec: &routed,
             prep: &prep,
             theme: &applied.effective_theme,
             chart_config,

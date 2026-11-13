@@ -10,6 +10,7 @@ use crate::spec::axis::AlignAxis;
 use crate::spec::chart::ChartSpec;
 
 use super::arrow_cast::col_as_identity_key_str;
+use crate::transform::core::FINAL_OUTPUT_KEY;
 use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
 use super::draw::{self, to_scene_color, to_scene_text_style, ClearablePaint, DrawCtx};
@@ -105,9 +106,12 @@ pub fn build_scene(
     // → byte-identical.
     leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<SceneGraph, RenderError> {
-    // The primary y owner `prepare` resolved, so the per-panel scales read
-    // the same layer flags as the prepared layers and slot plan.
-    let spec = &*scale_resolve::with_primary_y_owner(spec);
+    // The layers' routes `prepare` recorded (a layer the null-key drop gave
+    // rows of its own), then the primary y owner it resolved, so the
+    // per-panel scales read the same layer rows and flags as the prepared
+    // layers and slot plan. The two touch different fields and commute.
+    let routed = prep.routed_spec(spec);
+    let spec = &*scale_resolve::with_primary_y_owner(&routed);
     // #230-8 (REFUSE MALFORMED; extended to `Geo`). A
     // projected coordinate system (`Polar` or `Geo`) combined with any
     // `BreakAxis` structural spec is refused, before any geometry — break or
@@ -252,7 +256,7 @@ pub fn build_scene(
     // base data, or the named `data_source` output it reads. A panel's layer
     // batches are these filtered to its facet; a swarm's packing bound reads
     // them whole, so every facet panel packs at the same diameter.
-    let chart_layer_batches = chart_layer_batches(prep);
+    let chart_layer_batches = chart_layer_batches(prep)?;
 
     // The swarm each layer is placed by: one packing per swarm for the whole
     // chart, shared by every layer it feeds in every panel ([`position::chart_swarms`]'s
@@ -929,18 +933,19 @@ pub(in crate::render) struct PanelResolveCtx<'a> {
     pub(in crate::render) leaf_scales: Option<&'a LeafScaleContext>,
 }
 
-/// Each layer's whole-chart batch: the chart's final batch, or the named
-/// transform output a layer reads from.
-fn chart_layer_batches(prep: &PreparedInputs) -> Vec<RecordBatch> {
+/// Each layer's whole-chart batch: the chart's final batch, the named
+/// transform output a layer reads from, or the rows the null-key drop gave it.
+fn chart_layer_batches(prep: &PreparedInputs) -> Result<Vec<RecordBatch>, RenderError> {
     prep.layers
         .iter()
-        .map(|layer| match &layer.data_source {
-            None => prep.final_batch().clone(),
-            Some(name) => prep
+        .enumerate()
+        .map(|(index, layer)| match layer.rows_key() {
+            FINAL_OUTPUT_KEY => Ok(prep.final_batch().clone()),
+            key => prep
                 .transform_outputs
-                .get(name)
-                .expect("layer.data_source validated by prepare_render_inputs")
-                .clone(),
+                .get(key)
+                .cloned()
+                .ok_or_else(|| super::prepare::unpublished_data_source(index, key, &prep.transform_outputs)),
         })
         .collect()
 }
@@ -978,9 +983,9 @@ fn panel_layer_batches(
     prep.layers
         .iter()
         .zip(chart_layer_batches)
-        .map(|(layer, src)| match &layer.data_source {
-            None => Ok(panel_batch.clone()),
-            Some(_) => filter_to_panel(src, keys),
+        .map(|(layer, src)| match (&layer.data_source, &layer.own_rows) {
+            (None, None) => Ok(panel_batch.clone()),
+            _ => filter_to_panel(src, keys),
         })
         .collect()
 }
@@ -1085,7 +1090,7 @@ pub(in crate::render) fn independent_panel_axis_inputs(
         return Ok(Vec::new());
     }
     let prep = ctx.prep;
-    let chart_layer_batches = chart_layer_batches(prep);
+    let chart_layer_batches = chart_layer_batches(prep)?;
     let kept = facet.mode.kept_panel_count(facet_groups.len() as u32) as usize;
     facet_groups
         .iter()
@@ -1257,12 +1262,29 @@ fn resolve_panel_scales(
     // concrete domains before scale resolution. No-op when `params` is empty.
     scale_resolve::resolve_param_domains(&mut rendering_spec_for_panel);
 
+    // A layer on the chart's data that the null-key drop gave rows of its own
+    // is read as the chart's data it is a subset of: its all-panel rows under
+    // its own key, and this panel's slice beside them. The per-panel map is
+    // built only then; every other chart resolves over `prep.transform_outputs`
+    // as before.
+    let panel_outputs;
+    let outputs = if prep.layer_routes.iter().any(|(index, _)| prep.layers[*index].data_source.is_none()) {
+        let mut map = prep.transform_outputs.clone();
+        for (index, key) in prep.layer_routes.iter().filter(|(index, _)| prep.layers[*index].data_source.is_none()) {
+            map.insert(super::prepare::null_keys::panel_key(key), layer_batches[*index].clone());
+        }
+        panel_outputs = map;
+        &panel_outputs
+    } else {
+        &prep.transform_outputs
+    };
+
     // Scale resolution over this panel's pixel range.
     let (mut scales, scale_warnings) = scale_resolve::resolve_scales_with_leaf_context(
         &rendering_spec_for_panel,
         &spec.encoding,
         panel_batch,
-        &prep.transform_outputs,
+        outputs,
         &prep.transform_lineages,
         (panel.plot_area.x, panel.plot_area.x + panel.plot_area.w),
         (panel.plot_area.y, panel.plot_area.y + panel.plot_area.h),
@@ -5025,6 +5047,7 @@ mod tests {
             dropped_reads: Vec::new(),
             raster_value_field: None,
             grouping_series: crate::render::prepare::SeriesGrouping::default(),
+            own_rows: None,
         }
     }
 
@@ -16776,9 +16799,9 @@ mod tests {
                 step: step.clone(),
             }),
         ];
-        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["g".into()], log_emptied: vec![] }]);
+        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["g".into()], log_emptied: vec![], pools_null_keys: false }]);
         let not_reached = lineage(Vec::new());
-        let missing_column = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["absent".into()], log_emptied: vec![] }]);
+        let missing_column = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["absent".into()], log_emptied: vec![], pools_null_keys: false }]);
 
         assert!(group_owned_by_its_fit(&warnings, Some(&reached), &batch, &[0, 2], Some("f=p")), "both g=a rows are named");
         assert!(
@@ -16831,7 +16854,7 @@ mod tests {
             written_groupby: Vec::new(),
             source: std::sync::Arc::new(Schema::empty()),
             log_input: std::collections::HashMap::new(),
-            steps: vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: vec![groupby.into()], log_emptied: emptied }],
+            steps: vec![PassedStep { step: StepInstance::Chain(vec![1]), groupby: vec![groupby.into()], log_emptied: emptied, pools_null_keys: false }],
         };
         // Rows 0 and 2 are group "g=a"; row 1 is "g=b".
         let batch = RecordBatch::try_new(
@@ -16882,6 +16905,7 @@ mod tests {
                 step: StepInstance::Chain(vec![1]),
                 groupby: vec!["w".into()],
                 log_emptied: vec![LogEmptied { panel: None, groups: Some(vec!["w=0".to_string()]) }],
+                pools_null_keys: false,
             }],
         };
         let batch = RecordBatch::try_new(
@@ -16930,7 +16954,7 @@ mod tests {
         .unwrap();
         let rows: Vec<usize> = (0..N).collect();
         let step = StepInstance::Chain(vec![0]);
-        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["t".into()], log_emptied: vec![] }]);
+        let reached = lineage(vec![PassedStep { step: step.clone(), groupby: vec!["t".into()], log_emptied: vec![], pools_null_keys: false }]);
 
         let every_label_named = vec![RenderWarning::Transform(TransformWarning::ExtentUndefined {
             transform: "ErrorExtent".into(),
@@ -18604,5 +18628,245 @@ mod coord_flip_y2_merge_tests {
             [0.0, 72.9],
             "#113/#172(3): marks y domain must be the authored lo..hi range (0.0..72.9)"
         );
+    }
+}
+
+/// A layer the null-key drop gave rows of its own resolves its scales over
+/// those rows: per panel, under a shared and under an independent facet y.
+#[cfg(test)]
+mod routed_layer_scale_tests {
+    use super::*;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// A point of `v` on `y` and a line of `w` (coloured by `h`) over one
+    /// frame, faceted by `f`. Row 3 holds a null `h` and a `w` of 1000: the
+    /// line drops it, the point keeps it.
+    fn routed_chart(y: crate::layout::ResolveMode) -> (ChartSpec, RecordBatch) {
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"}}},{"mark":"line","encoding":{"y":{"field":"w"},"color":{"field":"h","type":"nominal"}}}]}"#;
+        let mut spec: ChartSpec = serde_json::from_str(json).unwrap();
+        spec.facet = Some(crate::layout::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve { x: crate::layout::ResolveMode::Shared, y },
+        });
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Float64, true),
+                Field::new("v", DataType::Float64, true),
+                Field::new("w", DataType::Float64, true),
+                Field::new("h", DataType::Utf8, true),
+                Field::new("f", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 100.0, 200.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 100.0, 1000.0])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("a"), Some("a"), None])),
+                Arc::new(StringArray::from(vec!["F1", "F1", "F2", "F2"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    /// The y domain each facet panel's marks resolve.
+    fn panel_y_domains(spec: &ChartSpec, batch: &RecordBatch) -> Vec<(f64, f64)> {
+        let theme = ThemeInputs::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let prep = super::super::prepare::prepare_render_inputs(
+            spec,
+            batch,
+            &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &chart_config,
+            None,
+        )
+        .unwrap();
+        let routed = prep.routed_spec(spec);
+        let ctx = PanelResolveCtx { spec: &routed, prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None };
+        let chart_batches = chart_layer_batches(&prep).unwrap();
+        prep.facet_groups
+            .iter()
+            .map(|group| {
+                let keys = (Some(&group.key), group.row_key.as_ref());
+                let panel = panel_batch(&prep, keys).unwrap();
+                let layer_batches = panel_layer_batches(&prep, &chart_batches, &panel, keys).unwrap();
+                let panel_layout = crate::layout::PanelLayout {
+                    plot_area: crate::layout::Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 },
+                    ..Default::default()
+                };
+                let (_, scales) = resolve_panel_scales(
+                    &ctx,
+                    &panel_layout,
+                    &panel,
+                    &layer_batches,
+                    &mut Vec::new(),
+                    (0.0, 0.0),
+                    &scale_resolve::TextEdgeDemands::default(),
+                )
+                .unwrap();
+                scales.y.data_domain().expect("a continuous y")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_moved_layers_dropped_rows_leave_every_panels_independent_y() {
+        let (spec, batch) = routed_chart(crate::layout::ResolveMode::Independent);
+        let domains = panel_y_domains(&spec, &batch);
+        assert_eq!(domains.len(), 2);
+        assert!(domains[0].1 < 10.0, "F1 spans its own rows only: {domains:?}");
+        assert!(
+            domains[1].0 >= 100.0 && domains[1].1 <= 250.0,
+            "F2 spans the point's 100 and 200 and the line's kept 100, never the dropped row's 1000: {domains:?}"
+        );
+    }
+
+    #[test]
+    fn a_moved_layers_dropped_rows_leave_the_shared_y_of_every_panel() {
+        let (spec, batch) = routed_chart(crate::layout::ResolveMode::Shared);
+        let domains = panel_y_domains(&spec, &batch);
+        assert_eq!(domains[0], domains[1], "a shared y is one domain");
+        assert!(domains[0].1 <= 250.0, "the shared y spans the point's rows and the line's kept rows, not 1000: {domains:?}");
+    }
+
+    #[test]
+    fn without_a_route_a_render_resolves_over_the_prepared_outputs_alone() {
+        let (mut spec, batch) = routed_chart(crate::layout::ResolveMode::Shared);
+        // Both layers key the same fields: nothing moves.
+        spec.layers.as_mut().unwrap()[1].encoding.color = None;
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &super::super::chart_config::ChartConfig::default(),
+            None,
+        )
+        .unwrap();
+        assert!(prep.layer_routes.is_empty());
+        assert!(matches!(prep.routed_spec(&spec), std::borrow::Cow::Borrowed(_)));
+    }
+}
+
+/// The routed layers through the real entries: a chart whose layer the null-key
+/// drop gave rows of its own renders (`render_svg`, which prepares, lays out and
+/// builds the scene) exactly as the chart does whose dropped rows are null
+/// where the layer reads them, so they place nothing and widen nothing.
+#[cfg(test)]
+mod routed_entry_tests {
+    use super::*;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn svg(spec: &ChartSpec, batch: &RecordBatch) -> String {
+        crate::render::render_svg(
+            spec,
+            batch,
+            &ThemeInputs::default(),
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &crate::render::config::RenderConfig::default(),
+            &crate::render::chart_config::ChartConfig::default(),
+        )
+        .unwrap()
+        .bytes
+    }
+
+    fn facet(y: crate::layout::ResolveMode) -> crate::layout::FacetSpec {
+        crate::layout::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve { x: crate::layout::ResolveMode::Shared, y },
+        }
+    }
+
+    /// `w` is the value the dropped row carries on the line's channel: 1000,
+    /// or null for the neutral twin (a row null where the line reads it).
+    fn frame(dropped_w: Option<f64>) -> RecordBatch {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Float64, true),
+                Field::new("v", DataType::Float64, true),
+                Field::new("w", DataType::Float64, true),
+                Field::new("h", DataType::Utf8, true),
+                Field::new("f", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 100.0, 200.0])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(100.0), dropped_w])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("a"), Some("a"), None])),
+                Arc::new(StringArray::from(vec!["F1", "F1", "F2", "F2"])),
+            ],
+        )
+        .unwrap()
+    }
+
+    const POINT_AND_LINE: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"}}},{"mark":"line","encoding":{"y":{"field":"w"},"color":{"field":"h","type":"nominal"}}}]}"#;
+
+    /// `build_scene` (marks) and `prepare_and_layout` (independent panel axes)
+    /// each read the routed spec: reverting either changes this render.
+    #[test]
+    fn a_moved_layer_renders_as_its_neutral_twin_under_shared_and_independent_y() {
+        for y in [crate::layout::ResolveMode::Shared, crate::layout::ResolveMode::Independent] {
+            let mut spec: ChartSpec = serde_json::from_str(POINT_AND_LINE).unwrap();
+            spec.facet = Some(facet(y));
+            assert_eq!(svg(&spec, &frame(Some(1000.0))), svg(&spec, &frame(None)), "{y:?}");
+        }
+    }
+
+    /// The secondary y slot's batch is the moved layer's own rows.
+    #[test]
+    fn a_moved_independent_y_layer_spans_its_kept_rows_on_its_own_axis() {
+        let json = POINT_AND_LINE.replace(r#"{"mark":"line","#, r#"{"mark":"line","independent_y":true,"#);
+        let spec: ChartSpec = serde_json::from_str(&json).unwrap();
+        let (with, neutral) = (svg(&spec, &frame(Some(1000.0))), svg(&spec, &frame(None)));
+        assert_eq!(with, neutral);
+    }
+
+    /// A data-aware category sort reads the establishing layer's own rows
+    /// (`layer_sort_rows`): dropping the null-`h` row of `b` (w = 1000) flips
+    /// the order of the categories by mean `w`.
+    #[test]
+    fn a_data_aware_sort_reads_the_moved_establishing_layers_rows() {
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"y":{"field":"v"}},"layers":[{"mark":"rule","encoding":{"y":{"field":"v"}}},{"mark":"point","encoding":{"x":{"field":"c","type":"nominal","sort":"-y"},"y":{"field":"w"},"color":{"field":"h","type":"nominal"}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(json).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("c", DataType::Utf8, true),
+                Field::new("v", DataType::Float64, true),
+                Field::new("w", DataType::Float64, true),
+                Field::new("h", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+                Arc::new(Float64Array::from(vec![1.0; 4])),
+                Arc::new(Float64Array::from(vec![1.0, 5.0, 2.0, 1000.0])),
+                Arc::new(StringArray::from(vec![Some("x"), Some("x"), Some("x"), None])),
+            ],
+        )
+        .unwrap();
+        let out = svg(&spec, &batch);
+        let position = |label: &str| out.find(&format!(">{label}</text>")).unwrap_or_else(|| panic!("no tick {label}"));
+        // Kept rows: mean(a) = 3 and mean(b) = 2, so `-y` puts a first; the
+        // unrouted rows (mean(b) = 501) would put b first.
+        assert!(position("a") < position("b"), "a sorts before b over the kept rows: {out}");
     }
 }
