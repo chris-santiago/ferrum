@@ -484,8 +484,18 @@ _LMPLOT_C_BAND_UNDEFINED = (
 )
 
 
-@pytest.mark.parametrize("input_name", _SILENT_INPUTS)
-@pytest.mark.parametrize("name", _DOOR_CASES)
+#: The one pair whose null twin names a hue x category cell: row 2 is the only ``h=m, c=c`` row of
+#: the stacked bar, so that cell draws nothing while ``c=c`` draws under ``h=n``.
+_STACKED_CELL = ("mark_bar stacked", "inf-in-group-c")
+_SILENT_CASES = [
+    pytest.param(name, input_name, id=f"{name}-{input_name}")
+    for input_name in _SILENT_INPUTS
+    for name in _ALL_DOORS
+    if (name, input_name) != _STACKED_CELL
+]
+
+
+@pytest.mark.parametrize("name,input_name", _SILENT_CASES)
 def test_a_skipped_infinite_value_raises_no_warning(name: str, input_name: str):
     """Skipping the infinity is not itself reported: on a frame where every group keeps enough
     usable values for its null twin to be silent, the chart warns nothing."""
@@ -500,6 +510,18 @@ def test_a_skipped_infinite_value_raises_no_warning(name: str, input_name: str):
     else:
         assert twin.messages == [], "the fixture's groups keep enough usable values"
         assert got.messages == []
+
+
+def test_a_skipped_infinite_value_in_a_stacked_bar_names_the_cell_its_twin_names():
+    """The infinity empties the cell ``h=m, c=c`` exactly as the null does, so both charts name
+    that cell, and name nothing else."""
+    name, input_name = _STACKED_CELL
+    frame = _INPUTS[input_name]
+    twin = _outcome(_static(_ALL_DOORS[name].build(_null_twin(frame))))
+    got = _outcome(_static(_ALL_DOORS[name].build(frame)))
+    expected = ["mark_bar: every row of h=m, c=c has a null or non-finite y, so it draws nothing"]
+    assert twin.messages == expected
+    assert got.messages == expected
 
 
 def test_a_density_group_left_with_one_usable_value_names_the_count():

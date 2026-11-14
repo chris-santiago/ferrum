@@ -774,6 +774,10 @@ pub struct PreparedInputs {
     /// key but drop different rows, the later one reads its own. Empty for
     /// every chart whose layers all read the key they started on.
     pub(in crate::render) layer_routes: Vec<(usize, String)>,
+    /// What each completion the impute step ran said, with the identity of the
+    /// completion, so an overlay composite whose leaves complete the same rows
+    /// the same way reports their notices once ([`ImputeReport`]).
+    pub(in crate::render) impute_reports: Vec<ImputeReport>,
     pub legend_entries: Vec<LegendEntry>,
     /// Legend title (Themes-T2.5b). Defaults to the color encoding's field
     /// name; None when no categorical color encoding drives a legend.
@@ -1650,7 +1654,8 @@ pub fn prepare_render_inputs(
         &mut transform_lineages,
     )?;
     null_key_drop.routes.extend(imputed.routes);
-    null_key_drop.warnings.extend(imputed.warnings);
+    null_key_drop.warnings.extend(imputed.reports.iter().flat_map(|report| report.warnings.iter().cloned()));
+    let impute_reports = imputed.reports;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .cloned()
@@ -1899,6 +1904,7 @@ pub fn prepare_render_inputs(
         facet_groups,
         facet_emptied_by_drop: facet_partitions.emptied_by_drop,
         layer_routes: null_key_drop.routes,
+        impute_reports,
         legend_entries,
         legend_title,
         colorbar,
@@ -2728,7 +2734,28 @@ struct ImputeStep {
     /// `(layer index, key of the layer's own rows)`, joining the null-key
     /// drop's routes.
     routes: Vec<(usize, String)>,
-    warnings: Vec<RenderWarning>,
+    /// One report per completion that raised a notice, in layer order.
+    reports: Vec<ImputeReport>,
+}
+
+/// The notices one impute completion raised, with what identifies the
+/// completion: the plan (value channel, key, series fields and options) and
+/// the rows it read. Two completions with equal plans over equal rows produce
+/// the same rows and the same notices, so a composite that renders them as
+/// separate charts reports them once ([`ImputeReport::completes_like`]), the
+/// way one chart reports layers that share a completion once.
+#[derive(Debug, Clone)]
+pub(in crate::render) struct ImputeReport {
+    plan: ImputePlan,
+    rows: RecordBatch,
+    pub(in crate::render) warnings: Vec<RenderWarning>,
+}
+
+impl ImputeReport {
+    /// Whether `other` completed the same rows the same way as this report.
+    pub(in crate::render) fn completes_like(&self, other: &Self) -> bool {
+        self.plan == other.plan && self.rows == other.rows
+    }
 }
 
 /// What one layer's impute completes, read off its drawn encoding: the value
@@ -3130,7 +3157,7 @@ fn apply_impute_after_drop(
     }
     let env = ImputeEnv { spec, order, buckets: buckets.as_ref(), unseriesed: std::cell::Cell::new(0) };
     let sink = TransformContext::default();
-    let mut said: Vec<Vec<TransformWarning>> = vec![Vec::new(); layers.len()];
+    let mut reports: Vec<(usize, ImputeReport)> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
     for (index, _) in plans.iter().enumerate().filter(|(_, plan)| plan.is_some()) {
         let key = layers[index].rows_key().to_string();
@@ -3147,7 +3174,7 @@ fn apply_impute_after_drop(
             let Some((plan, voice)) = &plans[members[0]] else { continue };
             let completed = complete_layer_rows(&original, plan, voice, &env, &sink).map_err(|e| in_its_layer(spec, members[0], &layers[members[0]], e))?;
             // One computation ran for every layer on the key, so its notices are said once.
-            said[members[0]] = drain_completion(&sink, &env, plan);
+            reports.push((members[0], impute_report(plan, &original, drain_completion(&sink, &env, plan))));
             if let Some(rows) = completed {
                 outputs.insert(key, rows);
             }
@@ -3156,7 +3183,7 @@ fn apply_impute_after_drop(
         for &index in members.iter().filter(|&&index| plans[index].is_some()) {
             let Some((plan, voice)) = &plans[index] else { continue };
             let completed = complete_layer_rows(&original, plan, voice, &env, &sink).map_err(|e| in_its_layer(spec, index, &layers[index], e))?;
-            said[index] = drain_completion(&sink, &env, plan);
+            reports.push((index, impute_report(plan, &original, drain_completion(&sink, &env, plan))));
             if let Some(rows) = completed {
                 let own = null_keys::layer_key(index);
                 outputs.insert(own.clone(), rows);
@@ -3168,8 +3195,17 @@ fn apply_impute_after_drop(
             }
         }
     }
-    step.warnings = said.into_iter().flatten().map(RenderWarning::Transform).collect();
+    reports.sort_by_key(|(index, _)| *index);
+    step.reports = reports.into_iter().map(|(_, report)| report).filter(|report| !report.warnings.is_empty()).collect();
     Ok(step)
+}
+
+fn impute_report(plan: &ImputePlan, rows: &RecordBatch, said: Vec<TransformWarning>) -> ImputeReport {
+    ImputeReport {
+        plan: plan.clone(),
+        rows: rows.clone(),
+        warnings: said.into_iter().map(RenderWarning::Transform).collect(),
+    }
 }
 
 /// Refuse a `group` grouping key where nothing reads it

@@ -892,6 +892,12 @@ fn channels_absent_on(absents: &[(String, std::collections::BTreeSet<usize>)], r
 /// the axis holds no band for ([`SlotGroup::has_band`]) is no unit a reader
 /// sees empty, so it is not named.
 ///
+/// The cells follow the slots: a slot's rows under one group, named by the
+/// slot's column and then the group's fields (`c=a, g=q`), where every row of
+/// the cell is unplaced and no group or slot above already holds all of its
+/// rows. A cell is the one unit left that draws nothing when its group and
+/// its slot each draw elsewhere ([`empty_cells`]).
+///
 /// Returns before building [`dispatch_mark_groups`]' partition at all when
 /// no row of the batch is unplaced by any placement — the common case on a
 /// layer with no nulls, where the partition's own cost (every row's
@@ -932,18 +938,83 @@ pub(crate) fn groups_with_no_position(ctx: &DrawCtx) -> Result<Vec<GroupWithNoPo
     // A slot is named when none of its rows is placed, the groups above leave
     // some of its rows unnamed, and the axis shows it (the band lookup scans
     // the axis's domain, so it is asked last).
-    let named_rows: HashSet<usize> = out.iter().flat_map(|group| group.rows.iter().copied()).collect();
-    for slot in band_slot_groups(ctx, &placements)? {
+    let mut named_rows: HashSet<usize> = out.iter().flat_map(|group| group.rows.iter().copied()).collect();
+    let slots = band_slot_groups(ctx, &placements)?;
+    for slot in &slots {
         if !slot.rows.iter().all(|r| unplaced.contains(r))
             || slot.rows.iter().all(|r| named_rows.contains(r))
             || !slot.has_band(ctx)
         {
             continue;
         }
+        named_rows.extend(slot.rows.iter().copied());
         let channels = channels_absent_on(&absents, &slot.rows);
-        out.push(GroupWithNoPosition { name: Some(slot.name(ctx)), channels, rows: slot.rows });
+        out.push(GroupWithNoPosition { name: Some(slot.name(ctx)), channels, rows: slot.rows.clone() });
+    }
+    // A cell: the rows one band slot holds under one group. Neither the group
+    // nor the slot draws nothing (each would have been named above), yet the
+    // pair does, so it is the one unit left without a name.
+    let mut cells = empty_cells(ctx, &slots, &groups, &fields, &unplaced, &named_rows);
+    cells.sort_by_key(|(_, rows)| rows[0]);
+    for (name, rows) in cells {
+        let channels = channels_absent_on(&absents, &rows);
+        out.push(GroupWithNoPosition { name, channels, rows });
     }
     Ok(out)
+}
+
+/// Every (band slot, group) cell of this layer whose rows are all in
+/// `unplaced` and not already in `named_rows`, with its name (the slot's
+/// column, then the group's fields, in the group-name format) and rows.
+/// Only a slot the axis shows is a cell's slot, and a layer whose
+/// partition has no naming fields has no cells (its one group is the whole
+/// layer, so a cell is a slot, named above). Cells that share rows (two
+/// categorical axes) are named once, by the first.
+fn empty_cells(
+    ctx: &DrawCtx,
+    slots: &[SlotGroup],
+    groups: &[(Option<String>, Vec<usize>)],
+    fields: &[String],
+    unplaced: &std::collections::BTreeSet<usize>,
+    named_rows: &std::collections::HashSet<usize>,
+) -> Vec<(Option<String>, Vec<usize>)> {
+    use std::collections::{HashMap, HashSet};
+
+    if fields.is_empty() || groups.len() < 2 {
+        return Vec::new();
+    }
+    let group_of: HashMap<usize, usize> = groups
+        .iter()
+        .enumerate()
+        .flat_map(|(index, (_, rows))| rows.iter().map(move |&row| (row, index)))
+        .collect();
+    let mut named: HashSet<usize> = named_rows.clone();
+    let mut out = Vec::new();
+    for slot in slots {
+        if !slot.has_band(ctx) {
+            continue;
+        }
+        let mut cells: Vec<(usize, Vec<usize>)> = Vec::new();
+        for &row in &slot.rows {
+            let Some(&group) = group_of.get(&row) else { continue };
+            match cells.iter_mut().find(|(g, _)| *g == group) {
+                Some((_, rows)) => rows.push(row),
+                None => cells.push((group, vec![row])),
+            }
+        }
+        let cell_fields: Vec<String> =
+            std::iter::once(slot.column.clone()).chain(fields.iter().filter(|f| **f != slot.column).cloned()).collect();
+        for (_, rows) in cells {
+            if !rows.iter().all(|r| unplaced.contains(r)) || rows.iter().all(|r| named.contains(r)) {
+                continue;
+            }
+            named.extend(rows.iter().copied());
+            let name = crate::transform::context::describe_group_row(ctx.batch, &cell_fields, rows[0])
+                .or_else(|| Some(slot.name(ctx)));
+            out.push((name, rows));
+        }
+    }
+    out
 }
 
 pub struct DrawCtx<'a> {
@@ -4888,14 +4959,66 @@ mod tests {
     }
 
     /// A dodged sub-slot: group `p` is empty in slot `z` but draws in `a`, and
-    /// slot `z` still draws group `q`, so neither unit is named.
+    /// slot `z` still draws group `q`. Neither the group nor the slot draws
+    /// nothing, so the one unit left empty is the cell, named by both keys.
     #[test]
-    fn a_dodged_sub_slot_stays_silent() {
+    fn a_dodged_sub_slot_is_named_as_a_cell() {
         use crate::spec::encoding::Encoding;
 
         let batch = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "q"), (Some("z"), None, "p"), (Some("z"), Some(3.0), "q")]);
         let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
         let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["a", "z"])
+            .colored_by("g", &["p", "q"]);
+        assert_eq!(fixture.found(), vec![slot_report("c=z, g=p", &["y"], &[2])]);
+    }
+
+    /// Cells are named in first-appearance order of their rows, whichever
+    /// slot holds them, and a cell with one usable row is not named.
+    #[test]
+    fn empty_cells_are_named_in_first_appearance_order() {
+        use crate::spec::encoding::Encoding;
+
+        let batch = slot_batch(&[
+            (Some("z"), None, "q"),
+            (Some("a"), None, "p"),
+            (Some("a"), Some(1.0), "q"),
+            (Some("z"), Some(2.0), "p"),
+            (Some("z"), Some(3.0), "r"),
+            (Some("a"), None, "r"),
+            (Some("a"), Some(4.0), "r"),
+        ]);
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        let fixture = SlotFixture::new(Mark::Point, encoding, batch, PositionalChannel::X, &["a", "z"])
+            .colored_by("g", &["p", "q", "r"]);
+        assert_eq!(
+            fixture.found(),
+            vec![slot_report("c=z, g=q", &["y"], &[0]), slot_report("c=a, g=p", &["y"], &[1])]
+        );
+    }
+
+    /// A group wholly empty is named as the group and a slot wholly empty as
+    /// the slot, neither again as cells; a cell under a slot the axis omits
+    /// is not named either.
+    #[test]
+    fn a_cell_inside_a_named_group_slot_or_an_omitted_slot_is_not_named_again() {
+        use crate::spec::encoding::Encoding;
+
+        let encoding = Encoding { x: bound("c"), y: bound("y"), ..Default::default() };
+        // Group `q` is null in both of its slots.
+        let group = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("z"), Some(2.0), "p"), (Some("a"), None, "q"), (Some("z"), None, "q")]);
+        let fixture = SlotFixture::new(Mark::Point, encoding.clone(), group, PositionalChannel::X, &["a", "z"])
+            .colored_by("g", &["p", "q"]);
+        assert_eq!(fixture.found(), vec![slot_report("g=q", &["y"], &[2, 3])]);
+
+        // Slot `z` is null under both groups, which draw in `a`.
+        let slot = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "q"), (Some("z"), None, "p"), (Some("z"), None, "q")]);
+        let fixture = SlotFixture::new(Mark::Point, encoding.clone(), slot, PositionalChannel::X, &["a", "z"])
+            .colored_by("g", &["p", "q"]);
+        assert_eq!(fixture.found(), vec![slot_report("c=z", &["y"], &[2, 3])]);
+
+        // An explicit domain leaves `z` off the axis.
+        let omitted = slot_batch(&[(Some("a"), Some(1.0), "p"), (Some("a"), Some(2.0), "q"), (Some("z"), None, "p"), (Some("z"), Some(3.0), "q")]);
+        let fixture = SlotFixture::new(Mark::Point, encoding, omitted, PositionalChannel::X, &["a"])
             .colored_by("g", &["p", "q"]);
         assert_eq!(fixture.found(), Vec::new());
     }

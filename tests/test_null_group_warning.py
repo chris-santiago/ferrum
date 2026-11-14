@@ -1649,10 +1649,11 @@ def test_a_slot_of_one_row_is_named():
 
 
 @pytest.mark.parametrize("mark_method", ["mark_bar", "mark_point"])
-def test_a_dodged_sub_slot_stays_silent(mark_method: str):
+def test_a_dodged_sub_slot_is_named_by_both_keys(mark_method: str):
     """Only the cell ``z`` x ``p`` is null; ``z`` still draws group ``q`` and
-    ``p`` still draws elsewhere, so no unit is empty. With both ``z`` rows null
-    the slot is empty for every group and is named."""
+    ``p`` still draws elsewhere, so neither the slot nor the group is empty and
+    the cell is named by both keys. With both ``z`` rows null the slot is empty
+    for every group and is named as the slot alone."""
     df = pl.DataFrame(
         {
             "c": ["a", "a", "b", "b", "z", "z"],
@@ -1668,7 +1669,7 @@ def test_a_dodged_sub_slot_stays_silent(mark_method: str):
         )
         return _render_capturing(chart.to_svg)[1]
 
-    assert render(df) == []
+    assert render(df) == [_slot_message(mark_method, "y", "z, g=p", "c")]
     emptied = df.with_columns(
         pl.when(pl.col("c") == "z").then(None).otherwise(pl.col("w")).alias("w")
     )
@@ -3259,15 +3260,15 @@ _EMPTY_CELL_Z = [3.0, None, 5.0, None, 7.0, None]
 
 
 @pytest.mark.parametrize("door", _BOXEN_DOORS)
-def test_a_boxen_hue_cell_a_null_column_empties_inside_a_drawn_category_is_silent(door: str):
+def test_a_boxen_hue_cell_a_null_column_empties_inside_a_drawn_category_is_named(door: str):
     """Hue level ``q`` has no usable value in category ``z`` while ``p`` still draws there: the
-    category draws, so nothing is named, and the chart is byte for byte the one with the cell's
-    rows left out."""
+    category draws, so only the cell is named (by both keys), and the chart is byte for byte the
+    one with the cell's rows left out."""
     frame = _slot_frame(_EMPTY_CELL_Z)
     build = _BOXEN_DOORS[door]
     svg, shown = _render_capturing(build(frame, "g").to_svg, action="default")
     expected_svg, _ = _render_capturing(build(frame.filter(pl.col("w").is_not_null()), "g").to_svg)
-    assert shown == []
+    assert shown == [_slot_message(door, "y", "z, g=q", "c")]
     assert ">z<" in svg
     assert svg == expected_svg
 

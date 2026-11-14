@@ -42,7 +42,9 @@ from tests.test_null_group_warning import (
     _detail_ignored,
     _facet_key_dropped_message,
     _layer_message,
+    _list_message,
     _not_drawn,
+    _slot_message,
     _null_key_dropped_message,
     _panel_fit_message,
     _render_capturing,
@@ -1236,6 +1238,14 @@ _LAYERED_DOORS: dict[str, Callable[[pl.DataFrame], Any]] = {
 }
 
 _LINE_DROP = _null_key_dropped_message("mark_line", 4, "h")
+#: The neutral frame gives the null-``h`` rows level ``x`` and no ``v2``. Level ``x`` draws under
+#: category ``a`` and category ``b`` under level ``y``, so the two rows of ``(b, x)`` are a cell
+#: that draws nothing. Giving them a ``v2`` would add line vertices and widen the axis, which the
+#: comparison with the drop exists to rule out, so the twin names the cell instead.
+_NEUTRAL_CELL = _slot_message("layer 1: mark_line", "y", "b, h=x", "c")
+_NEUTRAL_CELL_PANELS = _list_message(
+    "layer 1: mark_line", "of c=b, h=x in facet panel f=F1; and of c=b, h=x in facet panel f=F2"
+)
 
 
 def _y_ranges(svg: str) -> list[tuple[float, float]]:
@@ -1264,7 +1274,7 @@ def test_a_layer_keyed_on_another_field_drops_only_its_own_null_rows(door: str):
     assert _drawn(svg, "circle") >= 12
     assert max(_numbers(svg)) < 1000
     neutral_svg, neutral_shown = _render_capturing(_LAYERED_DOORS[door](_neutral(df)).to_svg)
-    assert neutral_shown == []
+    assert neutral_shown == [_NEUTRAL_CELL]
     assert _numbers(svg) == _numbers(neutral_svg)
     assert _drawn(svg, "circle") == _drawn(neutral_svg, "circle")
 
@@ -1278,7 +1288,7 @@ def test_a_layer_keyed_on_another_field_gives_the_interactive_route_the_static_l
     assert static == [_LINE_DROP]
     assert shown == static + static
     neutral_shown, neutral_scene = _route(_LAYERED_DOORS[door](_neutral(df)))
-    assert neutral_shown == []
+    assert neutral_shown == [_NEUTRAL_CELL] * 2
     assert _scene_marks(scene) > 0
     assert scene == neutral_scene
     assert '"null"' not in scene
@@ -1307,7 +1317,7 @@ def test_a_faceted_layer_keyed_on_another_field_reads_each_panels_own_kept_rows(
     svg, shown = _render_capturing(build(df).to_svg)
     assert shown == [_LINE_DROP]
     neutral_svg, neutral_shown = _render_capturing(build(_neutral(df)).to_svg)
-    assert neutral_shown == []
+    assert neutral_shown == [_NEUTRAL_CELL_PANELS]
     ranges = _y_ranges(svg)
     assert ranges == _y_ranges(neutral_svg)
     assert len(ranges) == 2

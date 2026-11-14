@@ -682,6 +682,7 @@ pub(crate) fn render_composite_scene(
     // placeholder — to its real `Ribbon` sub-layer). See
     // `plan_line_ribbon_color_group_exemptions`'s doc comment.
     plan_line_ribbon_color_group_exemptions(tree, &prepared, &mut contexts);
+    let repeated_impute_notices = repeated_impute_notices(tree, &prepared);
     drop(prepared);
 
     // Pass 2/3 (per-leaf render): re-render each leaf with its resolved-domain
@@ -704,6 +705,15 @@ pub(crate) fn render_composite_scene(
         leaf_scenes.push(scene);
         bundles.push(bundle);
         leaf_warning_lists.push(leaf_warnings);
+    }
+    // Members of an overlay group that complete the same rows the same way
+    // report one notice, as one chart reports layers that share a completion.
+    for (leaf_warnings, repeated) in leaf_warning_lists.iter_mut().zip(&repeated_impute_notices) {
+        for warning in repeated {
+            if let Some(at) = leaf_warnings.iter().position(|w| w == warning) {
+                leaf_warnings.remove(at);
+            }
+        }
     }
     // A `LayerChart`'s members are one chart's layers, read as the same
     // groups `overlay_selection_reach` reaches: an empty member's own
@@ -1403,6 +1413,27 @@ fn overlay_auxiliary_groups(tree: &CompositeNode) -> Vec<OverlayGroupPlan> {
     let mut out = Vec::new();
     walk(tree, MemberChannels::default(), &mut 0, &mut out);
     out
+}
+
+/// Per leaf, the impute notices it raised for a completion an earlier member
+/// of its overlay group already made the same way over the same rows
+/// ([`prepare::ImputeReport::completes_like`]). A member that completes its
+/// series differently keeps its own notices, equal text or not.
+fn repeated_impute_notices(tree: &CompositeNode, prepared: &[prepare::PreparedInputs]) -> Vec<Vec<RenderWarning>> {
+    let mut repeated: Vec<Vec<RenderWarning>> = vec![Vec::new(); prepared.len()];
+    for group in overlay_auxiliary_groups(tree) {
+        let mut seen: Vec<&prepare::ImputeReport> = Vec::new();
+        for member in group.members {
+            let reports = &prepared[member].impute_reports;
+            for report in reports {
+                if seen.iter().any(|earlier| earlier.completes_like(report)) {
+                    repeated[member].extend(report.warnings.iter().cloned());
+                }
+            }
+            seen.extend(reports);
+        }
+    }
+    repeated
 }
 
 /// Warn, once per text layer, where an overlay group's members draw a polar
@@ -11797,6 +11828,56 @@ mod tests {
         let hconcat_tree = composite(CompositeLayout::Hconcat, vec![leaf_node_with(empty_spec.clone(), 0), leaf_node_with(empty_spec.clone(), 1)]);
         let (_scene, hconcat_warnings) = render_composite_scene(&hconcat_tree, &leaves2, &ThemeInputs::default()).unwrap();
         assert_eq!(no_rows_count(&hconcat_warnings), 2, "hconcat(empty, empty) is two charts, each warns: {hconcat_warnings:?}");
+    }
+
+    /// Two members of an overlay group that complete the same rows the same
+    /// way report the fallback of the series with no usable value once, as
+    /// one chart does for layers that share a completion; members that
+    /// complete differently (a different `frame`) report one each, though
+    /// their texts are equal, and an `Hconcat` of the same two charts is two
+    /// charts that each report.
+    #[test]
+    fn an_overlay_group_reports_a_shared_impute_fallback_once() {
+        pyo3::Python::initialize();
+        let spec = |impute: serde_json::Value| -> ChartSpec {
+            serde_json::from_value(serde_json::json!({
+                "mark": "line",
+                "encoding": {
+                    "x": {"field": "t"},
+                    "y": {"field": "v", "impute": impute},
+                    "color": {"field": "h"},
+                },
+            }))
+            .unwrap()
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Float64, false),
+                Field::new("h", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 2.0])),
+                Arc::new(arrow::array::StringArray::from(vec!["x", "x", "x", "y", "y"])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0), None, None])),
+            ],
+        )
+        .unwrap();
+        let same = spec(serde_json::json!({"method": "mean"}));
+        let other = spec(serde_json::json!({"method": "mean", "frame": [1, 1]}));
+        let fallbacks = |layout: CompositeLayout, specs: [&ChartSpec; 2]| {
+            let tree = composite(layout, vec![leaf_node_with(specs[0].clone(), 0), leaf_node_with(specs[1].clone(), 1)]);
+            let holds = specs.map(|spec| LeafHold { spec: spec.clone(), batch: batch.clone(), ..hold() });
+            let leaves = [leaf_input(&holds[0], 300.0, 200.0), leaf_input(&holds[1], 300.0, 200.0)];
+            let (_scene, warnings) = render_composite_scene(&tree, &leaves, &ThemeInputs::default()).unwrap();
+            warnings
+                .iter()
+                .filter(|w| matches!(w, RenderWarning::Transform(crate::transform::context::TransformWarning::FallbackApplied { transform, .. }) if transform == "Impute"))
+                .count()
+        };
+        assert_eq!(fallbacks(CompositeLayout::Overlay, [&same, &same]), 1, "equal rows, equal impute");
+        assert_eq!(fallbacks(CompositeLayout::Overlay, [&same, &other]), 2, "a different frame completes separately");
+        assert_eq!(fallbacks(CompositeLayout::Hconcat, [&same, &same]), 2, "two charts each report");
     }
 
     /// A zero-row batch (never run through a filter, just empty from the
