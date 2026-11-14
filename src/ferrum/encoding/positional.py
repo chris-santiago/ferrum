@@ -53,7 +53,25 @@ class X(ChannelBase):
       ``value``, ``keyvals``, ``frame``), each checked as ``transform_impute``
       checks it when the channel is built: a value that is not a dict, an option
       not in that list, a non-finite ``value`` and a malformed ``keyvals`` or
-      ``frame`` raise ``ValueError``.
+      ``frame`` raise ``ValueError``. Written on the value channel, it completes
+      every series the layer draws along ``y``: a series that lacks a ``y``
+      some row of the layer holds (or a ``keyvals`` entry) gains one row there,
+      inserted at that key's place in the series, and a null or ``NaN`` ``x``
+      in a series is filled the same way. A null, ``NaN`` or infinite ``y`` adds
+      no key. The fill is ``method``: ``"value"`` (the default) fills ``value``,
+      which is 0 when omitted on a numeric column and must be given on a date,
+      text or Boolean column; ``mean``, ``median``, ``min`` and ``max`` fill the
+      series' own statistic over ``frame``. A series is the rows that share the
+      values of the channels the mark splits by: a categorical or binned colour (a
+      continuous colour splits nothing) and, on the marks that draw them, ``shape``,
+      ``stroke_dash`` and ``detail``. A row null on one of those belongs to no
+      series: it is neither filled nor drawn, and no key is completed for it. Each
+      layer completes its own series, so an ``impute`` written on one layer is never
+      read by a sibling. A render refuses an impute written on both ``x`` and
+      ``y``, one with no ``y`` channel to complete along, one beside the
+      layer's own secondary ``x2``, a ``y`` whose secondary
+      ``y2`` differs among rows sharing the key an imputed row copies, and a
+      ``value`` of a kind the column cannot hold, each with the remedy named.
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
     - ``legend`` — a ``Legend(...)`` instance or a raw legend dict.  Honored
@@ -122,7 +140,25 @@ class Y(ChannelBase):
       ``value``, ``keyvals``, ``frame``), each checked as ``transform_impute``
       checks it when the channel is built: a value that is not a dict, an option
       not in that list, a non-finite ``value`` and a malformed ``keyvals`` or
-      ``frame`` raise ``ValueError``.
+      ``frame`` raise ``ValueError``. Written on the value channel, it completes
+      every series the layer draws along ``x``: a series that lacks an ``x``
+      some row of the layer holds (or a ``keyvals`` entry) gains one row there,
+      inserted at that key's place in the series, and a null or ``NaN`` ``y``
+      in a series is filled the same way. A null, ``NaN`` or infinite ``x`` adds
+      no key. The fill is ``method``: ``"value"`` (the default) fills ``value``,
+      which is 0 when omitted on a numeric column and must be given on a date,
+      text or Boolean column; ``mean``, ``median``, ``min`` and ``max`` fill the
+      series' own statistic over ``frame``. A series is the rows that share the
+      values of the channels the mark splits by: a categorical or binned colour (a
+      continuous colour splits nothing) and, on the marks that draw them, ``shape``,
+      ``stroke_dash`` and ``detail``. A row null on one of those belongs to no
+      series: it is neither filled nor drawn, and no key is completed for it. Each
+      layer completes its own series, so an ``impute`` written on one layer is never
+      read by a sibling. A render refuses an impute written on both ``x`` and
+      ``y``, one with no ``x`` channel to complete along, one beside the
+      layer's own secondary ``y2``, an ``x`` whose secondary
+      ``x2`` differs among rows sharing the key an imputed row copies, and a
+      ``value`` of a kind the column cannot hold, each with the remedy named.
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
     - ``legend`` — a ``Legend(...)`` instance or a raw legend dict.  Honored

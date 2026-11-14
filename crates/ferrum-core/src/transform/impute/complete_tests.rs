@@ -941,7 +941,7 @@ fn complete_series_speaks_in_the_voice_of_the_door_that_called_it() {
         ("t", ints(&[1, 2])),
         ("v", f64s(&[Some(1.0), None])),
     ]);
-    let series = Series { of_row: vec![Some(0), Some(0)], labels: vec![Some("h=p".into())] };
+    let series = Series { of_row: vec![Some(0), Some(0)], labels: vec![Some("h=p".into())], leave_unseriesed: false };
     let columns = ImputeColumns { value: "v", key: every("t"), series: &["h".to_string()] };
     let ctx = TransformContext::default();
     let call = |options: ImputeOptions<'_>, columns: &ImputeColumns<'_>| {
@@ -990,7 +990,7 @@ fn complete_series_speaks_in_the_voice_of_the_door_that_called_it() {
     let err = complete_series(
         &unsupported,
         &ImputeColumns { value: "v", key: every("t"), series: &[] },
-        &Series { of_row: vec![Some(0), Some(0)], labels: vec![None] },
+        &Series { of_row: vec![Some(0), Some(0)], labels: vec![None], leave_unseriesed: false },
         &plain,
         "impute",
         &ctx,
@@ -1072,7 +1072,7 @@ fn a_series_column_the_batch_lacks_and_a_series_map_of_the_wrong_length_are_refu
     let b = batch(vec![("t", ints(&[1, 3])), ("v", f64s(&[Some(1.0), Some(3.0)]))]);
     let ctx = TransformContext::default();
     let plain = ImputeOptions { method: "value", value: None, keyvals: None, frame: None };
-    let one_series = Series { of_row: vec![Some(0), Some(0)], labels: vec![None] };
+    let one_series = Series { of_row: vec![Some(0), Some(0)], labels: vec![None], leave_unseriesed: false };
     let missing_column = ImputeColumns { value: "v", key: every("t"), series: &["nope".to_string()] };
     // key 2 is held by nobody, so the batch must be completed with it
     let keyvals = Keyvals::List(vec![json!(2)]);
@@ -1083,7 +1083,7 @@ fn a_series_column_the_batch_lacks_and_a_series_map_of_the_wrong_length_are_refu
     assert_eq!(err, "impute: groupby column 'nope' not found");
 
     let columns = ImputeColumns { value: "v", key: every("t"), series: &[] };
-    let short = Series { of_row: vec![Some(0)], labels: vec![None] };
+    let short = Series { of_row: vec![Some(0)], labels: vec![None], leave_unseriesed: false };
     let err = complete_series(&b, &columns, &short, &plain, "impute", &ctx).unwrap_err().to_string();
     assert_eq!(err, "impute: internal error: 1 series assignments for 2 rows");
 }
@@ -1091,7 +1091,7 @@ fn a_series_column_the_batch_lacks_and_a_series_map_of_the_wrong_length_are_refu
 // ─── the interface the encoding door calls ─────────────────────────────────
 
 fn series_of(ids: &[Option<usize>], n_series: usize) -> Series {
-    Series { of_row: ids.to_vec(), labels: vec![None; n_series] }
+    Series { of_row: ids.to_vec(), labels: vec![None; n_series], leave_unseriesed: false }
 }
 
 fn plain() -> ImputeOptions<'static> {
@@ -1240,19 +1240,24 @@ fn rows_that_share_a_key_and_disagree_on_a_companion_are_refused() {
         err.to_string(),
         "impute: rows with key 2 hold different 'x2' values, so an imputed row has no one 'x2' to copy"
     );
-    // the first disagreeing key in key order is named
+    // the first disagreeing key in key order is named: series z holds neither 2 nor 5, so both
+    // keys are copied into it
     let b = batch(vec![
-        ("g", strs(&["x", "y", "x", "y"])),
-        ("t", ints(&[5, 5, 2, 2])),
-        ("x2", f64s(&[Some(1.0), Some(2.0), Some(3.0), Some(4.0)])),
-        ("v", f64s(&[Some(1.0); 4])),
+        ("g", strs(&["x", "y", "x", "y", "z"])),
+        ("t", ints(&[5, 5, 2, 2, 9])),
+        ("x2", f64s(&[Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(9.0)])),
+        ("v", f64s(&[Some(1.0); 5])),
     ]);
-    let err = direct(&b, key, &["g".to_string()], &series_of(&[Some(0), Some(1), Some(0), Some(1)], 2), plain()).unwrap_err();
+    let err = direct(&b, key, &["g".to_string()], &series_of(&[Some(0), Some(1), Some(0), Some(1), Some(2)], 3), plain()).unwrap_err();
     assert!(matches!(&err, ImputeRefusal::CompanionDiffers { key, .. } if key == "2"), "{err:?}");
     // an instant key is spelled as every warning spells it
-    let day: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![86_400_000, 86_400_000]));
-    let b = batch(vec![("t", day), ("x2", f64s(&[Some(1.0), Some(2.0)])), ("v", f64s(&[Some(1.0), Some(1.0)]))]);
-    let err = direct_no_value(&b, key_on("t", &companions), &series_of(&[Some(0), Some(0)], 1), plain()).unwrap_err();
+    let day: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![86_400_000, 86_400_000, 172_800_000]));
+    let b = batch(vec![
+        ("t", day),
+        ("x2", f64s(&[Some(1.0), Some(2.0), Some(3.0)])),
+        ("v", f64s(&[Some(1.0), Some(1.0), Some(1.0)])),
+    ]);
+    let err = direct_no_value(&b, key_on("t", &companions), &series_of(&[Some(0), Some(0), Some(1)], 2), plain()).unwrap_err();
     assert!(matches!(&err, ImputeRefusal::CompanionDiffers { key, .. } if key == "1970-01-02T00:00:00"), "{err:?}");
 }
 
@@ -1328,7 +1333,7 @@ fn a_series_that_holds_no_row_is_an_internal_error() {
     let ctx = TransformContext::default();
     let columns = ImputeColumns { value: "v", key: None, series: &[] };
     let mean = ImputeOptions { method: "mean", ..plain() };
-    let series = Series { of_row: vec![Some(0), Some(0)], labels: vec![Some("g=a".into()), Some("g=b".into())] };
+    let series = Series { of_row: vec![Some(0), Some(0)], labels: vec![Some("g=a".into()), Some("g=b".into())], leave_unseriesed: false };
     assert!(complete_series(&b, &columns, &series, &mean, "impute", &ctx).is_err());
     assert!(ctx.warnings.borrow().is_empty(), "{:?}", ctx.warnings.borrow());
 }
@@ -1534,32 +1539,54 @@ fn direct_no_value_with(
 }
 
 #[test]
-fn a_companion_that_is_no_function_of_the_key_is_refused_even_when_nothing_is_imputed() {
-    // both rows hold key 1 with different x2, and every series holds the one key: the rule is that
-    // a key's companion is one value, whether or not a copy is needed
+fn a_companion_that_is_no_function_of_the_key_is_refused_only_for_a_key_an_imputed_row_copies() {
     let companions = ["x2".to_string()];
+    // both rows hold key 1 with different x2, and the one series holds every key: no row is
+    // imputed, so no end is copied and the rows are free to differ
     let b = batch(vec![
         ("g", strs(&["x", "x"])),
         ("t", ints(&[1, 1])),
         ("x2", f64s(&[Some(1.0), Some(2.0)])),
         ("v", f64s(&[Some(1.0), Some(1.0)])),
     ]);
-    let err = direct(&b, key_on("t", &companions), &["g".to_string()], &series_of(&[Some(0), Some(0)], 1), plain())
+    let out = direct(&b, key_on("t", &companions), &["g".to_string()], &series_of(&[Some(0), Some(0)], 1), plain())
+        .unwrap();
+    assert_eq!(out.num_rows(), 2);
+    assert_eq!(values(&out, "x2"), vec![1.0, 2.0]);
+    // a second series that lacks key 1 makes an imputed row for it, so key 1's end must be one value
+    let b = batch(vec![
+        ("g", strs(&["x", "x", "y"])),
+        ("t", ints(&[1, 1, 2])),
+        ("x2", f64s(&[Some(1.0), Some(2.0), Some(3.0)])),
+        ("v", f64s(&[Some(1.0), Some(1.0), Some(1.0)])),
+    ]);
+    let err = direct(&b, key_on("t", &companions), &["g".to_string()], &series_of(&[Some(0), Some(0), Some(1)], 2), plain())
         .unwrap_err();
-    assert!(matches!(err, ImputeRefusal::CompanionDiffers { .. }), "{err:?}");
+    assert!(matches!(&err, ImputeRefusal::CompanionDiffers { key, .. } if key == "1"), "{err:?}");
+    // key 1 has two ends but only key 2 is imputed (series y lacks it), and key 2 has one end
+    let b = batch(vec![
+        ("g", strs(&["x", "x", "x", "y", "y"])),
+        ("t", ints(&[1, 2, 3, 1, 3])),
+        ("x2", f64s(&[Some(1.0), Some(2.0), Some(3.0), Some(9.0), Some(3.0)])),
+        ("v", f64s(&[Some(1.0); 5])),
+    ]);
+    let out = direct(&b, key_on("t", &companions), &["g".to_string()], &series_of(&[Some(0), Some(0), Some(0), Some(1), Some(1)], 2), plain())
+        .unwrap();
+    assert_eq!(values(&out, "x2"), vec![1.0, 2.0, 3.0, 9.0, 2.0, 3.0], "the imputed row copies key 2's one end");
 }
 
 #[test]
 fn companions_that_differ_only_by_the_sign_of_zero_agree_and_nans_agree() {
     let companions = ["x2".to_string()];
+    // series z lacks key 1, so key 1's two rows (series x and y) must agree for the copy
     let run_with = |a: f64, b: f64| {
         let frame = batch(vec![
-            ("g", strs(&["x", "y"])),
-            ("t", ints(&[1, 1])),
-            ("x2", f64s(&[Some(a), Some(b)])),
-            ("v", f64s(&[Some(1.0), Some(1.0)])),
+            ("g", strs(&["x", "y", "z"])),
+            ("t", ints(&[1, 1, 2])),
+            ("x2", f64s(&[Some(a), Some(b), Some(5.0)])),
+            ("v", f64s(&[Some(1.0), Some(1.0), Some(1.0)])),
         ]);
-        direct(&frame, key_on("t", &companions), &["g".to_string()], &series_of(&[Some(0), Some(1)], 2), plain())
+        direct(&frame, key_on("t", &companions), &["g".to_string()], &series_of(&[Some(0), Some(1), Some(2)], 3), plain())
     };
     assert!(run_with(f64::NAN, f64::NAN).is_ok());
     assert!(run_with(0.0, 0.0).is_ok());

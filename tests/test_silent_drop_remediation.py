@@ -410,30 +410,17 @@ class TestImpute:
         # The SVG must render without errors
         assert svg.startswith("<svg")
 
-    def test_impute_value_missing_value_key_raises_value_error(self):
-        """impute={'method':'value'} without a 'value' key: currently silently ignored.
+    def test_impute_method_value_without_a_value_fills_zero(self):
+        """impute={'method':'value'} with no 'value' key fills 0, the default of Vega-Lite's impute
+        and of transform_impute: the chart is the one with value=0 written, and not the chart with
+        no impute at all."""
 
-        The spec says this should raise ValueError. The Python Y channel validation
-        adds this check. If the impute dict has method='value' but no 'value' key,
-        the chart renders without imputation (no-op). We enforce the check in the Y
-        channel validator.
-        """
-        # Currently this is a no-op (renders without imputation).
-        # The impute dict is passed through to Rust, which returns batch unchanged.
-        # Per spec §7: 'method=value' without 'value' key raises ValueError.
-        # This test documents current behavior — chart renders without imputation.
-        svg = (
-            fm.Chart(_sparse_df())
-            .mark_line()
-            .encode(
-                x="x",
-                y=fm.Y("y", impute={"method": "value"}),  # missing 'value'
-                color="group",
-            )
-            .to_svg()
-        )
-        # Currently succeeds (no-op impute), which is acceptable behavior.
-        assert "<svg" in svg
+        def draw(y):
+            return fm.Chart(_sparse_df()).mark_line().encode(x="x", y=y, color="group").to_svg()
+
+        filled = draw(fm.Y("y", impute={"method": "value"}))
+        assert filled == draw(fm.Y("y", impute={"method": "value", "value": 0}))
+        assert filled != draw("y")
 
 
 # ---------------------------------------------------------------------------

@@ -427,40 +427,18 @@ pub(super) fn drop_null_key_rows(
     Ok(result)
 }
 
-/// Give each layer on the chart's rows that keys a grouping field the impute's
-/// `series` do not carry the rows from before the impute (`pre_impute`, which
-/// are the rows the drop kept): the rows the impute synthesises are null on
-/// that field, so such a layer must not draw them. The layer reads them through
-/// the same `own_rows` route a layer whose counted rows differ takes. Returns
-/// the new routes.
-pub(super) fn keep_pre_impute_rows(
-    spec: &ChartSpec,
-    layers: &mut [LayerPrepared],
-    outputs: &mut HashMap<String, RecordBatch>,
-    lineages: &mut OutputLineages,
-    pre_impute: &RecordBatch,
-    series: &[&str],
-) -> Vec<(usize, String)> {
-    let mut routes = Vec::new();
-    for (index, layer) in layers.iter_mut().enumerate() {
-        if layer.data_source.is_some() || layer.own_rows.is_some() {
-            continue;
-        }
-        let keys = layer_key_fields(spec, index, layer, pre_impute, &HashSet::new());
-        let keys_beyond_series =
-            keys.fields.iter().any(|key| key.kind == KeyKind::Grouping && !series.contains(&key.field.as_str()));
-        if !keys_beyond_series {
-            continue;
-        }
-        let own = layer_key(index);
-        outputs.insert(own.clone(), pre_impute.clone());
-        if let Some(lineage) = lineages.get(FINAL_OUTPUT_KEY).cloned() {
-            lineages.insert(own.clone(), lineage);
-        }
-        layer.own_rows = Some(own.clone());
-        routes.push((index, own));
-    }
-    routes
+/// The fields layer `index`'s series split by over `batch`: the grouping
+/// bindings the layer's mark draws and partitions by (the colour when it reads
+/// as categories or carries a bin rule, `shape`, a categorical or per-row
+/// `stroke_dash`, `detail`), in the column gate's read order and each once.
+/// The impute completes the series these fields name.
+pub(super) fn series_fields(spec: &ChartSpec, index: usize, layer: &LayerPrepared, batch: &RecordBatch) -> Vec<String> {
+    layer_key_fields(spec, index, layer, batch, &HashSet::new())
+        .fields
+        .into_iter()
+        .filter(|key| key.kind == KeyKind::Grouping)
+        .map(|key| key.field)
+        .collect()
 }
 
 /// The chart's facet fields, which a count never names: they are constant and

@@ -1083,6 +1083,37 @@ def _group_dtype_refusal(entry: str, role: str, column: str, dtype: str) -> str:
     )
 
 
+#: A fill of a kind its column cannot hold, by case: ``(the fill, what the column holds, the tail of
+#: the refusal)``. Every door's refusal reads ``<door>: column 'c' holds <holds>, so value= <tail>``.
+IMPUTE_KIND_CASES: dict[str, tuple[Any, str, str]] = {
+    "number-column-text": ("none", "numbers", "must be a number, but 'none' is text"),
+    "number-column-boolean": (True, "numbers", "must be a number, but True is a boolean"),
+    "date-column-text": (
+        "none",
+        "dates and times",
+        "must be a datetime.date, a datetime.datetime or an epoch-millisecond number, "
+        "but 'none' is text",
+    ),
+    "date-column-boolean": (
+        False,
+        "dates and times",
+        "must be a datetime.date, a datetime.datetime or an epoch-millisecond number, "
+        "but False is a boolean",
+    ),
+    "text-column-number": (5, "text", "must be a string, but 5 is a number"),
+    "text-column-boolean": (True, "text", "must be a string, but True is a boolean"),
+    "boolean-column-text": ("none", "booleans", "must be True or False, but 'none' is text"),
+    "boolean-column-number": (0, "booleans", "must be True or False, but 0 is a number"),
+}
+
+
+def _impute_kind_refusal(door: str, column: str, case: str) -> str:
+    """The refusal of ``IMPUTE_KIND_CASES[case]`` on ``column`` as ``door`` words it (the bare text,
+    without any prefix the caller's surface adds)."""
+    _, holds, tail = IMPUTE_KIND_CASES[case]
+    return f"{door}: column '{column}' holds {holds}, so value= {tail}"
+
+
 def _unenumerable_refusal(column: str = "d", dtype: str = "Timestamp(Millisecond, None)") -> str:
     """The refusal a categorical channel (colour, shape, stroke_dash) raises for a column whose
     distinct values cannot be listed, as its scale or legend surfaces it. A temporal column reads

@@ -95,7 +95,7 @@
 | `stack` | ✅ Confirmed — `apply_position` now called unconditionally (`f641f39`); encoding-level `stack=` honored. SVG bar positions verified. |
 | `axis` | ✅ Confirmed — `label_angle`, `ticks`, `labels`, `title` verified in SVG output |
 | `format_type` | ✅ Confirmed — tick label format verified in SVG output |
-| `impute` | ✅ Confirmed — missing rows filled; polyline point count verified |
+| `impute` | ✅ Confirmed — missing rows filled; polyline point count verified. 2026-11-14: `impute=` completes every series a layer draws on every key dtype, option and layer door, each layer its own series, inserting each row at its key's place and filling a series' own null or `NaN` value (it completed a `Float64` x over a `Utf8` colour only, appended, and ignored `method`, `keyvals` and `frame`); an impute that cannot be honoured is refused naming the remedy (`ferrum-spec.md` §3.2, `impute`). |
 
 ### Features that raise `ValueError` at runtime
 

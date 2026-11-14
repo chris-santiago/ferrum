@@ -94,7 +94,7 @@ PRIMARY_POSITIONAL = frozenset(
         "axis",
         # stack — honored by position.rs Stack strategy selection.
         "stack",
-        # impute dict — honored by prepare.rs apply_impute.
+        # impute dict — honored by prepare.rs apply_impute_after_drop.
         "impute",
         # format string + type — honored by prepare.rs apply_tick_format.
         # format_type is the canonical snake_case spelling; formatType is the

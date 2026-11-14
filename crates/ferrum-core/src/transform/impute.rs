@@ -150,6 +150,38 @@ pub(crate) struct ImputeOptions<'a> {
     pub frame: Option<(Option<i64>, Option<i64>)>,
 }
 
+/// The options dict a value channel carries (`Y(impute=...)`, `X(impute=...)`),
+/// in the wire form Python writes: the options of [`ImputeSpec`] without the
+/// column, whose names and defaults it shares.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChannelImpute {
+    #[serde(default = "default_method")]
+    method: String,
+    #[serde(default)]
+    value: Option<serde_json::Value>,
+    #[serde(default)]
+    keyvals: Option<Keyvals>,
+    #[serde(default)]
+    frame: Option<(Option<i64>, Option<i64>)>,
+}
+
+impl ChannelImpute {
+    /// Read the dict a channel carries, or say why it is not one.
+    pub(crate) fn from_wire(wire: &serde_json::Value) -> Result<Self, String> {
+        serde_json::from_value(wire.clone()).map_err(|e| format!("impute: {e}"))
+    }
+
+    pub(crate) fn options(&self) -> ImputeOptions<'_> {
+        ImputeOptions {
+            method: &self.method,
+            value: self.value.as_ref(),
+            keyvals: self.keyvals.as_ref(),
+            frame: self.frame,
+        }
+    }
+}
+
 impl ImputeSpec {
     fn options(&self) -> ImputeOptions<'_> {
         ImputeOptions {
@@ -172,9 +204,6 @@ pub(crate) enum ObservedKeys {
     /// null-keyed row: never completed, never a slot anchor, and after every
     /// keyed position in a frame). Instants, integers, text and booleans are
     /// always placed (the encoding door).
-    // The encoding door constructs this; until it calls `complete_series`, only
-    // tests do.
-    #[allow(dead_code)]
     Placed,
 }
 
@@ -187,8 +216,9 @@ pub(crate) struct ImputeKey<'a> {
     pub observed: ObservedKeys,
     /// Columns that ride with the key (a binned key's `bin_end`, an `x2`): an
     /// imputed row copies each from the first row holding its key. Rows that
-    /// share a key must agree on them, and a `keyvals` key no row holds has
-    /// nothing to copy, so both are refused.
+    /// share a key an imputed row is made for must agree on them, and a
+    /// `keyvals` key no row holds has nothing to copy, so both are refused. A
+    /// key no series lacks needs no copy, so its rows may differ.
     pub companions: &'a [String],
 }
 
@@ -215,6 +245,10 @@ pub(crate) struct Series {
     /// Each series' name as a warning gives it (`g=b`), or `None` for the one
     /// series that is the whole frame.
     pub labels: Vec<Option<String>>,
+    /// The encoding door leaves a row in no series as written: its value cell is
+    /// never filled, and the caller names it. The transform door fills it with the
+    /// whole column's fill (a null `groupby` key's documented contract).
+    pub leave_unseriesed: bool,
 }
 
 impl Series {
@@ -228,7 +262,7 @@ impl Series {
             }
             labels.push((!groupby.is_empty()).then(|| describe_group_keys(groupby, key)));
         }
-        Self { of_row, labels }
+        Self { of_row, labels, leave_unseriesed: false }
     }
 }
 
@@ -238,8 +272,9 @@ impl Series {
 pub(crate) enum ImputeRefusal {
     /// A refusal whose text is final, already prefixed with its door.
     Refused(String),
-    /// Rows that share one key disagree on a companion column, so an imputed
-    /// row has no one value to copy. `key` is the first such key in key order.
+    /// Rows that share a key an imputed row copies disagree on a companion
+    /// column, so the imputed row has no one value to copy. `key` is the first
+    /// such key in key order.
     CompanionDiffers { door: String, key: String, companion: String },
     /// A `keyvals` key that no row holds, with a companion to copy.
     CompanionUnheld { door: String, key: String, companion: String },
@@ -387,15 +422,26 @@ impl KeyColumn {
         let universe =
             KeyUniverse::build(arr.as_ref(), &dtype, name, options.keyvals, key.observed, door)?;
         let ranks = universe.row_ranks(arr.as_ref(), &dtype);
-        let read = Self { index, dtype, universe, ranks, companions };
-        read.check_companions_agree(batch, door)?;
-        Ok(read)
+        Ok(Self { index, dtype, universe, ranks, companions })
     }
 
-    /// Every row holding a ranked key must agree with its key's first row on
-    /// each companion (a null equals a null, a `NaN` a `NaN`), else the first
-    /// such key in key order is named.
-    fn check_companions_agree(&self, batch: &RecordBatch, door: &str) -> Result<(), ImputeRefusal> {
+    /// Every row holding a key an imputed row is made for must agree with its
+    /// key's first row on each companion (a null equals a null, a `NaN` a
+    /// `NaN`), else the first such key in key order is named. A key no series
+    /// lacks is copied nowhere, so its rows are free to differ.
+    fn check_companions_agree(
+        &self,
+        imputed: &[Imputed],
+        batch: &RecordBatch,
+        door: &str,
+    ) -> Result<(), ImputeRefusal> {
+        if self.companions.is_empty() || imputed.is_empty() {
+            return Ok(());
+        }
+        let mut copied = vec![false; self.universe.len()];
+        for row in imputed {
+            copied[row.rank] = true;
+        }
         let n_rows = batch.num_rows();
         let sources = (0..n_rows)
             .map(|row| {
@@ -416,6 +462,7 @@ impl KeyColumn {
             let worst = (0..n_rows)
                 .filter(|&row| differs.value(row))
                 .filter_map(|row| self.ranks[row])
+                .filter(|&rank| copied[rank])
                 .min();
             if let Some(rank) = worst {
                 return Err(ImputeRefusal::CompanionDiffers {
@@ -639,22 +686,31 @@ pub(crate) fn complete_series(
     let layout = Layout::read(batch, columns, series, value_index, options, door)?;
     let imputed = layout.imputed();
     if let Some(key) = &layout.key {
+        key.check_companions_agree(&imputed, batch, door)?;
         key.check_companions_held(&imputed, batch, door)?;
     }
 
     let value_col = batch.column(value_index);
+    // A row in no series is left as written on the encoding door.
+    let left_as_written: Vec<bool> = series
+        .of_row
+        .iter()
+        .map(|series_of_row| series_of_row.is_none() && series.leave_unseriesed)
+        .collect();
     let filled = match method {
         Method::Statistic(stat) => {
             let col = float64_column(value_col, door, columns.value)?;
             let fills = statistic_fills(stat, &col, options.frame, &layout, ctx);
             FilledValues {
-                callers: per_row_values(&col, &fills.per_row),
+                callers: per_row_values(&col, &fills.per_row, &left_as_written),
                 imputed: Arc::new(Float64Array::from_iter_values(
                     imputed.iter().map(|row| fills.imputed[row.series][row.index]),
                 )),
             }
         }
-        Method::Value => constant_values(value_col, options, columns.value, imputed.len(), door)?,
+        Method::Value => {
+            constant_values(value_col, options, columns.value, imputed.len(), door, &left_as_written)?
+        }
     };
     warn_rows_in_no_series(series, n_rows, method, layout.key.is_some(), ctx);
 
@@ -662,7 +718,7 @@ pub(crate) fn complete_series(
     fields[value_index] = fields[value_index]
         .clone()
         .with_data_type(filled.callers.data_type().clone())
-        .with_nullable(false);
+        .with_nullable(left_as_written.contains(&true));
     let mut out_columns: Vec<ArrayRef> = batch.columns().to_vec();
     out_columns[value_index] = filled.callers.clone();
     let finish = |fields: Vec<Field>, out_columns: Vec<ArrayRef>| {
@@ -728,8 +784,10 @@ fn check_options(
     }
 }
 
-/// Rows no series holds are filled with the whole column's statistic, or with
-/// the constant, and are never completed. Reported once, and only when some
+/// Rows no series holds are never completed. On the transform door they are
+/// filled with the whole column's statistic, or with the constant; on the
+/// encoding door (`Series::leave_unseriesed`) they are left as written, and the caller
+/// names them. Reported once, and only when some
 /// (not every) row is in no series: when every row is, `group_partition_multi`
 /// already said so. A statistic names the fallback it took. A constant fill
 /// fell back to nothing, so with no key there is nothing to say, and with a key
@@ -745,14 +803,17 @@ fn warn_rows_in_no_series(
     if in_none == 0 || in_none == n_rows {
         return;
     }
+    // The encoding door names these rows itself, once across its facet partitions.
+    if series.leave_unseriesed {
+        return;
+    }
     let reason = match (method, has_key) {
         (Method::Statistic(_), _) => format!(
-            "{in_none} row(s) have a null groupby key; the whole column's \
-             statistic was used instead"
+            "{in_none} row(s) have a null groupby key; the whole column's statistic was used instead"
         ),
         (Method::Value, true) => format!(
-            "{in_none} row(s) have a null groupby key, so they belong to no group and no key \
-             is completed for them"
+            "{in_none} row(s) have a null groupby key, so they belong to no group and no key is \
+             completed for them"
         ),
         (Method::Value, false) => return,
     };
@@ -783,9 +844,17 @@ fn needs_fill(col: &Float64Array, row: usize) -> bool {
 }
 
 /// The value column of a statistic fill: each cell as it is, or its fill.
-fn per_row_values(col: &Float64Array, fills: &[f64]) -> ArrayRef {
-    let values: Vec<f64> = (0..col.len())
-        .map(|row| if needs_fill(col, row) { fills[row] } else { col.value(row) })
+fn per_row_values(col: &Float64Array, fills: &[f64], left_as_written: &[bool]) -> ArrayRef {
+    let values: Vec<Option<f64>> = (0..col.len())
+        .map(|row| {
+            if left_as_written[row] {
+                (!col.is_null(row)).then(|| col.value(row))
+            } else if needs_fill(col, row) {
+                Some(fills[row])
+            } else {
+                Some(col.value(row))
+            }
+        })
         .collect();
     Arc::new(Float64Array::from(values))
 }
@@ -798,6 +867,7 @@ fn constant_values(
     field: &str,
     n_imputed: usize,
     door: &str,
+    left_as_written: &[bool],
 ) -> Result<FilledValues, String> {
     let kind = ValueKind::of(value_col.data_type());
     let literal = resolve_literal(options.value, kind, door, field)?;
@@ -805,10 +875,13 @@ fn constant_values(
     // A numeric column is read as `Float64`, where a `NaN` is a missing cell too.
     let (base, missing): (ArrayRef, BooleanArray) = if kind == ValueKind::Numbers {
         let col = float64_column(value_col, door, field)?;
-        let missing = (0..col.len()).map(|row| Some(needs_fill(&col, row))).collect();
+        let missing = (0..col.len()).map(|row| Some(!left_as_written[row] && needs_fill(&col, row))).collect();
         (Arc::new(col), missing)
     } else {
-        (value_col.clone(), arrow::compute::is_null(value_col).map_err(door_error)?)
+        let nulls = arrow::compute::is_null(value_col).map_err(door_error)?;
+        let missing: BooleanArray =
+            nulls.iter().zip(left_as_written).map(|(null, left)| Some(null == Some(true) && !left)).collect();
+        (value_col.clone(), missing)
     };
     let dtype = base.data_type().clone();
     let constant = Scalar::new(fill_array(&literal, &dtype, 1, door, field)?);

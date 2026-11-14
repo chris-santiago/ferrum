@@ -21470,8 +21470,19 @@ fn rows_of(batch: &RecordBatch) -> Vec<(f64, Option<String>, Option<String>, Opt
         .collect()
 }
 
+type ImputeRow = (f64, Option<String>, Option<String>, Option<f64>);
+
+fn imputed_row(t: f64, h: &str, d: Option<&str>, v: f64) -> ImputeRow {
+    (t, Some(h.to_string()), d.map(str::to_string), Some(v))
+}
+
+/// The rows the chart draws from after the render's prepare pass, in order.
+fn imputed_rows(spec: &ChartSpec, batch: &RecordBatch) -> Vec<ImputeRow> {
+    rows_of(prep(spec, batch).final_batch())
+}
+
 #[test]
-fn impute_with_colour_and_detail_completes_every_series_with_both_keys() {
+fn impute_with_colour_and_detail_completes_every_series_with_both_keys_in_place() {
     let batch = impute_batch(&[
         (1.0, Some("x"), Some("p")),
         (1.0, Some("x"), Some("q")),
@@ -21480,16 +21491,18 @@ fn impute_with_colour_and_detail_completes_every_series_with_both_keys() {
         (1.0, Some("y"), Some("p")),
         (1.0, Some("y"), Some("q")),
     ]);
-    let out = apply_impute(&batch, &impute_spec(Mark::Line, Some("d"), None));
-    let appended: Vec<_> = rows_of(&out)[6..].to_vec();
+    let rows = imputed_rows(&impute_spec(Mark::Line, Some("d"), None), &batch);
     assert_eq!(
-        appended,
+        rows[4..].to_vec(),
         vec![
-            (2.0, Some("y".to_string()), Some("p".to_string()), Some(0.0)),
-            (2.0, Some("y".to_string()), Some("q".to_string()), Some(0.0)),
+            (1.0, Some("y".to_string()), Some("p".to_string()), Some(1.0)),
+            imputed_row(2.0, "y", Some("p"), 0.0),
+            (1.0, Some("y".to_string()), Some("q".to_string()), Some(1.0)),
+            imputed_row(2.0, "y", Some("q"), 0.0),
         ],
-        "each series the colour and detail form gets its own completed point, carrying both keys"
+        "each series the colour and detail form gets its own completed point right after its last earlier key, carrying both keys"
     );
+    assert_eq!(rows.len(), 8);
 }
 
 #[test]
@@ -21499,13 +21512,13 @@ fn impute_with_colour_and_shape_keys_a_point_by_both() {
         (2.0, Some("x"), Some("p")),
         (1.0, Some("y"), Some("q")),
     ]);
-    let out = apply_impute(&batch, &impute_spec(Mark::Point, None, Some("d")));
-    let appended: Vec<_> = rows_of(&out)[3..].to_vec();
-    assert_eq!(appended, vec![(2.0, Some("y".to_string()), Some("q".to_string()), Some(0.0))]);
+    let rows = imputed_rows(&impute_spec(Mark::Point, None, Some("d")), &batch);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[3], imputed_row(2.0, "y", Some("q"), 0.0));
 }
 
 #[test]
-fn impute_ignores_a_row_with_a_null_series_key() {
+fn a_row_with_a_null_series_key_belongs_to_no_series_and_adds_no_key() {
     let batch = impute_batch(&[
         (1.0, Some("x"), Some("p")),
         (1.0, Some("y"), Some("p")),
@@ -21513,29 +21526,41 @@ fn impute_ignores_a_row_with_a_null_series_key() {
         (3.0, None, Some("p")),
         (4.0, Some("y"), None),
     ]);
-    let out = apply_impute(&batch, &impute_spec(Mark::Line, Some("d"), None));
-    let appended: Vec<_> = rows_of(&out)[5..].to_vec();
+    let series = series_of_rows(&batch, &["h".to_string(), "d".to_string()], None).expect("both keys read");
+    assert_eq!(series.of_row, vec![Some(0), Some(1), Some(0), None, None], "the null-key rows are in no series");
+    assert_eq!(series.labels, vec![Some("h=x, d=p".to_string()), Some("h=y, d=p".to_string())]);
+    // the drop removes both rows (a null colour, a null detail), and the step completes what is left
+    let rows = imputed_rows(&impute_spec(Mark::Line, Some("d"), None), &batch);
     assert_eq!(
-        appended,
-        vec![(2.0, Some("y".to_string()), Some("p".to_string()), Some(0.0))],
-        "the null-key rows form no series and add no x (3, 4) to complete"
+        rows,
+        vec![
+            (1.0, Some("x".to_string()), Some("p".to_string()), Some(1.0)),
+            (1.0, Some("y".to_string()), Some("p".to_string()), Some(1.0)),
+            imputed_row(2.0, "y", Some("p"), 0.0),
+            (2.0, Some("x".to_string()), Some("p".to_string()), Some(1.0)),
+        ],
+        "no key of 3 or 4 completes a series"
     );
 }
 
 #[test]
-fn impute_with_colour_alone_appends_in_x_then_group_order() {
+fn impute_with_colour_alone_inserts_each_row_at_its_keys_place() {
     let batch = impute_batch(&[(1.0, Some("b"), None), (2.0, Some("a"), None), (1.0, Some("a"), None)]);
-    let out = apply_impute(&batch, &impute_spec(Mark::Line, None, None));
+    let rows = imputed_rows(&impute_spec(Mark::Line, None, None), &batch);
     assert_eq!(
-        rows_of(&out)[3..].to_vec(),
-        vec![(2.0, Some("b".to_string()), None, Some(0.0))],
-        "colour alone is the (x, colour) completion: one row per missing pair, every other column null"
+        rows,
+        vec![
+            (1.0, Some("b".to_string()), None, Some(1.0)),
+            (2.0, Some("b".to_string()), None, Some(0.0)),
+            (2.0, Some("a".to_string()), None, Some(1.0)),
+            (1.0, Some("a".to_string()), None, Some(1.0)),
+        ],
+        "series b lacks 2 and gets it after its own last row: no caller row moves, every other column is null"
     );
 }
 
-/// Layer 0 draws the chart's colour with the impute; layer 1 also keys `d`,
-/// which the chart-level mark's series do not carry, so it must not draw the
-/// imputed row (null on `d`).
+/// Layer 0 draws the chart's colour with the impute; layer 1 inherits it and
+/// also keys `d`, so each layer completes the series it draws.
 fn impute_with_a_sibling_keying_d(batch: &RecordBatch) -> PreparedInputs {
     let mut spec = impute_spec(Mark::Line, None, None);
     spec.layers = Some(vec![
@@ -21551,26 +21576,40 @@ fn impute_with_a_sibling_keying_d(batch: &RecordBatch) -> PreparedInputs {
 }
 
 #[test]
-fn a_sibling_keying_a_field_the_impute_series_lack_reads_the_pre_impute_rows() {
-    // No null anywhere: the sibling moves because of the impute alone.
+fn a_sibling_keying_a_field_the_impute_series_lack_completes_its_own_series() {
     let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), Some("q")), (1.0, Some("y"), Some("p"))]);
     let prep = impute_with_a_sibling_keying_d(&batch);
-    assert_eq!(prep.final_batch().num_rows(), 4, "the tail is imputed: (2, y) completes colour y");
-    assert_eq!(prep.layer_routes.len(), 1, "{:?}", prep.layer_routes);
-    assert_eq!(prep.layer_routes[0].0, 1);
-    let own = &prep.transform_outputs[&prep.layer_routes[0].1];
-    assert_eq!(own.num_rows(), 3, "the sibling reads the rows from before the impute");
-    assert!(rows_of(own).iter().all(|(_, _, d, _)| d.is_some()), "no synthetic row, which is null on d");
+    assert_eq!(prep.final_batch().num_rows(), 3, "the two layers impute differently, so the tail keeps the caller's rows");
+    assert_eq!(prep.layer_routes.iter().map(|(layer, _)| *layer).collect::<Vec<_>>(), vec![0, 1]);
+    let own = |layer: usize| rows_of(&prep.transform_outputs[&prep.layer_routes[layer].1]);
+    assert_eq!(own(0).len(), 4, "the colour layer completes (2, y)");
+    assert_eq!(
+        own(1),
+        vec![
+            (1.0, Some("x".to_string()), Some("p".to_string()), Some(1.0)),
+            imputed_row(2.0, "x", Some("p"), 0.0),
+            imputed_row(1.0, "x", Some("q"), 0.0),
+            (2.0, Some("x".to_string()), Some("q".to_string()), Some(1.0)),
+            (1.0, Some("y".to_string()), Some("p".to_string()), Some(1.0)),
+            imputed_row(2.0, "y", Some("p"), 0.0),
+        ],
+        "the colour-and-detail layer completes each of its three series over keys 1 and 2, each row carrying its own keys"
+    );
     assert!(prep.warnings.is_empty(), "nothing is counted: {:?}", prep.warnings);
 }
 
 #[test]
-fn a_sibling_keying_a_field_the_impute_series_lack_counts_only_the_callers_null_row() {
+fn a_layer_whose_rows_the_drop_moved_is_imputed_in_place_under_its_own_key() {
     let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), None), (1.0, Some("y"), Some("p"))]);
     let prep = impute_with_a_sibling_keying_d(&batch);
-    assert_eq!(prep.layer_routes.len(), 1, "{:?}", prep.layer_routes);
-    let own = &prep.transform_outputs[&prep.layer_routes[0].1];
-    assert!(rows_of(own).iter().all(|(_, _, d, _)| d.is_some()), "the sibling draws no row null on its key");
+    let route_of = |layer: usize| prep.layer_routes.iter().find(|(index, _)| *index == layer).map(|(_, key)| key.clone());
+    let moved = route_of(1).expect("the null-d row moves layer 1 onto its own rows");
+    assert_eq!(moved, null_keys::layer_key(1));
+    assert_eq!(prep.layer_routes.len(), 1, "layer 0 is the only reader left on the tail, so its impute is in place: {:?}", prep.layer_routes);
+    let own = rows_of(&prep.transform_outputs[&moved]);
+    assert!(own.iter().all(|(_, _, d, _)| d.is_some()), "the layer draws no row null on its key");
+    assert_eq!(own.len(), 2, "its series (x, p) and (y, p) each hold key 1 only, so nothing is imputed");
+    assert_eq!(prep.final_batch().num_rows(), 4, "the colour layer completes (2, y) in place");
     let texts: Vec<String> = prep
         .warnings
         .iter()
@@ -21584,6 +21623,680 @@ fn a_sibling_keying_a_field_the_impute_series_lack_counts_only_the_callers_null_
         ["mark_line: 1 row has a null 'd' and belongs to no group, so it was dropped; fill or filter the nulls in 'd'"],
         "the warning counts the caller's row and never the synthetic one"
     );
+}
+
+#[test]
+fn layers_that_impute_identically_share_the_key_completed_in_place() {
+    let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), Some("p")), (1.0, Some("y"), Some("p"))]);
+    let mut spec = impute_spec(Mark::Point, None, None);
+    spec.layers = Some(vec![
+        crate::spec::layer::Layer { mark: Mark::Point, encoding: spec.encoding.clone(), ..Default::default() },
+        crate::spec::layer::Layer { mark: Mark::Line, encoding: spec.encoding.clone(), ..Default::default() },
+    ]);
+    let prep = prep(&spec, &batch);
+    assert!(prep.layer_routes.is_empty(), "{:?}", prep.layer_routes);
+    assert_eq!(prep.final_batch().num_rows(), 4, "the shared rows hold the one imputed row both layers draw");
+}
+
+#[test]
+fn a_layer_with_no_impute_keeps_the_callers_rows_beside_one_that_imputes() {
+    let batch = impute_batch(&[(1.0, Some("x"), None), (2.0, Some("x"), None), (1.0, Some("y"), None)]);
+    let mut spec = impute_spec(Mark::Point, None, None);
+    let mut plain = spec.encoding.clone();
+    plain.y.as_mut().unwrap().impute = None;
+    spec.layers = Some(vec![
+        crate::spec::layer::Layer { mark: Mark::Point, encoding: spec.encoding.clone(), ..Default::default() },
+        crate::spec::layer::Layer { mark: Mark::Line, encoding: plain, ..Default::default() },
+    ]);
+    let prep = prep(&spec, &batch);
+    assert_eq!(prep.final_batch().num_rows(), 3, "the line draws the caller's rows");
+    assert_eq!(prep.layer_routes.len(), 1);
+    assert_eq!(prep.layer_routes[0].0, 0, "the imputing layer alone reads rows of its own");
+    assert_eq!(prep.transform_outputs[&prep.layer_routes[0].1].num_rows(), 4);
+}
+
+// ── Each key dtype, colour kind and value kind the mark can draw ──
+
+/// `t = [1, 2, 3, 1, 3]` over series `x, x, x, y, y`, the key column cast from
+/// integers to `dtype`.
+fn keyed_by(dtype: &DataType) -> RecordBatch {
+    let ints: arrow::array::ArrayRef = Arc::new(arrow::array::Int64Array::from(vec![1, 2, 3, 1, 3]));
+    let key = arrow::compute::cast(&ints, dtype).unwrap_or_else(|e| panic!("{dtype}: {e}"));
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", dtype.clone(), true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            key,
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            Arc::new(StringArray::from(vec!["x", "x", "x", "y", "y"])),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn every_key_dtype_a_mark_can_place_completes_its_series_at_the_columns_own_dtype() {
+    use arrow::datatypes::TimeUnit;
+    let dtypes = [
+        DataType::Int8,
+        DataType::Int16,
+        DataType::Int32,
+        DataType::Int64,
+        DataType::UInt8,
+        DataType::UInt16,
+        DataType::UInt32,
+        DataType::UInt64,
+        DataType::Float32,
+        DataType::Float64,
+        DataType::Utf8,
+        DataType::LargeUtf8,
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+        DataType::Timestamp(TimeUnit::Microsecond, None),
+        DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+    ];
+    let spec = impute_spec(Mark::Line, None, None);
+    for dtype in dtypes {
+        let batch = keyed_by(&dtype);
+        let out = prep(&spec, &batch).final_batch().clone();
+        let mut plain_spec = spec.clone();
+        plain_spec.encoding.y.as_mut().unwrap().impute = None;
+        let plain = prep(&plain_spec, &batch).final_batch().clone();
+        assert_eq!(out.num_rows(), 6, "{dtype}: series y gains the key it lacks");
+        let key = out.column_by_name("t").unwrap();
+        assert_eq!(key.data_type(), plain.column_by_name("t").unwrap().data_type(), "{dtype}: the imputed key keeps the column's own dtype");
+        let at = |batch: &RecordBatch, row: usize| arrow::util::display::array_value_to_string(batch.column_by_name("t").unwrap(), row).unwrap();
+        assert_eq!(at(&out, 4), at(&plain, 1), "{dtype}: key 2 sits after (1, y)");
+        let v = rows_of_value(&out);
+        assert_eq!(v, vec![1.0, 2.0, 3.0, 4.0, 0.0, 5.0], "{dtype}");
+    }
+}
+
+/// The `v` column of a batch as numbers (a null is `NaN`).
+fn rows_of_value(batch: &RecordBatch) -> Vec<f64> {
+    let v = crate::render::arrow_cast::col_as_f64(batch, "v").unwrap();
+    v.into_iter().map(|value| value.unwrap_or(f64::NAN)).collect()
+}
+
+#[test]
+fn a_boolean_key_completes_over_false_then_true() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Boolean, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(arrow::array::BooleanArray::from(vec![true, false, true])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            Arc::new(StringArray::from(vec!["x", "x", "y"])),
+        ],
+    )
+    .unwrap();
+    let out = prep(&impute_spec(Mark::Line, None, None), &batch).final_batch().clone();
+    let keys: Vec<Option<bool>> = out.column_by_name("t").unwrap().as_any().downcast_ref::<arrow::array::BooleanArray>().unwrap().iter().collect();
+    assert_eq!(keys, vec![Some(true), Some(false), Some(false), Some(true)], "series y lacks false, which sorts before its true");
+    assert_eq!(rows_of_value(&out), vec![1.0, 2.0, 0.0, 3.0]);
+}
+
+#[test]
+fn a_nan_or_infinite_or_null_key_completes_no_series() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(1.0), Some(f64::NAN), Some(f64::INFINITY), None])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0, 5.0, 6.0, 7.0])),
+            Arc::new(StringArray::from(vec!["x", "x", "y", "y", "y", "y"])),
+        ],
+    )
+    .unwrap();
+    let out = prep(&impute_spec(Mark::Point, None, None), &batch).final_batch().clone();
+    assert_eq!(out.num_rows(), 7, "only series y's missing key 2 is completed");
+    assert_eq!(rows_of_value(&out)[..3], [1.0, 2.0, 4.0]);
+    assert_eq!(rows_of_value(&out)[3], 0.0, "the imputed row follows (1, y) and precedes its unplaced rows");
+}
+
+fn coloured_by(colour: arrow::array::ArrayRef) -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", colour.data_type().clone(), true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            colour,
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_colour_the_mark_reads_as_categories_keys_its_series_and_a_continuous_one_keys_nothing() {
+    use arrow::array::{BooleanArray, Int64Array};
+    let spec = impute_spec(Mark::Line, None, None);
+    let boolean = coloured_by(Arc::new(BooleanArray::from(vec![true, true, true, false, false])));
+    assert_eq!(prep(&spec, &boolean).final_batch().num_rows(), 6, "a boolean colour keys its series");
+    let integers = coloured_by(Arc::new(Int64Array::from(vec![1, 1, 1, 2, 2])));
+    assert_eq!(prep(&spec, &integers).final_batch().num_rows(), 5, "an untyped integer colour is continuous and keys nothing");
+    let mut nominal = spec.clone();
+    nominal.encoding.color.as_mut().unwrap().type_ = Some(crate::spec::encoding::DataType::Nominal);
+    assert_eq!(prep(&nominal, &integers).final_batch().num_rows(), 6, "typed nominal, the integer colour keys its series");
+}
+
+#[test]
+fn a_binned_colour_keys_its_series_by_bin_and_an_imputed_row_copies_a_value_from_its_bin() {
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.encoding.color.as_mut().unwrap().scale = Some(crate::spec::encoding::ScaleSpec::BinOrdinal {
+        bins: None,
+        scheme: None,
+        bin: Some(crate::spec::encoding::ScaleBin { bin_count: None, bin_width: Some(5.0), extent: Some((0.0, 10.0)), nice: false }),
+    });
+    // bin [0, 5) holds raw colours 1, 2 and 3 over keys 1 to 3; bin [5, 10] holds 8 and 9 over keys 1 and 3
+    let batch = coloured_by(Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 8.0, 9.0])));
+    let out = prep(&spec, &batch).final_batch().clone();
+    assert_eq!(out.num_rows(), 6, "one row completes the second bin; keyed by raw value it would add many");
+    let colour = crate::render::arrow_cast::col_as_f64(&out, "h").unwrap();
+    assert_eq!(colour, vec![Some(1.0), Some(2.0), Some(3.0), Some(8.0), Some(8.0), Some(9.0)], "the imputed row copies the first raw value of its bin");
+    assert_eq!(rows_of_value(&out), vec![1.0, 2.0, 3.0, 4.0, 0.0, 5.0]);
+}
+
+#[test]
+fn every_value_kind_is_filled_at_the_columns_own_dtype() {
+    use arrow::array::{BooleanArray, Int64Array};
+    let frame = |value: arrow::array::ArrayRef| {
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Float64, true),
+                Field::new("v", value.data_type().clone(), true),
+                Field::new("h", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0])),
+                value,
+                Arc::new(StringArray::from(vec!["x", "x", "y"])),
+            ],
+        )
+        .unwrap()
+    };
+    let with_value = |value: serde_json::Value| {
+        let mut spec = impute_spec(Mark::Point, None, None);
+        spec.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({ "value": value }));
+        spec
+    };
+    let integers = prep(&with_value(serde_json::json!(2.5)), &frame(Arc::new(Int64Array::from(vec![1, 2, 3])))).final_batch().clone();
+    assert_eq!(rows_of_value(&integers), vec![1.0, 2.0, 3.0, 2.5], "an integer column is read as floats, so 2.5 is a fill it can hold");
+    let text = frame(Arc::new(StringArray::from(vec!["a", "b", "c"])));
+    let filled = prep(&with_value(serde_json::json!("none")), &text).final_batch().clone();
+    let v = filled.column_by_name("v").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(v.iter().collect::<Vec<_>>(), vec![Some("a"), Some("b"), Some("c"), Some("none")]);
+    let flags = frame(Arc::new(BooleanArray::from(vec![true, false, true])));
+    let filled = prep(&with_value(serde_json::json!(true)), &flags).final_batch().clone();
+    let v = filled.column_by_name("v").unwrap().as_any().downcast_ref::<BooleanArray>().unwrap();
+    assert_eq!(v.iter().collect::<Vec<_>>(), vec![Some(true), Some(false), Some(true), Some(true)]);
+}
+
+// ── Options, null cells, and the refusals ──
+
+fn refusal_of(spec: &ChartSpec, batch: &RecordBatch) -> String {
+    match try_prep(spec, batch) {
+        Err(error) if matches!(error.root(), RenderError::Impute { .. }) => error.to_string(),
+        Err(other) => panic!("expected an impute refusal, got {other}"),
+        Ok(_) => panic!("expected an impute refusal"),
+    }
+}
+
+#[test]
+fn a_statistic_method_fills_each_row_and_cell_with_its_series_statistic() {
+    let mut spec = impute_spec(Mark::Point, None, None);
+    spec.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "mean"}));
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 3.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0), None, Some(3.0), Some(10.0), Some(30.0)])),
+            Arc::new(StringArray::from(vec!["x", "x", "x", "y", "y"])),
+        ],
+    )
+    .unwrap();
+    let out = prep(&spec, &batch).final_batch().clone();
+    // series x's null cell takes x's mean (2), series y's missing key takes y's mean (20)
+    assert_eq!(rows_of_value(&out), vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0]);
+}
+
+#[test]
+fn a_series_with_no_usable_value_warns_once_per_imputing_layer_in_layer_order() {
+    let mut spec = impute_spec(Mark::Point, None, None);
+    spec.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "mean"}));
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None])),
+            Arc::new(StringArray::from(vec!["x", "x", "y"])),
+        ],
+    )
+    .unwrap();
+    let said = |prep: &PreparedInputs| -> Vec<String> {
+        prep.warnings
+            .iter()
+            .filter_map(|w| match w {
+                RenderWarning::Transform(t) => Some(t.to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let notice = "Impute: group h=y has no usable (non-null, finite) values; the whole column's statistic was used instead";
+    assert_eq!(said(&prep(&spec, &batch)), [notice], "a flat chart says it once");
+    spec.layers = Some(vec![
+        crate::spec::layer::Layer { mark: Mark::Point, encoding: spec.encoding.clone(), ..Default::default() },
+        crate::spec::layer::Layer { mark: Mark::Line, encoding: spec.encoding.clone(), ..Default::default() },
+    ]);
+    assert_eq!(said(&prep(&spec, &batch)), [notice], "layers that share one impute share its one computation, so its notice");
+    // layers that impute separately (another series) each report their own, in layer order
+    let mut shaped = spec.clone();
+    shaped.layers.as_mut().unwrap()[1].mark_style =
+        Some(crate::spec::mark_style::MarkKwargsSpec { detail: Some("h".to_string()), ..Default::default() });
+    shaped.layers.as_mut().unwrap()[1].encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "median"}));
+    assert_eq!(said(&prep(&shaped, &batch)), [notice, notice], "separate computations say theirs each");
+}
+
+/// Rows `t = 1, 2` of series x and `1` of series y, plus a row with no colour and no y.
+fn null_series_batch() -> RecordBatch {
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(4.0), None])),
+            Arc::new(StringArray::from(vec![Some("x"), Some("x"), Some("y"), None])),
+        ],
+    )
+    .unwrap()
+}
+
+fn impute_texts(prep: &PreparedInputs) -> Vec<String> {
+    prep.warnings
+        .iter()
+        .filter_map(|w| match w {
+            RenderWarning::Transform(t) if t.to_string().starts_with("Impute") => Some(t.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_row_in_no_series_is_left_as_written_on_every_method_and_named_by_the_column_the_caller_wrote() {
+    let notice = "Impute: 1 row(s) have a null in 'h', so they belong to no series; they were left as written and no key is completed for them";
+    for options in [
+        serde_json::json!({"value": 0}),
+        serde_json::json!({"method": "mean"}),
+        serde_json::json!({"method": "median"}),
+        serde_json::json!({"method": "min"}),
+        serde_json::json!({"method": "max"}),
+    ] {
+        let mut spec = impute_spec(Mark::Point, None, None);
+        spec.encoding.y.as_mut().unwrap().impute = Some(options.clone());
+        let prep = prep(&spec, &null_series_batch());
+        assert_eq!(impute_texts(&prep), [notice], "{options}");
+        let v = crate::render::arrow_cast::col_as_f64(prep.final_batch(), "v").unwrap();
+        let h = prep.final_batch().column_by_name("h").unwrap().as_any().downcast_ref::<StringArray>().unwrap().clone();
+        let row = (0..h.len()).find(|&row| h.is_null(row)).expect("the null-colour row is kept");
+        assert_eq!(v[row], None, "{options}: the row keeps its null value");
+        // the genuine imputed row of series y is the only one filled: 4 caller rows and one imputed
+        assert_eq!(prep.final_batch().num_rows(), 5, "{options}");
+    }
+}
+
+#[test]
+fn the_rows_left_in_no_series_are_named_once_across_the_facet_panels() {
+    let mut spec = impute_spec(Mark::Point, None, None);
+    spec.facet = Some(crate::layout::FacetSpec {
+        field: "d".into(),
+        row: None,
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        repeat: Vec::new(),
+        mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: crate::layout::facet::FacetResolve::default(),
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+            Field::new("d", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, Some(4.0), Some(5.0), None])),
+            Arc::new(StringArray::from(vec![Some("x"), Some("x"), None, Some("x"), Some("x"), None])),
+            Arc::new(StringArray::from(vec!["P", "P", "P", "Q", "Q", "Q"])),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        impute_texts(&prep(&spec, &batch)),
+        ["Impute: 2 row(s) have a null in 'h', so they belong to no series; they were left as written and no key is completed for them"]
+    );
+}
+
+#[test]
+fn a_row_in_no_series_keeps_its_cell_beside_a_text_value_column_too() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Utf8, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), Some(1.0), None])),
+            Arc::new(StringArray::from(vec![Some("a"), Some("b"), Some("c"), None])),
+            Arc::new(StringArray::from(vec![Some("x"), Some("x"), Some("y"), None])),
+        ],
+    )
+    .unwrap();
+    let mut spec = impute_spec(Mark::Point, None, None);
+    spec.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"value": "none"}));
+    let out = prep(&spec, &batch).final_batch().clone();
+    let v = out.column_by_name("v").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+    let h = out.column_by_name("h").unwrap().as_any().downcast_ref::<StringArray>().unwrap();
+    let kept = (0..h.len()).find(|&row| h.is_null(row)).unwrap();
+    assert!(v.is_null(kept), "the row in no series keeps its null");
+    assert!((0..v.len()).filter(|&row| row != kept).all(|row| v.is_valid(row)), "every row in a series is filled");
+}
+
+#[test]
+fn a_series_is_named_as_the_transform_door_names_a_group() {
+    use arrow::array::TimestampMillisecondArray;
+    let day = |n: i64| 1_704_067_200_000 + n * 86_400_000;
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0), None, None])),
+            Arc::new(TimestampMillisecondArray::from(vec![day(0), day(0), day(1), day(1)])),
+        ],
+    )
+    .unwrap();
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.encoding.color = None;
+    spec.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec { detail: Some("h".to_string()), ..Default::default() });
+    spec.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "mean"}));
+    assert_eq!(
+        impute_texts(&prep(&spec, &batch)),
+        ["Impute: group h=2024-01-02T00:00:00 has no usable (non-null, finite) values; the whole column's statistic was used instead"]
+    );
+}
+
+#[test]
+fn a_non_finite_binned_colour_row_is_named_by_its_real_cause() {
+    let mut spec = impute_spec(Mark::Point, None, None);
+    spec.encoding.color.as_mut().unwrap().scale = Some(crate::spec::encoding::ScaleSpec::BinOrdinal {
+        bins: None,
+        scheme: None,
+        bin: Some(crate::spec::encoding::ScaleBin { bin_count: None, bin_width: Some(5.0), extent: Some((0.0, 10.0)), nice: false }),
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 4.0, 9.0])),
+            Arc::new(Float64Array::from(vec![1.0, 1.2, 8.0, f64::NAN])),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        impute_texts(&prep(&spec, &batch)),
+        ["Impute: 1 row(s) have a null or non-finite value in 'h', so they belong to no series; they were left as written and no key is completed for them"]
+    );
+}
+
+#[test]
+fn a_binned_colours_series_is_named_by_its_range() {
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "mean"}));
+    spec.encoding.color.as_mut().unwrap().scale = Some(crate::spec::encoding::ScaleSpec::BinOrdinal {
+        bins: None,
+        scheme: None,
+        bin: Some(crate::spec::encoding::ScaleBin { bin_count: None, bin_width: Some(5.0), extent: Some((0.0, 10.0)), nice: false }),
+    });
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Float64, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 3.0])),
+            Arc::new(Float64Array::from(vec![None, None, None, Some(4.0), Some(5.0)])),
+            Arc::new(Float64Array::from(vec![1.0, 1.2, 1.1, 8.0, 8.5])),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        impute_texts(&prep(&spec, &batch)),
+        ["Impute: group h=[0, 5) has no usable (non-null, finite) values; the whole column's statistic was used instead"]
+    );
+}
+
+#[test]
+fn a_refusal_names_the_layer_through_the_layer_context() {
+    let batch = impute_batch(&[(1.0, Some("x"), None), (2.0, Some("x"), None), (1.0, Some("y"), None)]);
+    let mut spec = impute_spec(Mark::Point, None, None);
+    let mut wrong = spec.encoding.clone();
+    wrong.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "bogus"}));
+    spec.layers = Some(vec![
+        crate::spec::layer::Layer { mark: Mark::Point, encoding: spec.encoding.clone(), ..Default::default() },
+        crate::spec::layer::Layer { mark: Mark::Line, encoding: wrong, ..Default::default() },
+    ]);
+    let error = try_prep(&spec, &batch).unwrap_err();
+    assert!(matches!(&error, RenderError::InLayer { layer: Some(1), source, .. } if matches!(**source, RenderError::Impute { .. })), "{error:?}");
+    // a composite overlay names its member afterwards: an unnamed context takes the index
+    let unnamed = error.clone().in_layer(1);
+    assert_eq!(unnamed.to_string(), "layer 1: impute: unknown method 'bogus'; expected value|mean|median|min|max");
+    let flat = RenderError::InLayer {
+        layer: None,
+        entry: "mark_point".into(),
+        source: Box::new(RenderError::Impute { reason: "impute: x".into() }),
+    };
+    assert_eq!(flat.to_string(), "impute: x", "a flat chart's refusal is the bare sentence");
+    assert_eq!(flat.in_layer(3).to_string(), "layer 3: impute: x");
+}
+
+#[test]
+fn an_impute_that_cannot_be_honoured_is_refused_with_its_remedy() {
+    let batch = impute_batch(&[(1.0, Some("x"), None), (2.0, Some("x"), None), (1.0, Some("y"), None)]);
+    // both channels
+    let mut both = impute_spec(Mark::Point, None, None);
+    both.encoding.x.as_mut().unwrap().impute = Some(serde_json::json!({"value": 0}));
+    assert_eq!(
+        refusal_of(&both, &batch),
+        "impute: impute= is written on both x and y; a series is completed along one axis, so write it on the value channel only"
+    );
+    // no key channel
+    let mut no_key = impute_spec(Mark::Tick, None, None);
+    no_key.encoding.x = None;
+    assert_eq!(
+        refusal_of(&no_key, &batch),
+        "impute: impute= on y completes each series along x, but the layer draws no x; bind x or remove impute="
+    );
+    let mut no_key_for_x = impute_spec(Mark::Tick, None, None);
+    no_key_for_x.encoding.x.as_mut().unwrap().impute = no_key_for_x.encoding.y.take().and_then(|y| y.impute);
+    assert_eq!(
+        refusal_of(&no_key_for_x, &batch),
+        "impute: impute= on x completes each series along y, but the layer draws no y; bind y or remove impute="
+    );
+    // the value channel's secondary
+    let mut y2 = impute_spec(Mark::Point, None, None);
+    y2.encoding.y2 = Some(EncodingSpec { field: "t".into(), ..Default::default() });
+    assert_eq!(
+        refusal_of(&y2, &batch),
+        "impute: the layer also draws y2 't', which an imputed row would leave empty; remove y2 or write the missing rows"
+    );
+    // a value of another kind than its column
+    let mut wrong = impute_spec(Mark::Point, None, None);
+    wrong.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"value": "zero"}));
+    assert_eq!(
+        refusal_of(&wrong, &batch),
+        "impute: column 'v' holds numbers, so value= must be a number, but 'zero' is text"
+    );
+    let mut unknown = impute_spec(Mark::Point, None, None);
+    unknown.encoding.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "bogus"}));
+    assert_eq!(refusal_of(&unknown, &batch), "impute: unknown method 'bogus'; expected value|mean|median|min|max");
+}
+
+#[test]
+fn a_layered_refusal_names_its_layer() {
+    let batch = impute_batch(&[(1.0, Some("x"), None), (2.0, Some("x"), None), (1.0, Some("y"), None)]);
+    let mut spec = impute_spec(Mark::Point, None, None);
+    let mut wrong = spec.encoding.clone();
+    wrong.y.as_mut().unwrap().impute = Some(serde_json::json!({"method": "bogus"}));
+    spec.layers = Some(vec![
+        crate::spec::layer::Layer { mark: Mark::Point, encoding: spec.encoding.clone(), ..Default::default() },
+        crate::spec::layer::Layer { mark: Mark::Line, encoding: wrong, ..Default::default() },
+    ]);
+    assert_eq!(
+        refusal_of(&spec, &batch),
+        "layer 1: impute: unknown method 'bogus'; expected value|mean|median|min|max"
+    );
+}
+
+/// Series `x` over keys 1 to 3, `y` over keys 1 and 3, and (given a sixth end) a series `z` holding
+/// key 2 only, each row with its own end in `t2`.
+fn ranged_batch(ends: &[f64]) -> RecordBatch {
+    let n = ends.len();
+    let keys = [1.0, 2.0, 3.0, 1.0, 3.0, 2.0];
+    let series = ["x", "x", "x", "y", "y", "z"];
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("t2", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(keys[..n].to_vec())),
+            Arc::new(Float64Array::from(ends.to_vec())),
+            Arc::new(Float64Array::from((0..n).map(|i| i as f64 + 1.0).collect::<Vec<_>>())),
+            Arc::new(StringArray::from(series[..n].to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_key_channels_secondary_is_copied_with_its_key_and_refused_only_where_a_copy_needs_one_end() {
+    let mut spec = impute_spec(Mark::Bar, None, None);
+    spec.encoding.x2 = Some(EncodingSpec { field: "t2".into(), ..Default::default() });
+    let out = prep(&spec, &ranged_batch(&[1.5, 2.5, 3.5, 1.5, 3.5])).final_batch().clone();
+    let ends = crate::render::arrow_cast::col_as_f64(&out, "t2").unwrap();
+    assert_eq!(ends, vec![Some(1.5), Some(2.5), Some(3.5), Some(1.5), Some(2.5), Some(3.5)], "the imputed row takes its key's end");
+    // key 1 has two ends, but no series lacks key 1: nothing copies it, so the chart draws as it did
+    let out = prep(&spec, &ranged_batch(&[1.5, 2.5, 3.5, 1.7, 3.5])).final_batch().clone();
+    let ends = crate::render::arrow_cast::col_as_f64(&out, "t2").unwrap();
+    assert_eq!(ends, vec![Some(1.5), Some(2.5), Some(3.5), Some(1.7), Some(2.5), Some(3.5)], "key 2 holds one end; key 1's two are left alone");
+    // series y lacks key 2 and series z holds it with another end than series x: the copy has two ends to take
+    assert_eq!(
+        refusal_of(&spec, &ranged_batch(&[1.5, 2.5, 3.5, 1.5, 3.5, 9.9])),
+        "impute: rows with x 2 hold different x2 values, so an imputed row has no x2; impute an x whose x2 follows from it"
+    );
+    // a complete chart whose rows share an x with different ends draws as it did
+    let complete = RecordBatch::try_new(
+        ranged_batch(&[0.0; 5]).schema(),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.5, 2.5, 1.7, 2.5])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(StringArray::from(vec!["x", "x", "y", "y"])),
+        ],
+    )
+    .unwrap();
+    assert_eq!(prep(&spec, &complete).final_batch().num_rows(), 4);
+}
+
+#[test]
+fn an_impute_on_x_completes_each_series_along_y_and_a_flipped_coord_completes_the_authored_value() {
+    let mut spec = impute_spec(Mark::Point, None, None);
+    let value = spec.encoding.y.take().unwrap();
+    let key = spec.encoding.x.take().unwrap();
+    spec.encoding.x = Some(value);
+    spec.encoding.y = Some(EncodingSpec { field: key.field, ..Default::default() });
+    let batch = impute_batch(&[(1.0, Some("x"), None), (2.0, Some("x"), None), (1.0, Some("y"), None)]);
+    let rows = imputed_rows(&spec, &batch);
+    assert_eq!(rows.len(), 4);
+    assert_eq!(rows[3], (2.0, Some("y".to_string()), None, Some(0.0)), "series y gains the key it lacks, filled on x");
+    // a flipped coord draws y on the x axis: the authored value channel is still completed along the authored key
+    let mut flipped = impute_spec(Mark::Point, None, None);
+    flipped.coord = Some(crate::spec::coord::CoordKind::Flip);
+    assert_eq!(imputed_rows(&flipped, &batch).len(), 4);
+}
+
+#[test]
+fn each_facet_partition_completes_the_series_it_holds_over_the_keys_it_holds() {
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.facet = Some(crate::layout::FacetSpec {
+        field: "d".into(),
+        row: None,
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        repeat: Vec::new(),
+        mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: crate::layout::facet::FacetResolve::default(),
+    });
+    // panel P holds keys 1 only; panel Q holds keys 1 and 2 and series y lacks 2 there
+    let batch = impute_batch(&[
+        (1.0, Some("x"), Some("P")),
+        (1.0, Some("y"), Some("P")),
+        (1.0, Some("x"), Some("Q")),
+        (2.0, Some("x"), Some("Q")),
+        (1.0, Some("y"), Some("Q")),
+    ]);
+    let rows = imputed_rows(&spec, &batch);
+    assert_eq!(rows.len(), 6, "only panel Q gains a row: {rows:?}");
+    assert_eq!(rows[5], imputed_row(2.0, "y", Some("Q"), 0.0), "the imputed row carries its panel's facet value");
+}
+
+#[test]
+fn the_unimputed_chart_is_left_untouched_and_a_complete_one_adds_no_row() {
+    let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), Some("q")), (1.0, Some("y"), Some("p"))]);
+    let mut spec = impute_spec(Mark::Line, None, None);
+    spec.encoding.y.as_mut().unwrap().impute = None;
+    assert_eq!(prep(&spec, &batch).final_batch().num_rows(), 3);
+    let complete = impute_batch(&[(1.0, Some("x"), None), (2.0, Some("x"), None), (1.0, Some("y"), None), (2.0, Some("y"), None)]);
+    assert_eq!(imputed_rows(&impute_spec(Mark::Line, None, None), &complete).len(), 4);
 }
 
 #[test]

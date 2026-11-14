@@ -39,6 +39,7 @@ from tests.test_null_group_warning import (
     _NO_ROWS_TO_DRAW,
     _all_keys_null_fallback_message,
     _all_keys_null_message,
+    _detail_ignored,
     _facet_key_dropped_message,
     _layer_message,
     _not_drawn,
@@ -156,7 +157,7 @@ def _assert_route_matches_static(
     assert shown == static + static
     kept_shown, kept_scene = _route(build(kept))
     assert kept_shown == []
-    assert _scene_marks(scene) == _scene_marks(kept_scene)
+    assert scene == kept_scene
     if draws:
         assert _scene_marks(scene) > 0
     assert '"null"' not in scene
@@ -672,7 +673,8 @@ def test_a_pie_drops_its_null_slice_on_the_interactive_route_too():
     kept_shown, kept_scene = _route(kept_chart)
     assert shown == [_null_key_dropped_message("mark_arc", 1, "h")] * 2
     assert kept_shown == []
-    assert _scene_marks(scene) == _scene_marks(kept_scene) > 0
+    assert _scene_marks(scene) > 0
+    assert scene == kept_scene
 
 
 def test_an_all_null_pie_gives_the_interactive_route_the_static_list():
@@ -725,13 +727,7 @@ def test_a_geoshape_draws_no_colour_so_a_null_colour_value_is_not_a_key():
         ("mark_tick", "stroke_dash", _not_drawn("mark_tick", "stroke_dash", "h", "tick")),
         ("mark_line", "shape", _not_drawn("mark_line", "shape", "h", "line")),
         ("mark_bar", "shape", _not_drawn("mark_bar", "shape", "h", "bar")),
-        (
-            "mark_point",
-            "detail",
-            "encode(detail=...) is accepted but ignored by mark_point; only mark_line, "
-            "mark_area, mark_polygon, and mark_ribbon read the detail channel for per-group "
-            "splitting.",
-        ),
+        ("mark_point", "detail", _detail_ignored("point")),
     ],
 )
 def test_a_binding_on_a_channel_the_mark_does_not_draw_is_never_a_null_key(
@@ -1283,7 +1279,8 @@ def test_a_layer_keyed_on_another_field_gives_the_interactive_route_the_static_l
     assert shown == static + static
     neutral_shown, neutral_scene = _route(_LAYERED_DOORS[door](_neutral(df)))
     assert neutral_shown == []
-    assert _scene_marks(scene) == _scene_marks(neutral_scene) > 0
+    assert _scene_marks(scene) > 0
+    assert scene == neutral_scene
     assert '"null"' not in scene
 
 
@@ -1367,13 +1364,25 @@ _IMPUTE_FRAME = pl.DataFrame(
         "v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
     }
 )
-#: The rows the impute adds, written out: the frame with them is the chart the impute must draw.
+#: The rows the impute adds, written out at their key's place in their series: panel ``F1``'s
+#: ``(2, y)`` follows its ``(1, y)`` and panel ``F2``'s follows its own. The frame with them is the
+#: chart the impute must draw.
 _IMPUTE_COMPLETED = pl.concat(
     [
-        _IMPUTE_FRAME,
-        pl.DataFrame(
-            {"t": [2.0, 2.0], "h": ["y", "y"], "d": ["p", "q"], "f": ["F1", "F2"], "v": [0.0, 0.0]}
-        ),
+        _IMPUTE_FRAME[:4],
+        pl.DataFrame({"t": [2.0], "h": ["y"], "d": ["p"], "f": ["F1"], "v": [0.0]}),
+        _IMPUTE_FRAME[4:9],
+        pl.DataFrame({"t": [2.0], "h": ["y"], "d": ["q"], "f": ["F2"], "v": [0.0]}),
+        _IMPUTE_FRAME[9:],
+    ]
+)
+#: What a colour-alone impute draws over the whole frame: series ``y`` is one series across both
+#: ``d`` levels and misses ``t=2`` once, so one row is written, after the last row with an earlier ``t``.
+_IMPUTE_COLOUR_COMPLETED = pl.concat(
+    [
+        _IMPUTE_FRAME[:9],
+        pl.DataFrame({"t": [2.0], "h": ["y"], "d": ["q"], "f": ["F2"], "v": [0.0]}),
+        _IMPUTE_FRAME[9:],
     ]
 )
 _IMPUTED_Y = fm.Y("v", impute={"value": 0})
@@ -1419,18 +1428,27 @@ def test_an_imputed_point_keyed_by_a_shape_draws_every_imputed_point_with_its_sh
 
 
 @pytest.mark.parametrize("method", ["mark_line", "mark_area", "mark_point"])
-def test_an_impute_with_a_colour_alone_draws_as_it_did(method: str):
+def test_an_impute_with_a_colour_alone_draws_the_frame_with_its_row_written_out(method: str):
+    """The one imputed row sits after its series' last earlier row, so the line draws ``1, 2, 3`` and
+    the chart is the one the frame with that row written down draws, byte for byte."""
     svg, shown = _render_capturing(_impute_chart(_IMPUTE_FRAME, method, True).to_svg)
     assert shown == []
+    written, written_shown = _render_capturing(
+        _impute_chart(_IMPUTE_COLOUR_COMPLETED, method, False).to_svg
+    )
+    assert written_shown == []
+    assert svg == written
     import hashlib
 
     assert hashlib.sha256(svg.encode()).hexdigest() == _IMPUTE_COLOUR_DIGESTS[method]
 
 
+#: SHA-256 of the written-out chart (``_IMPUTE_COLOUR_COMPLETED``, no ``impute=``), measured on the
+#: build before the encoding door inserted imputed rows, so it pins the bytes the impute must draw.
 _IMPUTE_COLOUR_DIGESTS = {
-    "mark_line": "c2b8904105833c8e32a35c3b3639de142046c3a383a956a5f26cd6e653222094",
-    "mark_area": "12fba9896ae848c02aab287dc087abe034061fd941ca7db7e304fc4742b556c5",
-    "mark_point": "f8beab4915c7d73afa41003377b73d583b3d38a4a8532ab658d3e2c015758dcf",
+    "mark_line": "b718672469c1b957b6f15baf7b3f5635d757ef336b03dd8ad7feda509dc3cc3c",
+    "mark_area": "fc29a2a6bd9674d8a8fd70c7ceb4a654d953a9a685e933bcbaa80fe32c6c4dbd",
+    "mark_point": "1f98ecf0c19ba63b30b7398a465f2798f2adea9bdbbf6c7102e1693e2f433ecf",
 }
 
 _FACET_DOORS: dict[str, Callable[[fm.Chart], fm.Chart]] = {
@@ -1447,7 +1465,7 @@ def _assert_faceted_impute_draws_its_points(
 ) -> None:
     """``imputed()`` draws the chart ``written_out()`` draws (the frame with the imputed rows
     written down, no ``impute=``): each imputed row takes its panel, so it is drawn there. Neither
-    warns, and the interactive route (when asked) builds the same scene."""
+    warns, and the interactive route (when asked) builds the same scene, value for value."""
     svg, shown = _render_capturing(imputed().to_svg)
     completed, completed_shown = _render_capturing(written_out().to_svg)
     assert shown == [] and completed_shown == []
@@ -1456,7 +1474,8 @@ def _assert_faceted_impute_draws_its_points(
         route_shown, scene = _route(imputed())
         completed_route_shown, completed_scene = _route(written_out())
         assert route_shown == completed_route_shown == []
-        assert _scene_marks(scene) == _scene_marks(completed_scene) > 0
+        assert _scene_marks(scene) > 0
+        assert scene == completed_scene
 
 
 @pytest.mark.parametrize("door", sorted(_FACET_DOORS))
@@ -1505,8 +1524,11 @@ _PANEL_IMPUTE_FRAME = pl.DataFrame(
 )
 _PANEL_IMPUTE_COMPLETED = pl.concat(
     [
-        _PANEL_IMPUTE_FRAME,
-        pl.DataFrame({"t": [2.0, 3.0], "h": ["y", "y"], "f": ["F1", "F2"], "v": [0.0, 0.0]}),
+        _PANEL_IMPUTE_FRAME[:4],
+        pl.DataFrame({"t": [2.0], "h": ["y"], "f": ["F1"], "v": [0.0]}),
+        _PANEL_IMPUTE_FRAME[4:8],
+        pl.DataFrame({"t": [3.0], "h": ["y"], "f": ["F2"], "v": [0.0]}),
+        _PANEL_IMPUTE_FRAME[8:],
     ]
 )
 
@@ -1910,10 +1932,10 @@ def test_two_layers_whose_lines_differ_by_field_say_both_in_layer_order():
 # ---------------------------------------------------------------------------
 
 
-def test_a_layer_keyed_by_a_channel_the_imputed_series_lack_reads_the_rows_before_the_impute():
-    """The host imputes ``(2, y)`` for its colour series; the shape layer keys ``d``, which the
-    imputed row does not carry. The shape layer draws its own ten rows only: no imputed row in a
-    shape with no legend entry, no warning, and the host still draws its ten and the imputed one."""
+def test_a_layer_keyed_by_a_channel_the_imputed_series_lack_completes_its_own_series():
+    """The host completes ``(2, y)`` for its colour series (eleven points). The shape layer inherits
+    the impute and also keys ``d``, so it completes its own ``(h, d)`` series, ``(2, y, p)`` and
+    ``(2, y, q)``, and draws twelve: no warning, twenty-three marks."""
     host = fm.Chart(_IMPUTE_FRAME.drop("f")).mark_point().encode(x="t", y=_IMPUTED_Y, color="h")
     chart = host.layer(fm.Layer(mark="point", encoding={"shape": "d"}))
     svg, shown = _render_capturing(chart.to_svg)
@@ -1921,8 +1943,8 @@ def test_a_layer_keyed_by_a_channel_the_imputed_series_lack_reads_the_rows_befor
     assert {"x", "y", "p", "q"} <= set(text_runs(svg))
     route_shown, scene = _route(chart)
     assert route_shown == []
-    # Eleven host points (ten rows and the imputed one) and ten shape points.
-    assert _scene_marks(scene) == 21
+    # Eleven host points (ten rows and one imputed) and twelve shape points (ten rows and two).
+    assert _scene_marks(scene) == 23
 
 
 # ---------------------------------------------------------------------------

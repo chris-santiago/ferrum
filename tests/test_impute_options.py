@@ -40,7 +40,12 @@ from ferrum._core import transform_registry
 from ferrum._warn import reset_warnings, warn_once
 from ferrum.annotation.coords import _NOT_A_TIME
 from tests._svg_rects import polylines
-from tests.test_null_group_warning import _group_dtype_refusal, _render_capturing
+from tests.test_null_group_warning import (
+    IMPUTE_KIND_CASES,
+    _group_dtype_refusal,
+    _impute_kind_refusal,
+    _render_capturing,
+)
 
 # ---------------------------------------------------------------------------
 # Readers
@@ -862,88 +867,23 @@ def test_a_number_value_fills_an_integer_column_at_the_value_it_was_given():
     ]
 
 
-@pytest.mark.parametrize(
-    ("frame", "column", "value", "holds", "tail"),
-    [
-        (
-            pl.DataFrame({"t": [1, 2], "v": [1.0, None]}),
-            "v",
-            "none",
-            "numbers",
-            "must be a number, but 'none' is text",
-        ),
-        (
-            pl.DataFrame({"t": [1, 2], "v": [1.0, None]}),
-            "v",
-            True,
-            "numbers",
-            "must be a number, but True is a boolean",
-        ),
-        (
-            pl.DataFrame({"t": [1, 2], "when": [dt.date(2024, 1, 1), None]}),
-            "when",
-            "none",
-            "dates and times",
-            "must be a datetime.date, a datetime.datetime or an epoch-millisecond number, "
-            "but 'none' is text",
-        ),
-        (
-            pl.DataFrame({"t": [1, 2], "when": [dt.date(2024, 1, 1), None]}),
-            "when",
-            False,
-            "dates and times",
-            "must be a datetime.date, a datetime.datetime or an epoch-millisecond number, "
-            "but False is a boolean",
-        ),
-        (
-            pl.DataFrame({"t": [1, 2], "grade": ["a", None]}),
-            "grade",
-            5,
-            "text",
-            "must be a string, but 5 is a number",
-        ),
-        (
-            pl.DataFrame({"t": [1, 2], "grade": ["a", None]}),
-            "grade",
-            True,
-            "text",
-            "must be a string, but True is a boolean",
-        ),
-        (
-            pl.DataFrame({"t": [1, 2], "ok": [True, None]}),
-            "ok",
-            "none",
-            "booleans",
-            "must be True or False, but 'none' is text",
-        ),
-        (
-            pl.DataFrame({"t": [1, 2], "ok": [True, None]}),
-            "ok",
-            0,
-            "booleans",
-            "must be True or False, but 0 is a number",
-        ),
-    ],
-    ids=[
-        "number column, text",
-        "number column, boolean",
-        "date column, text",
-        "date column, boolean",
-        "text column, number",
-        "text column, boolean",
-        "boolean column, text",
-        "boolean column, number",
-    ],
-)
-def test_a_value_of_another_kind_than_its_column_is_refused_naming_both(
-    frame: pl.DataFrame, column: str, value: Any, holds: str, tail: str
-):
+_KIND_COLUMNS = {
+    "number": ("v", [1.0, None]),
+    "date": ("when", [dt.date(2024, 1, 1), None]),
+    "text": ("grade", ["a", None]),
+    "boolean": ("ok", [True, None]),
+}
+
+
+@pytest.mark.parametrize("case", list(IMPUTE_KIND_CASES))
+def test_a_value_of_another_kind_than_its_column_is_refused_naming_both(case: str):
+    column, values = _KIND_COLUMNS[case.split("-")[0]]
+    value = IMPUTE_KIND_CASES[case][0]
+    frame = pl.DataFrame({"t": [1, 2], column: values})
     chart = fm.Chart(frame).transform(fm.transform_impute(column, value=value))
     with pytest.raises(ValueError) as excinfo:
         chart.mark_point().encode(x="t", y="t").to_svg()
-    assert str(excinfo.value) == _engine(
-        f"data_impute: column '{column}' holds {holds}, so value= {tail}"
-    )
+    assert str(excinfo.value) == _engine(_impute_kind_refusal("data_impute", column, case))
 
 
 @pytest.mark.parametrize("method", ["mean", "median", "min", "max"])
@@ -2323,7 +2263,8 @@ def test_a_pandas_not_a_time_is_refused_as_numpy_is():
 # ---------------------------------------------------------------------------
 
 _DAY = dt.date(2024, 1, 5)
-_DAY_WIRE = _instant(1704412800000)
+_DAY_MS = 1704412800000
+_DAY_WIRE = _instant(_DAY_MS)
 
 
 def _impute_values(node: Any) -> list[Any]:
@@ -2348,13 +2289,89 @@ def _aggregated_y() -> Any:
     return fm.Y("v", aggregate="mean", impute={"keyvals": [_DAY], "value": _DAY})
 
 
-def test_an_aggregated_channel_with_a_date_impute_lowers_and_renders():
+#: A date key and a date value: the frame a date ``keyvals`` and a date fill fit. Each series gains
+#: ``_DAY`` with ``_DAY`` as its value; ``_DATED_TWIN`` writes those rows down.
+_DAYS = [dt.date(2024, 1, 1), dt.date(2024, 1, 2)]
+_DATED = pl.DataFrame({"t": _DAYS * 2, "h": ["x", "x", "y", "y"], "when": [*_DAYS, *_DAYS]})
+_DATED_TWIN = pl.DataFrame(
+    {
+        "t": [*_DAYS, _DAY, *_DAYS, _DAY],
+        "h": ["x"] * 3 + ["y"] * 3,
+        "when": [*_DAYS, _DAY, *_DAYS, _DAY],
+    }
+)
+
+
+def _dated_y(*, impute: dict[str, Any] | None) -> Any:
+    return fm.Y("when", impute=impute) if impute is not None else "when"
+
+
+def _dated_chart(frame: pl.DataFrame, y: Any) -> fm.Chart:
+    return fm.Chart(frame).mark_point().encode(x="t", y=y, color="h")
+
+
+def _assert_tagged_fill_is_honoured(
+    imputed: Callable[[], Any], written_out: Callable[[], Any], caller_rows: Callable[[], Any]
+) -> None:
+    """The tagged date literal reaches the engine and is honoured: the chart with ``impute=`` draws
+    the one over the frame with the rows written down, which is not the chart over the caller's rows."""
+    svg, shown = _render_capturing(lambda: imputed().to_svg())
+    twin, twin_shown = _render_capturing(lambda: written_out().to_svg())
+    plain, _ = _render_capturing(lambda: caller_rows().to_svg())
+    assert shown == twin_shown == []
+    assert svg == twin
+    assert svg != plain
+
+
+def test_a_date_impute_lowers_to_its_wire_form_and_renders_only_on_a_date_key():
+    """An aggregated channel carries the date ``keyvals`` and fill in their tagged wire form, but
+    its integer key refuses a date keyval at render; the same literals on a date key and a temporal
+    ``y`` draw the frame with the rows written down."""
     chart = fm.Chart(_AGG_FRAME).mark_line().encode(x="t", y=_aggregated_y(), color="h")
-    assert _render_capturing(chart.to_svg)[1] == []
     assert _impute_values(json.loads(chart.to_json())) == [
         {"value": _DAY_WIRE, "keyvals": [_DAY_WIRE]}
     ]
-    assert chart.interactive().scene_json
+    # a date keyval on an integer key is refused at render, in the engine's words
+    with pytest.raises(ValueError) as excinfo:
+        chart.to_svg()
+    assert str(excinfo.value) == (
+        "impute: keyvals value 2024-01-05T00:00:00 (a date or datetime) is not compatible with "
+        "key column 't' dtype Int64"
+    )
+    # the same literals on a date key and a date value draw as the frame with the rows written down
+    dated = {"keyvals": [_DAY], "value": _DAY}
+    _assert_tagged_fill_is_honoured(
+        lambda: _dated_chart(_DATED, _dated_y(impute=dated)),
+        lambda: _dated_chart(_DATED_TWIN, _dated_y(impute=None)),
+        lambda: _dated_chart(_DATED, _dated_y(impute=None)),
+    )
+    assert _dated_chart(_DATED, _dated_y(impute=dated)).interactive().scene_json
+
+
+def test_an_aggregated_channel_renders_a_tagged_date_keyval_on_a_date_key():
+    """``mean(v)`` by day and series, with a date ``keyvals``: each series gains the day, filled with
+    0, and the chart is the one over the frame with those rows written down."""
+    days = [_DAYS[0], _DAYS[0], _DAYS[1], _DAYS[1]]
+    frame = pl.DataFrame(
+        {"t": days * 2, "h": ["x"] * 4 + ["y"] * 4, "v": [1.0, 3.0, 4.0, 6.0, 2.0, 4.0, 5.0, 7.0]}
+    )
+    twin = pl.DataFrame(
+        {
+            "t": [*days, _DAY, *days, _DAY],
+            "h": ["x"] * 5 + ["y"] * 5,
+            "v": [1.0, 3.0, 4.0, 6.0, 0.0, 2.0, 4.0, 5.0, 7.0, 0.0],
+        }
+    )
+
+    def build(data: pl.DataFrame, impute: dict[str, Any] | None) -> fm.Chart:
+        y = fm.Y("v", aggregate="mean", impute=impute) if impute else fm.Y("v", aggregate="mean")
+        return fm.Chart(data).mark_line().encode(x="t", y=y, color="h")
+
+    _assert_tagged_fill_is_honoured(
+        lambda: build(frame, {"keyvals": [_DAY], "value": 0}),
+        lambda: build(twin, None),
+        lambda: build(frame, None),
+    )
 
 
 def test_a_channel_with_a_date_impute_rebuilds_through_with_options():
@@ -2369,22 +2386,41 @@ def test_a_channel_with_a_date_impute_rebuilds_through_with_options():
 
 
 @pytest.mark.parametrize("door", ["plus operand", "Layer", "plain plus", "Chart.layer"])
-def test_an_aggregated_date_impute_on_a_plus_operand_and_a_layer_renders(door: str):
-    base = fm.Chart(_AGG_FRAME).mark_line().encode(x="t", y="v", color="h")
-    point = fm.Chart(_AGG_FRAME).mark_point().encode(x="t", y=_aggregated_y())
-    plain = fm.Chart(_AGG_FRAME).mark_point().encode(x="t", y=fm.Y("v", impute={"keyvals": [_DAY]}))
-    chart = {
-        "plus operand": lambda: base + point,
-        "Layer": lambda: base.layer(
+def test_a_date_impute_on_a_plus_operand_and_a_layer_draws_the_written_out_rows(door: str):
+    """An aggregated channel on this door lowers to the tagged wire form (the first assertion); on a
+    date key with a temporal ``y`` the operand or layer that writes the impute alone draws the rows
+    written down. ``plain plus`` and ``Chart.layer`` spell the fill as the epoch-millisecond number
+    of the same day."""
+    options = {
+        "keyvals": [_DAY],
+        "value": _DAY_MS if "plain" in door or door == "Chart.layer" else _DAY,
+    }
+    aggregated_base = fm.Chart(_AGG_FRAME).mark_line().encode(x="t", y="v", color="h")
+    if door in ("plus operand", "plain plus"):
+        aggregated = aggregated_base + fm.Chart(_AGG_FRAME).mark_point().encode(
+            x="t", y=_aggregated_y()
+        )
+    else:
+        aggregated = aggregated_base.layer(
             fm.Layer(mark="point", encoding={"x": "t", "y": _aggregated_y()})
-        ),
-        "plain plus": lambda: base + plain,
-        "Chart.layer": lambda: base.layer(
-            fm.Layer(mark="point", encoding={"x": "t", "y": fm.Y("v", impute={"keyvals": [_DAY]})})
-        ),
-    }[door]()
-    assert _render_capturing(chart.to_svg)[1] == []
-    assert chart.interactive().scene_json
+        )
+    assert _impute_values(json.loads(aggregated.to_json())) == [
+        {"value": _DAY_WIRE, "keyvals": [_DAY_WIRE]}
+    ]
+
+    def build(frame: pl.DataFrame, imputed: bool) -> Any:
+        base = _dated_chart(_DATED, "when").mark_line()
+        y = _dated_y(impute=options if imputed else None)
+        if door in ("plus operand", "plain plus"):
+            return base + _dated_chart(frame, y)
+        return base.layer(
+            fm.Layer(mark="point", data=None if imputed else frame, encoding={"x": "t", "y": y})
+        )
+
+    _assert_tagged_fill_is_honoured(
+        lambda: build(_DATED, True), lambda: build(_DATED_TWIN, False), lambda: build(_DATED, False)
+    )
+    assert build(_DATED, True).interactive().scene_json
 
 
 def test_a_channel_keeps_the_impute_its_caller_wrote_and_emits_the_wire_form():
@@ -2679,17 +2715,26 @@ def test_every_rebuild_route_works_with_a_channel_built_from_a_generator():
     def aggregated() -> Any:
         return fm.Y("v", aggregate="mean", impute={"keyvals": (d for d in [_DAY]), "value": _DAY})
 
-    base = fm.Chart(_AGG_FRAME).mark_line().encode(x="t", y="v", color="h")
+    def dated() -> Any:
+        return fm.Y("when", impute={"keyvals": (d for d in [_DAY]), "value": _DAY})
+
     chart = fm.Chart(_AGG_FRAME).mark_line().encode(x="t", y=aggregated(), color="h")
     assert _impute_values(json.loads(chart.to_json())) == [
         {"value": _DAY_WIRE, "keyvals": [_DAY_WIRE]}
     ]
+    base = _dated_chart(_DATED, "when").mark_line()
     routes = {
-        "plus": base + fm.Chart(_AGG_FRAME).mark_point().encode(x="t", y=aggregated()),
-        "Layer": base.layer(fm.Layer(mark="point", encoding={"x": "t", "y": aggregated()})),
+        "plus": lambda frame, y: base + _dated_chart(frame, y),
+        "Layer": lambda frame, y: base.layer(
+            fm.Layer(mark="point", data=frame if y == "when" else None, encoding={"x": "t", "y": y})
+        ),
     }
-    for door, built in routes.items():
-        assert _render_capturing(built.to_svg)[1] == [], door
+    for build in routes.values():
+        _assert_tagged_fill_is_honoured(
+            lambda: build(_DATED, dated()),
+            lambda: build(_DATED_TWIN, "when"),
+            lambda: build(_DATED, "when"),
+        )
     rebuilt = aggregated()._with_options(title="T")
     assert rebuilt.to_encoding_spec_dict()["impute"] == {
         "value": _DAY_WIRE,

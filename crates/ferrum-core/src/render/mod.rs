@@ -370,6 +370,13 @@ pub enum RenderError {
     /// wrote; non-positional channels (e.g. `"color"`) are unaffected either way.
     EncodingTypeMismatch { channel: &'static str, expected: &'static str, got: String, coord_flipped: bool },
     TransformFailed(String),
+    /// A value channel's `impute=` cannot be honored: its options are
+    /// malformed, the layer cannot be completed along a key (both channels
+    /// impute, no key channel, a secondary the imputed row would leave empty,
+    /// rows whose key has no one end to copy), or the fill does not fit its
+    /// column. `reason` is the whole sentence, door-prefixed (`impute: ...`),
+    /// worded in the channels the caller wrote and naming the remedy.
+    Impute { reason: String },
     ScaleResolutionFailed(String),
     LayoutFailed(String),
     ResvgFailed(String),
@@ -1339,6 +1346,9 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         | RenderError::InvalidColor(_)
         | RenderError::EncodingTypeMismatch { .. }
         | RenderError::TransformFailed(_)
+        // Worded in the channels the caller wrote when it is built, so there
+        // is no resolved token left to un-flip.
+        | RenderError::Impute { .. }
         | RenderError::ScaleResolutionFailed(_)
         | RenderError::LayoutFailed(_)
         | RenderError::ResvgFailed(_)
@@ -1516,6 +1526,7 @@ impl std::fmt::Display for RenderError {
             }
             Self::TransformFailed(s) =>
                 write!(f, "transform failed: {s}"),
+            Self::Impute { reason } => f.write_str(reason),
             Self::ScaleResolutionFailed(s) =>
                 write!(f, "scale resolution failed: {s}"),
             Self::LayoutFailed(s) =>
@@ -2165,6 +2176,8 @@ impl RenderError {
                 };
                 write!(f, "{entry}: channel '{channel}' is not supported; {hint}")
             }
+            // The reason is the whole door-prefixed sentence, so the entry adds nothing.
+            Self::Impute { reason } => f.write_str(reason),
             other => write!(f, "{entry}: {other}"),
         }
     }
