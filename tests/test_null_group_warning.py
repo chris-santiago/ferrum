@@ -379,18 +379,14 @@ def test_a_layer_with_no_placed_row_says_so():
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [None, None, None]}).cast({"y": pl.Float64})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == [
-        "mark_point: every row has a null or non-finite y, so the layer draws nothing"
-    ]
+    assert messages == [_layer_message("mark_point")]
 
 
 def test_a_one_row_layer_with_a_null_y_and_no_grouping_says_so_too():
     df = pl.DataFrame({"x": [1.0], "y": [None]}).cast({"y": pl.Float64})
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == [
-        "mark_point: every row has a null or non-finite y, so the layer draws nothing"
-    ]
+    assert messages == [_layer_message("mark_point")]
 
 
 def test_a_facet_panel_with_no_placed_row_names_the_facet_panel():
@@ -406,9 +402,7 @@ def test_a_facet_panel_with_no_placed_row_names_the_facet_panel():
     )
     chart = fm.Chart(df).mark_point().encode(x="x", y="y", facet="f")
     svg, messages = _render_capturing(chart.to_svg)
-    assert messages == [
-        "mark_point: every row in facet panel f=q has a null or non-finite y, so they draw nothing"
-    ]
+    assert messages == [_panel_message("mark_point")]
 
 
 def test_a_no_field_partition_emptied_in_several_panels_joins_them():
@@ -614,10 +608,7 @@ def test_a_group_off_side_on_a_log_scale_is_reported_only_by_the_log_warning():
     )
     chart = fm.Chart(df).mark_point().encode(x="x", y=fm.Y("y", scale=fm.LogScale()), color="g")
     _, messages = _render_capturing(chart.to_svg)
-    assert messages == [
-        "y scale: 2 row(s) of 'y' are zero or negative, which a LogScale cannot place, so they "
-        "are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero"
-    ]
+    assert messages == [_log_message("y", "y", 2)]
 
 
 def test_a_one_point_series_is_reported_only_by_series_dropped():
@@ -661,9 +652,7 @@ def test_a_zero_row_layer_still_warns_no_rows_to_draw_not_a_new_warning():
     df = pl.DataFrame({"x": [1.0], "y": [1.0]}).filter(pl.col("x") > 100)
     chart = fm.Chart(df).mark_point().encode(x="x", y="y")
     _, messages = _render_capturing(chart.to_svg)
-    assert messages == [
-        "the chart has no rows to draw after its transforms; its panel is drawn empty"
-    ]
+    assert messages == [_NO_ROWS_TO_DRAW]
 
 
 def test_a_wrong_type_column_refuses_as_it_already_did():
@@ -695,10 +684,7 @@ def test_an_infinity_on_a_log_axis_is_left_to_its_own_report(value: float, label
     chart = fm.Chart(df).mark_point().encode(x="x", y=fm.Y("y", scale=fm.LogScale()), color="g")
     _, messages = _render_capturing(chart.to_svg)
     if label == "-inf":
-        assert messages == [
-            "y scale: 2 row(s) of 'y' are zero or negative, which a LogScale cannot place, so "
-            "they are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero"
-        ]
+        assert messages == [_log_message("y", "y", 2)]
     elif label == "inf":
         assert messages == [
             "y scale: 2 row(s) of 'y' fall outside the scale's explicit domain, so they are not "
@@ -1714,10 +1700,7 @@ def test_a_slot_off_the_log_side_keeps_its_report():
         chart = fm.Chart(_small_slot_frame(z_values)).mark_point().encode(x="c", y=y)
         return _render_capturing(chart.to_svg)[1]
 
-    assert render([-1.0, -2.0]) == [
-        "y scale: 2 row(s) of 'w' are zero or negative, which a LogScale cannot place, so they "
-        "are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero"
-    ]
+    assert render([-1.0, -2.0]) == [_log_message("y", "w", 2)]
     assert render([None, None]) == [_slot_message("mark_point")]
 
 
@@ -1961,9 +1944,7 @@ def test_a_zero_row_frame_on_a_categorical_axis_still_warns_no_rows_to_draw():
     df = pl.DataFrame({"c": [], "w": []}, schema={"c": pl.Utf8, "w": pl.Float64})
     chart = fm.Chart(df).mark_point().encode(x="c", y="w")
     _, messages = _render_capturing(chart.to_svg)
-    assert messages == [
-        "the chart has no rows to draw after its transforms; its panel is drawn empty"
-    ]
+    assert messages == [_NO_ROWS_TO_DRAW]
 
 
 @pytest.mark.parametrize(
@@ -1978,9 +1959,7 @@ def test_a_layer_with_no_placed_row_is_named_as_a_layer_not_as_each_slot(categor
     draws nothing; its slots are the same rows and are not named again."""
     df = pl.DataFrame({"c": categories, "w": [None] * 4}, schema={"c": pl.Utf8, "w": pl.Float64})
     _, messages = _render_capturing(fm.Chart(df).mark_point().encode(x="c", y="w").to_svg)
-    assert messages == [
-        "mark_point: every row has a null or non-finite y, so the layer draws nothing"
-    ]
+    assert messages == [_layer_message("mark_point")]
 
 
 @pytest.mark.parametrize(

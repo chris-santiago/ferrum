@@ -22,7 +22,11 @@ import pytest
 import ferrum as fm
 from ferrum.coord import CoordCartesian, CoordFixed
 from tests._svg_rects import data_bar_rects, mark_layer, plot_rect, svg_elements
-from tests.test_null_group_warning import _null_key_dropped_message, _render_capturing
+from tests.test_null_group_warning import (
+    _NO_ROWS_TO_DRAW,
+    _null_key_dropped_message,
+    _render_capturing,
+)
 
 _WIDE = pl.DataFrame(
     {
@@ -214,8 +218,6 @@ _EMPTY_WIDE = pl.DataFrame(
     }
 )
 
-_NO_ROWS_WARNING = "the chart has no rows to draw after its transforms; its panel is drawn empty"
-
 
 def _warnings_of(fn) -> list[str]:
     with warnings.catch_warnings(record=True) as caught:
@@ -240,7 +242,7 @@ class TestHeatmapMaskKeepsNoCellDrawsEmptyPanel:
         messages = _warnings_of(
             lambda: fm.heatmap(_WIDE, annot=False, square=square, mask=mask).to_svg()
         )
-        assert messages == [_NO_ROWS_WARNING], messages
+        assert messages == [_NO_ROWS_TO_DRAW], messages
 
     def test_all_true_boolean_mask_square_true_gives_a_square_empty_panel(self):
         mask = np.ones((3, 3), dtype=bool)
@@ -254,7 +256,7 @@ class TestHeatmapMaskKeepsNoCellDrawsEmptyPanel:
         messages = _warnings_of(
             lambda: fm.heatmap(_EMPTY_WIDE, annot=False, square=square, mask=mask).to_svg()
         )
-        assert messages == [_NO_ROWS_WARNING], messages
+        assert messages == [_NO_ROWS_TO_DRAW], messages
 
     def test_zero_row_table_with_array_mask_draws_a_square_empty_panel(self):
         mask = np.zeros((0, 3), dtype=bool)
@@ -262,7 +264,7 @@ class TestHeatmapMaskKeepsNoCellDrawsEmptyPanel:
             warnings.simplefilter("always")
             svg = fm.heatmap(_EMPTY_WIDE, annot=False, square=True, mask=mask).to_svg()
         messages = [str(w.message) for w in caught]
-        assert messages == [_NO_ROWS_WARNING], messages
+        assert messages == [_NO_ROWS_TO_DRAW], messages
         x, y, w, h = plot_rect(svg)
         assert abs(w - h) < 1e-3, (w, h)
 
@@ -272,7 +274,7 @@ class TestHeatmapMaskKeepsNoCellDrawsEmptyPanel:
                 _WIDE, annot=True, square=True, mask=np.ones((3, 3), dtype=bool)
             ).to_svg()
         )
-        assert messages == [_NO_ROWS_WARNING], messages
+        assert messages == [_NO_ROWS_TO_DRAW], messages
 
     def test_all_true_mask_with_center_keeps_its_own_warning_too(self):
         messages = _warnings_of(
@@ -280,7 +282,7 @@ class TestHeatmapMaskKeepsNoCellDrawsEmptyPanel:
                 _WIDE, annot=False, square=True, mask=np.ones((3, 3), dtype=bool), center=0
             ).to_svg()
         )
-        assert _NO_ROWS_WARNING in messages, messages
+        assert _NO_ROWS_TO_DRAW in messages, messages
         assert any("center=0" in m for m in messages), messages
         assert len(messages) == 2, messages
 

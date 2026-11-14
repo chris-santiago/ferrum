@@ -42,6 +42,7 @@ from ferrum.annotation.coords import _NOT_A_TIME
 from tests._svg_rects import polylines
 from tests.test_null_group_warning import (
     IMPUTE_KIND_CASES,
+    _NO_ROWS_TO_DRAW,
     _group_dtype_refusal,
     _impute_kind_refusal,
     _render_capturing,
@@ -355,9 +356,7 @@ def test_a_frame_with_no_row_is_left_empty():
     )
     svg, messages = _render_capturing(_text_chart(frame, _impute(value=-1)).to_svg)
     assert _marks(svg) == []
-    assert messages == [
-        "the chart has no rows to draw after its transforms; its panel is drawn empty"
-    ]
+    assert messages == [_NO_ROWS_TO_DRAW]
 
 
 # ---------------------------------------------------------------------------

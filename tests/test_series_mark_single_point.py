@@ -24,6 +24,7 @@ import pytest
 
 import ferrum as fm
 from tests._svg_rects import band_paths, polylines, step_after_paths
+from tests.test_null_group_warning import _log_message
 
 _ONE_ROW = pl.DataFrame({"v": [1.0], "w": [2.0], "lo": [1.0], "hi": [3.0]})
 
@@ -424,10 +425,8 @@ def test_a_log_scale_short_hex_cell_is_named_by_its_color_field():
         )
     )
     assert messages == [
-        "x scale: 10 row(s) of 'hex_x' are zero or negative, which a LogScale cannot place, "
-        "so they are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero",
-        "y scale: 24 row(s) of 'hex_y' are zero or negative, which a LogScale cannot place, "
-        "so they are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero",
+        _log_message("x", "hex_x", 10),
+        _log_message("y", "hex_y", 24),
         "mark_hex: a polygon joins three or more vertices, so it did not draw value=7 (two vertices)",
     ]
 

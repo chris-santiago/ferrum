@@ -22,6 +22,7 @@ import pytest
 import ferrum as fm
 from ferrum import Chart
 from ferrum.coord import CoordCartesian, CoordFlip
+from tests.test_null_group_warning import _log_message
 
 
 def _warnings_of(render: Callable[[], Any]) -> tuple[list[str], Any]:
@@ -905,10 +906,7 @@ def test_log_off_side_rows_are_not_double_counted_with_the_explicit_domain_warni
     scale = fm.LogScale(domain=[1.0, 10.0])
     chart = Chart(df).mark_point().encode(x=fm.X("x", scale=scale), y="y")
     msgs, scene = _warnings_of(lambda: _scene(chart))
-    off_side = (
-        "x scale: 1 row(s) of 'x' are zero or negative, which a LogScale cannot place, "
-        "so they are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero"
-    )
+    off_side = _log_message("x", "x", 1)
     assert sorted(msgs) == sorted([off_side, _domain_warning("x", "x", 1)])
     # Two rows are left out in total (one off-side, one outside the domain);
     # the other two (1.0 and 2.0) draw.

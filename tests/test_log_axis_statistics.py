@@ -278,11 +278,7 @@ _DF_ALL_NEG5 = pl.DataFrame({"v": [-1.0, -2.0, -3.0, -4.0, -5.0]})
 
 #: The warning a primitive layer on a no-domain `LogScale` gives for
 #: `_DF_MIXED`'s two off-side rows, naming the raw field.
-_PRIMITIVE_OFF_SIDE_SENTENCE = (
-    "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot place, "
-    "so they are not drawn; filter them, or use fm.SymlogScale() for data that "
-    "reaches zero"
-)
+_PRIMITIVE_OFF_SIDE_SENTENCE = _log_message("x", "v", 2)
 
 
 # ---------------------------------------------------------------------------
@@ -1387,11 +1383,7 @@ def test_a_transform_step_on_a_log_axis_keeps_data_space():
     widths = _bar_edge_widths(svg)
     assert len(widths) >= 3, widths
     assert max(widths) > min(widths) * 1.5, widths
-    assert msgs == [
-        "x scale: 1 row(s) of 'bin_start' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for data that "
-        "reaches zero"
-    ]
+    assert msgs == [_log_message("x", "bin_start", 1)]
 
 
 def test_a_log_count_axis_renders_identically_through_every_sibling_route():
@@ -2994,11 +2986,7 @@ def _off_side_message(msgs: list[str]) -> str:
     return msgs[0]
 
 
-_OFF_SIDE_SENTENCE = (
-    "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
-    "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-    "data that reaches zero"
-)
+_OFF_SIDE_SENTENCE = _log_message("x", "v", 2)
 
 
 _LOG_FIT_OFF_SIDE_DOORS: dict[str, Callable[[], fm.Chart]] = {
@@ -3108,11 +3096,7 @@ def test_logx_warns_once_for_the_callers_rows_not_once_per_layer():
     per layer that shares them."""
     df = _two_hundred_rows_six_off_side()
     msgs, _ = _warnings_of(lambda: fm.regplot(df, x="v", y="w", logx=True, ci=None).to_svg())
-    assert _off_side_message(msgs) == (
-        "x scale: 6 row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), msgs
+    assert _off_side_message(msgs) == (_log_message("x", "v", 6)), msgs
 
 
 def test_x_jitter_with_logx_warns_the_callers_rows():
@@ -3122,11 +3106,7 @@ def test_x_jitter_with_logx_warns_the_callers_rows():
     msgs, _ = _warnings_of(
         lambda: fm.regplot(df, x="v", y="w", logx=True, ci=None, x_jitter=0.1).to_svg()
     )
-    assert _off_side_message(msgs) == (
-        "x scale: 6 row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), msgs
+    assert _off_side_message(msgs) == (_log_message("x", "v", 6)), msgs
 
 
 def test_a_point_on_the_same_axis_keeps_its_byte_identical_sentence():
@@ -3273,11 +3253,7 @@ def test_truncate_false_warns_off_side_rows_instead_of_refusing(door):
     never wrote."""
     df = _truncate_false_two_off_side_df()
     msgs, _ = _warnings_of(lambda: _TRUNCATE_FALSE_TWO_OFF_SIDE_DOORS[door](df).to_svg())
-    assert _off_side_message(msgs) == (
-        "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), (door, msgs)
+    assert _off_side_message(msgs) == (_log_message("x", "v", 2)), (door, msgs)
 
 
 def test_truncate_false_col_with_unequal_panel_extents_warns_and_shares_one_fit_range():
@@ -3290,11 +3266,7 @@ def test_truncate_false_col_with_unequal_panel_extents_warns_and_shares_one_fit_
     msgs, svg = _warnings_of(
         lambda: fm.lmplot(df, x="v", y="w", logx=True, truncate=False, ci=None, col="g").to_svg()
     )
-    assert _off_side_message(msgs) == (
-        "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), msgs
+    assert _off_side_message(msgs) == (_log_message("x", "v", 2)), msgs
 
     frames = mark_groups_by_frame(svg)
     assert len(frames) == 2, frames
@@ -3917,11 +3889,7 @@ def test_a_jittered_layer_on_a_log_axis_warns_the_callers_rows(door):
     df = _two_hundred_rows_six_off_side_with_group()
     build, axis, field = _JITTER_AND_DODGE_SIX_OFF_SIDE_DOORS[door]
     msgs, _ = _warnings_of(lambda: build(df).to_svg())
-    assert _off_side_message(msgs) == (
-        f"{axis} scale: 6 row(s) of '{field}' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), (door, msgs)
+    assert _off_side_message(msgs) == _log_message(axis, field, 6), (door, msgs)
 
 
 def _wide_jitter_extra_moved_rows(
@@ -4017,11 +3985,7 @@ def test_a_wide_jitter_table_matches_its_own_unlayered_per_row_truth(door):
     truth = _wide_jitter_per_row_truth(df, width=4.0)
     assert truth == 12, truth
     msgs, _ = _warnings_of(lambda: _WIDE_JITTER_TWELVE_DOORS[door](df).to_svg())
-    assert _off_side_message(msgs) == (
-        f"x scale: {truth} row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), (door, msgs)
+    assert _off_side_message(msgs) == _log_message("x", "v", truth), (door, msgs)
 
 
 def test_two_different_jitters_on_one_column_union_their_moved_rows():
@@ -4043,11 +4007,7 @@ def test_two_different_jitters_on_one_column_union_their_moved_rows():
             _jittered_x_point(df, width=4.0, seed=None) + _jittered_x_point(df, width=4.0, seed=6)
         ).to_svg()
     )
-    assert _off_side_message(msgs) == (
-        f"x scale: {truth} row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), msgs
+    assert _off_side_message(msgs) == _log_message("x", "v", truth), msgs
 
 
 def test_a_wide_jitter_with_no_caller_off_side_rows_still_warns_the_rows_it_moves_off_side():
@@ -4071,11 +4031,7 @@ def test_a_wide_jitter_with_no_caller_off_side_rows_still_warns_the_rows_it_move
     assert moved_off > 0, (
         "the wide jitter did not move any row off the side; fixture needs a wider width"
     )
-    assert msgs == [
-        f"x scale: {moved_off} row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ], (moved_off, msgs)
+    assert msgs == [_log_message("x", "v", moved_off)], (moved_off, msgs)
 
 
 def _stack_two_negative_segments_df() -> pl.DataFrame:
@@ -4116,11 +4072,7 @@ def test_a_stacked_bars_two_off_side_segments_warn_the_callers_rows(door):
     the chart is unlayered, composed with `'+'`, or a `LayerChart`."""
     df = _stack_two_negative_segments_df()
     msgs, _ = _warnings_of(lambda: _STACK_TWO_OFF_SIDE_DOORS[door](df).to_svg())
-    assert _off_side_message(msgs) == (
-        "y scale: 2 row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), (door, msgs)
+    assert _off_side_message(msgs) == (_log_message("y", "v", 2)), (door, msgs)
 
 
 def _stack_two_off_side_segments_per_panel_df() -> pl.DataFrame:
@@ -4164,11 +4116,7 @@ def test_a_faceted_stacked_bars_two_off_side_segments_per_panel_warn_the_callers
     faceting."""
     df = _stack_two_off_side_segments_per_panel_df()
     msgs, _ = _warnings_of(lambda: _STACK_FOUR_OFF_SIDE_FACETED_DOORS[door](df).to_svg())
-    assert _off_side_message(msgs) == (
-        "y scale: 4 row(s) of 'v' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ), (door, msgs)
+    assert _off_side_message(msgs) == (_log_message("y", "v", 4)), (door, msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -4377,11 +4325,7 @@ def test_logistic_under_a_log_y_fits_y_on_its_raw_scale():
             df, x="v", y=fm.Y("y", scale=fm.LogScale()), method="logistic", ci=None
         ).to_svg()
     )
-    assert msgs == [
-        "y scale: 33 row(s) of 'y' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ], msgs
+    assert msgs == [_log_message("y", "y", 33)], msgs
     assert hashlib.sha256(svg.encode()).hexdigest() == _LOGISTIC_LOG_Y_DIGEST
 
 
@@ -4402,11 +4346,7 @@ def test_glm_under_a_log_y_fits_y_on_its_raw_scale():
             df, x="v", y=fm.Y("w", scale=fm.LogScale()), method="glm", ci=None
         ).to_svg()
     )
-    assert msgs == [
-        "y scale: 74 row(s) of 'w' are zero or negative, which a LogScale cannot "
-        "place, so they are not drawn; filter them, or use fm.SymlogScale() for "
-        "data that reaches zero"
-    ], msgs
+    assert msgs == [_log_message("y", "w", 74)], msgs
     assert hashlib.sha256(svg.encode()).hexdigest() == _GLM_LOG_Y_DIGEST
 
 

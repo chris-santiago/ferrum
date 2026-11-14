@@ -12532,8 +12532,6 @@ def test_a_flat_charts_step_runs_before_its_encoding_statistic(statistic, order)
 # axes over an explicit domain, else the unit fallback, and warns; a faceted
 # one draws no facet panel and warns the same way.
 
-_NO_ROWS_WARNING = "the chart has no rows to draw after its transforms; its panel is drawn empty"
-
 
 def _nothing_above(field: str = "y") -> Any:
     return fm.transform_filter(f"datum.{field} > 100")
@@ -12578,12 +12576,12 @@ def test_a_chart_with_no_rows_draws_its_frame_and_axes_and_warns(door):
     build, panels, marks = _NO_ROWS_DOORS[door]
     chart = _quiet(build)
     svg, caught = _warned(chart.to_svg)
-    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert caught.count(_NO_ROWS_TO_DRAW) == 1
     assert len(_clip_groups(_svg_root(svg))) == panels
     assert sum(census(svg).values()) == marks
     assert any(re.fullmatch(r"-?[\d.,]+", text) for text in chrome_text(svg))
     scene, caught = _warned(lambda: _scene(chart))
-    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert caught.count(_NO_ROWS_TO_DRAW) == 1
     assert len(scene["panels"]) == panels
     assert sum(len(b["nodes"]) for p in scene["panels"] for b in p["marks"]) == marks
 
@@ -12594,7 +12592,7 @@ def test_an_empty_chart_draws_its_explicit_domain():
         _nothing_above()
     )
     svg, caught = _warned(chart.to_svg)
-    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert caught.count(_NO_ROWS_TO_DRAW) == 1
     texts = chrome_text(svg)
     assert "0" in texts and "10" in texts
 
@@ -12632,25 +12630,25 @@ def test_a_layer_charts_empty_member_warns_nothing_when_a_sibling_draws():
 
     all_empty = fm.LayerChart(empty, P().transform(_nothing_above()))
     _svg, caught_all = _warned(all_empty.to_svg)
-    assert caught_all.count(_NO_ROWS_WARNING) == 1
+    assert caught_all.count(_NO_ROWS_TO_DRAW) == 1
     _scene_all, caught_all_interactive = _warned(lambda: _scene(all_empty))
-    assert caught_all_interactive.count(_NO_ROWS_WARNING) == 1
+    assert caught_all_interactive.count(_NO_ROWS_TO_DRAW) == 1
 
     all_empty_three = fm.LayerChart(
         empty, P().transform(_nothing_above()), P(df2).transform(_nothing_above())
     )
     _svg3, caught_all_three = _warned(all_empty_three.to_svg)
-    assert caught_all_three.count(_NO_ROWS_WARNING) == 1
+    assert caught_all_three.count(_NO_ROWS_TO_DRAW) == 1
     _scene3, caught_all_three_interactive = _warned(lambda: _scene(all_empty_three))
-    assert caught_all_three_interactive.count(_NO_ROWS_WARNING) == 1
+    assert caught_all_three_interactive.count(_NO_ROWS_TO_DRAW) == 1
 
     hc = fm.hconcat(empty, full)
     _hc_svg, caught_hc = _warned(hc.to_svg)
-    assert caught_hc.count(_NO_ROWS_WARNING) == 1
+    assert caught_hc.count(_NO_ROWS_TO_DRAW) == 1
 
     hc_all_empty = fm.hconcat(all_empty, P())
     _hc2_svg, caught_hc2 = _warned(hc_all_empty.to_svg)
-    assert caught_hc2.count(_NO_ROWS_WARNING) == 1
+    assert caught_hc2.count(_NO_ROWS_TO_DRAW) == 1
 
 
 # Zero-row data (a source with no rows at all, not a filter that emptied one)
@@ -12680,12 +12678,12 @@ def test_zero_row_data_draws_its_frame_and_warns_once_on_every_route(door):
     """
     chart = _ZERO_ROW_DOORS[door]()
     svg, caught = _warned(chart.to_svg)
-    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert caught.count(_NO_ROWS_TO_DRAW) == 1
     assert len(_clip_groups(_svg_root(svg))) == (2 if door == "LCs" else 1)
     assert sum(census(svg).values()) == 0
     assert any(re.fullmatch(r"-?[\d.,]+", text) for text in chrome_text(svg))
     scene, caught = _warned(lambda: _scene(chart))
-    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert caught.count(_NO_ROWS_TO_DRAW) == 1
     assert len(scene["panels"]) == 1
     assert sum(len(b["nodes"]) for p in scene["panels"] for b in p["marks"]) == 0
 
@@ -12733,11 +12731,11 @@ def test_zero_row_null_typed_columns_draw_the_frame():
     chart = fm.Chart(null_df).mark_point().encode(x="v", y="y")
     for build in (chart, fm.LayerChart(chart, chart)):
         svg, caught = _warned(build.to_svg)
-        assert caught.count(_NO_ROWS_WARNING) == 1
+        assert caught.count(_NO_ROWS_TO_DRAW) == 1
         assert sum(census(svg).values()) == 0
         assert any(re.fullmatch(r"-?[\d.,]+", text) for text in chrome_text(svg))
         scene, caught = _warned(lambda: _scene(build))
-        assert caught.count(_NO_ROWS_WARNING) == 1
+        assert caught.count(_NO_ROWS_TO_DRAW) == 1
 
 
 def test_a_faceted_chart_over_zero_rows_warns_as_when_filtered():
@@ -12755,9 +12753,9 @@ def test_a_layer_charts_mixed_empty_members_warn_once():
     """One zero-row member beside a filter-emptied one still warns exactly once, either route."""
     mixed = fm.LayerChart(P(_Z), P().transform(_nothing_above()))
     svg, caught = _warned(mixed.to_svg)
-    assert caught.count(_NO_ROWS_WARNING) == 1
+    assert caught.count(_NO_ROWS_TO_DRAW) == 1
     _scene_out, caught_interactive = _warned(lambda: _scene(mixed))
-    assert caught_interactive.count(_NO_ROWS_WARNING) == 1
+    assert caught_interactive.count(_NO_ROWS_TO_DRAW) == 1
 
     one_draws = fm.LayerChart(P(_Z), P())
     svg2, caught2 = _warned(one_draws.to_svg)

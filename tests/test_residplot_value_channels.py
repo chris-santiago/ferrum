@@ -51,7 +51,12 @@ import pytest
 import ferrum as fm
 from ferrum._scene import _render_scene
 from ferrum._warn import reset_warnings
-from tests.test_null_group_warning import _FIT_DEGRADED, FIT_FEW_POINTS
+from tests.test_null_group_warning import (
+    _FIT_DEGRADED,
+    _NO_ROWS_TO_DRAW,
+    FIT_FEW_POINTS,
+    _log_message,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures and scene-reading helpers
@@ -797,11 +802,7 @@ def test_residplot_on_a_log_x_warns_once_and_carries_a_value_channel():
         batch = _point_batch(chart)
     messages = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
     assert len(messages) == 1, messages
-    assert messages[0] == (
-        "x scale: 2 row(s) of 'v' are zero or negative, which a LogScale "
-        "cannot place, so they are not drawn; filter them, or use "
-        "fm.SymlogScale() for data that reaches zero"
-    )
+    assert messages[0] == (_log_message("x", "v", 2))
     # The 4 on-side rows carry their own `id` through unaffected by the
     # log remapping (pass-through columns are copied, never log-mapped).
     on_side_ids = _STRING_CHANNELS["tooltip"](batch)
@@ -829,7 +830,7 @@ def test_zero_row_data_resolves_a_value_channel_without_a_new_refusal():
     messages = [str(w.message) for w in caught]
     assert messages == [
         f"Smooth: could not fit the data ({FIT_FEW_POINTS}); {_FIT_DEGRADED}",
-        "the chart has no rows to draw after its transforms; its panel is drawn empty",
+        _NO_ROWS_TO_DRAW,
     ]
 
 
@@ -842,7 +843,7 @@ def test_one_row_data_keeps_the_degenerate_fit_path_with_a_value_channel():
     messages = [str(w.message) for w in caught]
     assert messages == [
         f"Smooth: could not fit the data ({FIT_FEW_POINTS}); {_FIT_DEGRADED}",
-        "the chart has no rows to draw after its transforms; its panel is drawn empty",
+        _NO_ROWS_TO_DRAW,
     ]
 
 

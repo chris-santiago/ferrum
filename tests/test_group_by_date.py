@@ -39,6 +39,7 @@ from tests.test_null_group_warning import (
     FIT_FEW_POINTS,
     FIT_SEPARATED,
     FIT_SINGULAR,
+    _NO_ROWS_TO_DRAW,
     _group_dtype_refusal,
     _whole_fit_message,
     _fit_message,
@@ -791,13 +792,12 @@ def test_a_date_key_null_on_every_row_matches_the_numeric_twin():
 # A zero-row frame with a date group column
 # ---------------------------------------------------------------------------
 
-_NO_ROWS = "the chart has no rows to draw after its transforms; its panel is drawn empty"
 
 # What each door does over a frame with no rows, whatever the key's dtype: the chart notes that it
 # has no rows to draw, or the statistic degrades once for the whole frame, or the call raises.
 _ZERO_ROW_OUTCOME: dict[str, tuple[str, list[str] | str]] = {
-    "Kde": ("warns", [_NO_ROWS]),
-    "Violin": ("warns", [_NO_ROWS]),
+    "Kde": ("warns", [_NO_ROWS_TO_DRAW]),
+    "Violin": ("warns", [_NO_ROWS_TO_DRAW]),
     "BoxStats": ("raises", "transform failed: ValueError: stat_box_stats: empty input batch"),
     "Smooth": ("warns", [_whole_fit_message("Smooth", FIT_FEW_POINTS)]),
     "Summary": ("raises", "transform failed: ValueError: stat_summary: empty input batch"),
@@ -805,34 +805,34 @@ _ZERO_ROW_OUTCOME: dict[str, tuple[str, list[str] | str]] = {
         "raises",
         "transform failed: ValueError: stat_error_extent: empty input batch",
     ),
-    "Bin": ("warns", [_NO_ROWS]),
-    "QQ": ("warns", [_NO_ROWS]),
-    "LetterValue": ("warns", [_NO_ROWS]),
+    "Bin": ("warns", [_NO_ROWS_TO_DRAW]),
+    "QQ": ("warns", [_NO_ROWS_TO_DRAW]),
+    "LetterValue": ("warns", [_NO_ROWS_TO_DRAW]),
     "Robust": ("warns", [_whole_fit_message("Robust", FIT_FEW_POINTS)]),
     "Glm": ("warns", [_whole_fit_message("Glm", FIT_FEW_POINTS)]),
     "Logistic": ("warns", [_whole_fit_message("Logistic", FIT_FEW_POINTS)]),
     "Logistic_unfittable": ("warns", [_whole_fit_message("Logistic", FIT_FEW_POINTS)]),
-    "Kde2D": ("warns", [_NO_ROWS]),
-    "aggregate": ("warns", [_NO_ROWS]),
-    "aggregate_key": ("warns", [_NO_ROWS]),
-    "Outliers": ("warns", [_NO_ROWS]),
-    "join_aggregate": ("warns", [_NO_ROWS]),
-    "window": ("warns", [_NO_ROWS]),
-    "stack": ("warns", [_NO_ROWS]),
+    "Kde2D": ("warns", [_NO_ROWS_TO_DRAW]),
+    "aggregate": ("warns", [_NO_ROWS_TO_DRAW]),
+    "aggregate_key": ("warns", [_NO_ROWS_TO_DRAW]),
+    "Outliers": ("warns", [_NO_ROWS_TO_DRAW]),
+    "join_aggregate": ("warns", [_NO_ROWS_TO_DRAW]),
+    "window": ("warns", [_NO_ROWS_TO_DRAW]),
+    "stack": ("warns", [_NO_ROWS_TO_DRAW]),
     "pivot": ("raises", "unknown column 'a' referenced by an encoding"),
-    "top_k": ("warns", [_NO_ROWS]),
-    "density": ("warns", [_NO_ROWS]),
-    "regression": ("warns", [_NO_ROWS]),
-    "loess": ("warns", [_NO_ROWS]),
+    "top_k": ("warns", [_NO_ROWS_TO_DRAW]),
+    "density": ("warns", [_NO_ROWS_TO_DRAW]),
+    "regression": ("warns", [_NO_ROWS_TO_DRAW]),
+    "loess": ("warns", [_NO_ROWS_TO_DRAW]),
     "impute_groupby": (
         "warns",
         [
             "Impute: the column has no usable (non-null, finite) values at all; used the mean "
             "method's degenerate default instead",
-            _NO_ROWS,
+            _NO_ROWS_TO_DRAW,
         ],
     ),
-    "encoding_aggregate_detail": ("warns", [_NO_ROWS]),
+    "encoding_aggregate_detail": ("warns", [_NO_ROWS_TO_DRAW]),
 }
 
 
