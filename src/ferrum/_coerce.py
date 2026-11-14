@@ -22,6 +22,17 @@ the Rust renderer accepts and their required forms:
 - ``Dictionary``-encoded → decoded to the plain value type
 - ``Null`` (all-None, unknown type) → ``float64``
 
+Ingest normalization (``to_arrow_table``)
+-----------------------------------------
+Every input that reaches polars passes through ``to_arrow_table``, which also
+rewrites Arrow view types to their plain twins, because ``pl.from_arrow``
+crashes the process on a ``string_view`` or ``binary_view`` array made by a cast:
+
+- ``string_view`` → ``large_string``, ``binary_view`` → ``large_binary``
+- ``list_view`` / ``large_list_view`` → ``large_list``
+- applied recursively through list, large list, fixed-size list, struct, map and
+  dictionary value types; a column without view types is not cast
+
 The SVG path (``_render.py::_render_inputs``) and the interactive path both
 call ``normalize_for_rust(to_arrow_table(data))`` so the contract is applied
 exactly once, by one function.
@@ -29,6 +40,7 @@ exactly once, by one function.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 
@@ -152,6 +164,309 @@ def normalize_for_rust(tbl: "pyarrow.Table") -> "pyarrow.Table":
     return pa.table(new_cols, names=[tbl.schema.field(i).name for i in range(len(tbl.schema))])
 
 
+def _plain_type(t: "pyarrow.DataType", pa: object) -> "pyarrow.DataType":
+    """Return ``t`` with every view type in its type tree replaced by its plain twin.
+
+    Returns a type equal to ``t`` when the tree holds no view type.  An
+    extension type whose storage holds a view type is replaced by its plain
+    storage type; any other extension type is returned unchanged.
+    """
+    types = pa.types
+    if isinstance(t, pa.BaseExtensionType):
+        storage = _plain_type(t.storage_type, pa)
+        return t if storage == t.storage_type else storage
+    if types.is_string_view(t):
+        return pa.large_string()
+    if types.is_binary_view(t):
+        return pa.large_binary()
+    if types.is_list_view(t) or types.is_large_list_view(t):
+        return pa.large_list(_plain_field(t.value_field, pa))
+    if types.is_large_list(t):
+        field = _plain_field(t.value_field, pa)
+        return t if field.type == t.value_type else pa.large_list(field)
+    if types.is_fixed_size_list(t):
+        field = _plain_field(t.value_field, pa)
+        return t if field.type == t.value_type else pa.list_(field, t.list_size)
+    if types.is_map(t):
+        key = _plain_field(t.key_field, pa)
+        item = _plain_field(t.item_field, pa)
+        if key.type == t.key_type and item.type == t.item_type:
+            return t
+        return pa.map_(key.type, item, keys_sorted=t.keys_sorted)
+    if types.is_list(t):
+        field = _plain_field(t.value_field, pa)
+        return t if field.type == t.value_type else pa.list_(field)
+    if types.is_struct(t):
+        fields = [_plain_field(t.field(i), pa) for i in range(t.num_fields)]
+        if all(new.type == t.field(i).type for i, new in enumerate(fields)):
+            return t
+        return pa.struct(fields)
+    if types.is_union(t):
+        fields = [_plain_field(t.field(i), pa) for i in range(t.num_fields)]
+        if all(new.type == t.field(i).type for i, new in enumerate(fields)):
+            return t
+        return pa.union(fields, t.mode, t.type_codes)
+    if types.is_run_end_encoded(t):
+        value = _plain_type(t.value_type, pa)
+        return t if value == t.value_type else pa.run_end_encoded(t.run_end_type, value)
+    if types.is_dictionary(t):
+        value = _plain_type(t.value_type, pa)
+        if value == t.value_type:
+            return t
+        return pa.dictionary(t.index_type, value, ordered=t.ordered)
+    return t
+
+
+def _plain_field(field: "pyarrow.Field", pa: object) -> "pyarrow.Field":
+    """Return ``field`` with its type rewritten by :func:`_plain_type`."""
+    plain = _plain_type(field.type, pa)
+    return field if plain == field.type else field.with_type(plain)
+
+
+class _CannotCast(Exception):
+    """pyarrow has no cast from a view type to its plain twin for this array."""
+
+
+def _cast_array(arr: "pyarrow.Array", target: "pyarrow.DataType") -> "pyarrow.Array":
+    """Cast ``arr`` with pyarrow's own cast; a cast pyarrow refuses raises ``_CannotCast``."""
+    import pyarrow as pa
+
+    try:
+        return arr.cast(target)
+    except pa.ArrowNotImplementedError as e:
+        raise _CannotCast(str(e)) from e
+
+
+def _needs_rebuild(t: "pyarrow.DataType", pa: object) -> bool:
+    """True when ``t`` holds a type pyarrow cannot cast in place.
+
+    pyarrow's cast of a list view drops the last row's values and aborts the
+    process on some chunked inputs, and it has no cast for a union, a
+    run-end-encoded array or an extension array holding a view type.
+    """
+    types = pa.types
+    if (
+        types.is_list_view(t)
+        or types.is_large_list_view(t)
+        or types.is_union(t)
+        or types.is_run_end_encoded(t)
+        or isinstance(t, pa.BaseExtensionType)
+    ):
+        return True
+    if types.is_dictionary(t):
+        return _needs_rebuild(t.value_type, pa)
+    if types.is_nested(t):
+        return any(_needs_rebuild(t.field(i).type, pa) for i in range(t.num_fields))
+    return False
+
+
+def _rebased_offsets(arr: "pyarrow.Array", pa: object) -> "tuple[pyarrow.Array, int, int]":
+    """Offsets of a list or map array re-based to zero, with the start and length of its values.
+
+    ``from_arrays`` rejects an offsets array that carries a slice offset beside a
+    null mask, so the re-based offsets are a fresh array.
+    """
+    import pyarrow.compute as pc
+
+    offsets = arr.offsets
+    start = offsets[0].as_py()
+    stop = offsets[len(offsets) - 1].as_py()
+    rebased = pc.subtract(offsets, pa.scalar(start, offsets.type))
+    return rebased, start, stop - start
+
+
+def _empty_array(t: "pyarrow.DataType", pa: object) -> "pyarrow.Array":
+    """A zero-length array of type ``t``.
+
+    ``pa.array`` cannot build an empty union, or an empty container of one, so
+    every container is built around an empty child.
+    """
+    types = pa.types
+    if types.is_union(t):
+        children = [_empty_array(t.field(i).type, pa) for i in range(t.num_fields)]
+        codes = pa.array([], pa.int8())
+        names = [t.field(i).name for i in range(t.num_fields)]
+        if t.mode == "sparse":
+            return pa.UnionArray.from_sparse(
+                codes, children, field_names=names, type_codes=list(t.type_codes)
+            )
+        return pa.UnionArray.from_dense(
+            codes,
+            pa.array([], pa.int32()),
+            children,
+            field_names=names,
+            type_codes=list(t.type_codes),
+        )
+    if types.is_struct(t):
+        children = [_empty_array(t.field(i).type, pa) for i in range(t.num_fields)]
+        return pa.StructArray.from_arrays(children, fields=list(t))
+    if types.is_map(t):
+        offsets = pa.array([0], pa.int32())
+        keys = _empty_array(t.key_type, pa)
+        return pa.MapArray.from_arrays(offsets, keys, _empty_array(t.item_type, pa), type=t)
+    if types.is_large_list(t):
+        offsets = pa.array([0], pa.int64())
+        return pa.LargeListArray.from_arrays(offsets, _empty_array(t.value_type, pa), type=t)
+    if types.is_list(t):
+        offsets = pa.array([0], pa.int32())
+        return pa.ListArray.from_arrays(offsets, _empty_array(t.value_type, pa), type=t)
+    if types.is_fixed_size_list(t):
+        return pa.FixedSizeListArray.from_arrays(_empty_array(t.value_type, pa), type=t)
+    if types.is_dictionary(t):
+        indices = pa.array([], t.index_type)
+        return pa.DictionaryArray.from_arrays(
+            indices, _empty_array(t.value_type, pa), ordered=t.ordered
+        )
+    return pa.array([], type=t)
+
+
+def _plain_array(arr: "pyarrow.Array", pa: object) -> "pyarrow.Array":
+    """Return ``arr`` with every view type in its type tree replaced by its plain twin.
+
+    An array whose type pyarrow can cast in place is cast.  Otherwise the
+    container is rebuilt around its rewritten children: a list view from its
+    flattened values and per-row lengths, the others from their offsets,
+    fields or run values.
+    """
+    import pyarrow.compute as pc
+
+    t = arr.type
+    target = _plain_type(t, pa)
+    if target == t:
+        return arr
+    if not _needs_rebuild(t, pa):
+        return _cast_array(arr, target)
+    if len(arr) == 0:
+        return _empty_array(target, pa)
+    types = pa.types
+    mask = pc.invert(arr.is_valid()) if arr.null_count else None
+    if isinstance(t, pa.BaseExtensionType):
+        return _plain_array(arr.storage, pa)
+    if types.is_list_view(t) or types.is_large_list_view(t):
+        lengths = pc.fill_null(pc.list_value_length(arr), 0).cast(pa.int64())
+        offsets = pa.concat_arrays([pa.array([0], pa.int64()), pc.cumulative_sum(lengths)])
+        values = _plain_array(pc.list_flatten(arr), pa)
+        return pa.LargeListArray.from_arrays(offsets, values, type=target, mask=mask)
+    if types.is_map(t):
+        offsets, start, count = _rebased_offsets(arr, pa)
+        keys = _plain_array(arr.keys.slice(start, count), pa)
+        items = _plain_array(arr.items.slice(start, count), pa)
+        return pa.MapArray.from_arrays(offsets, keys, items, type=target, mask=mask)
+    if types.is_large_list(t) or types.is_list(t):
+        offsets, start, count = _rebased_offsets(arr, pa)
+        values = _plain_array(arr.values.slice(start, count), pa)
+        array_type = pa.LargeListArray if types.is_large_list(t) else pa.ListArray
+        return array_type.from_arrays(offsets, values, type=target, mask=mask)
+    if types.is_fixed_size_list(t):
+        size = t.list_size
+        values = _plain_array(arr.values.slice(arr.offset * size, len(arr) * size), pa)
+        return pa.FixedSizeListArray.from_arrays(values, type=target, mask=mask)
+    if types.is_struct(t):
+        children = [_plain_array(arr.field(i), pa) for i in range(t.num_fields)]
+        return pa.StructArray.from_arrays(children, fields=list(target), mask=mask)
+    if types.is_union(t):
+        names = [target.field(i).name for i in range(target.num_fields)]
+        children = [_plain_array(arr.field(i), pa) for i in range(t.num_fields)]
+        # ``type_codes`` and ``offsets`` read the unsliced buffers from the
+        # start, so a sliced union takes them from its buffers at its offset (and
+        # the codes are copied to an offset-free array, as its children are).
+        buffers = arr.buffers()
+        codes = pc.add(
+            pa.Array.from_buffers(pa.int8(), len(arr), [None, buffers[1]], offset=arr.offset),
+            pa.scalar(0, pa.int8()),
+        )
+        if t.mode == "sparse":
+            return pa.UnionArray.from_sparse(
+                codes, children, field_names=names, type_codes=list(t.type_codes)
+            )
+        offsets = pc.add(
+            pa.Array.from_buffers(pa.int32(), len(arr), [None, buffers[2]], offset=arr.offset),
+            pa.scalar(0, pa.int32()),
+        )
+        return pa.UnionArray.from_dense(
+            codes, offsets, children, field_names=names, type_codes=list(t.type_codes)
+        )
+    if types.is_run_end_encoded(t):
+        # pyarrow has no decode kernel for a view-valued array: rewrite the run
+        # values, expand them by run, and encode the result again.
+        import numpy as np
+
+        run_ends = arr.run_ends.to_numpy(zero_copy_only=False)
+        run_lengths = np.diff(run_ends, prepend=0)
+        run_of_row = np.repeat(np.arange(len(run_ends)), run_lengths)
+        expanded = _plain_array(arr.values, pa).take(
+            pa.array(run_of_row[arr.offset : arr.offset + len(arr)])
+        )
+        return pc.run_end_encode(expanded, run_end_type=t.run_end_type)
+    # dictionary: ``_plain_type`` only differs here through the value type.
+    dictionary = _plain_array(arr.dictionary, pa)
+    return pa.DictionaryArray.from_arrays(arr.indices, dictionary, ordered=t.ordered)
+
+
+def _convert_column(col: "pyarrow.ChunkedArray", pa: object) -> "pyarrow.ChunkedArray":
+    """Rewrite the view types of one column, chunk by chunk."""
+    target = _plain_type(col.type, pa)
+    return pa.chunked_array([_plain_array(c, pa) for c in col.chunks], type=target)
+
+
+def _dropped_extension_names(t: "pyarrow.DataType", pa: object) -> list[str]:
+    """Names of the extension types in ``t`` that the rewrite unwraps to plain storage.
+
+    An extension type is unwrapped only when its storage holds a view type.
+    Each name is listed once, in tree order.
+    """
+    types = pa.types
+    names: list[str] = []
+    if isinstance(t, pa.BaseExtensionType):
+        if _plain_type(t, pa) != t:
+            names.append(t.extension_name)
+        children = [t.storage_type]
+    elif types.is_dictionary(t) or types.is_run_end_encoded(t):
+        children = [t.value_type]
+    elif types.is_nested(t):
+        children = [t.field(i).type for i in range(t.num_fields)]
+    else:
+        children = []
+    for child in children:
+        names.extend(n for n in _dropped_extension_names(child, pa) if n not in names)
+    return names
+
+
+def _rewrite_view_columns(tbl: "pyarrow.Table", pa: object) -> "pyarrow.Table":
+    """Rewrite every column whose type tree holds a view type to its plain twin.
+
+    Returns ``tbl`` itself when no column holds a view type.  Raises
+    ``TypeError`` naming the column when pyarrow cannot cast it, or when the
+    rewrite itself fails.
+    """
+    for i, field in enumerate(tbl.schema):
+        plain = _plain_type(field.type, pa)
+        if plain == field.type:
+            continue
+        try:
+            col = _convert_column(tbl.column(i), pa)
+            tbl = tbl.set_column(i, field.with_type(plain), col)
+            for name in _dropped_extension_names(field.type, pa):
+                warnings.warn(
+                    f"Extension type {name!r} holds a view type; loading as its plain "
+                    f"storage type.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        except _CannotCast as e:
+            raise TypeError(
+                f"column {field.name!r} has Arrow type {field.type}, which ferrum cannot "
+                f"read; cast it to a plain type (e.g. pa.large_string()) before charting"
+            ) from e
+        except (pa.ArrowException, ValueError) as e:
+            raise TypeError(
+                f"column {field.name!r} has Arrow type {field.type}, which ferrum could not "
+                f"rewrite to a plain type ({e}); cast it to a plain type "
+                f"(e.g. pa.large_string()) before charting"
+            ) from e
+    return tbl
+
+
 def to_polars(data: Any) -> "polars.DataFrame":
     """Coerce any supported input to a ``polars.DataFrame``.
 
@@ -200,9 +515,19 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         If ``data`` is ``None``, or if a ``list`` input is empty.
     TypeError
         If ``data`` is a 1D numpy array (column name required), a numpy
-        array with ``ndim > 2``, or a list of non-dict items.
+        array with ``ndim > 2``, a list of non-dict items, or an Arrow column
+        holding a view type that pyarrow cannot cast to its plain twin (or
+        whose rewrite fails); the message names the column and the remedy.
     ImportError
         If the input type requires ``narwhals`` and it is not installed.
+
+    Warns
+    -----
+    UserWarning
+        Once per column for each extension type whose storage holds a view
+        type: the column loads as its plain storage type and the extension
+        wrapper is dropped, as polars does for an extension type it has no
+        registration for.
 
     Examples
     --------
@@ -265,6 +590,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         pass
 
     if isinstance(data, pa.Table):
+        data = _rewrite_view_columns(data, pa)
         # K7: cast date32/date64 columns to timestamp[ms] for Rust compat.
         # Also normalize timestamp[us] and timestamp[ns] to timestamp[ms] so the
         # Rust temporal scale produces correct epoch-millisecond tick values.
@@ -297,7 +623,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
         if _is_geojson_geometry_root(data):
             wrapped = _wrap_geometry_as_feature_collection(data)
             return _geojson_to_arrow(wrapped)
-        return pa.Table.from_pydict(data)
+        return _rewrite_view_columns(pa.Table.from_pydict(data), pa)
     if isinstance(data, list):
         if not data:
             raise ValueError("Cannot construct Chart from empty list")
@@ -306,7 +632,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                 f"Chart(list) expects a list of dicts (one per row), got list of "
                 f"{type(data[0]).__name__}"
             )
-        return pa.Table.from_pylist(data)
+        return _rewrite_view_columns(pa.Table.from_pylist(data), pa)
 
     # numpy
     try:
