@@ -26,7 +26,9 @@ import json
 import random
 import re
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Sequence, Set
+from collections import OrderedDict
+from types import MappingProxyType
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -40,6 +42,12 @@ from ferrum._core import transform_registry
 from ferrum._warn import reset_warnings, warn_once
 from ferrum.annotation.coords import _NOT_A_TIME
 from tests._svg_rects import polylines
+from tests.test_transform_bare_string_sequence_params import (
+    _bytes_text,
+    _mapping_text,
+    _set_text,
+    _SetSubclass,
+)
 from tests.test_null_group_warning import (
     IMPUTE_KIND_CASES,
     _NO_ROWS_TO_DRAW,
@@ -1504,6 +1512,111 @@ def test_an_impute_keyvals_that_is_a_bare_string_is_refused_at_construction():
         "Y(impute=...): keyvals must be a sequence of key values (list or tuple), "
         "got a bare string 'Mar'; iterating a string yields individual characters"
     )
+
+
+class _ReadRecordingSet(Set):
+    """A ``Set`` that records every read, to show a refused keyvals is never iterated."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __contains__(self, item: object) -> bool:
+        return False
+
+    def __iter__(self):
+        self.reads += 1
+        return iter(("a", "b"))
+
+    def __len__(self) -> int:
+        return 2
+
+
+_UNORDERED_DOORS: dict[str, Callable[[Any], Any]] = {
+    "transform_impute": lambda keyvals: fm.transform_impute("v", key="t", keyvals=keyvals),
+    "Y(impute=...)": lambda keyvals: fm.Y("v", impute={"keyvals": keyvals}),
+    "X(impute=...)": lambda keyvals: fm.X("v", impute={"keyvals": keyvals}),
+}
+
+
+@pytest.mark.parametrize("door", list(_UNORDERED_DOORS))
+@pytest.mark.parametrize(
+    ("make", "builder"),
+    [
+        (lambda: {"a", "b", "c"}, _set_text),
+        (lambda: frozenset({"a", "b", "c"}), _set_text),
+        (lambda: {"a": 1, "b": 2}.keys(), _set_text),
+        (lambda: {"a": 1, "b": 2}.items(), _set_text),
+        (lambda: _SetSubclass("a", "b"), _set_text),
+        (lambda: MappingProxyType({"start": 0, "stop": 3}), _mapping_text),
+        (lambda: b"abc", _bytes_text),
+        (lambda: bytearray(b"abc"), _bytes_text),
+        (lambda: memoryview(b"abc"), _bytes_text),
+    ],
+    ids=[
+        "set",
+        "frozenset",
+        "dict keys",
+        "dict items",
+        "abc Set subclass",
+        "mappingproxy",
+        "bytes",
+        "bytearray",
+        "memoryview",
+    ],
+)
+def test_a_keyvals_with_no_defined_order_or_made_of_bytes_is_refused_at_construction(
+    door: str, make: Callable[[], Any], builder: Callable[..., str]
+):
+    keyvals = make()
+    with pytest.raises(ValueError) as excinfo:
+        _UNORDERED_DOORS[door](keyvals)
+    assert str(excinfo.value) == builder(door, "keyvals", "key values", keyvals)
+
+
+@pytest.mark.parametrize("door", list(_UNORDERED_DOORS))
+@pytest.mark.parametrize(
+    "form", [{"start": 0, "stop": 3}, OrderedDict(start=0, stop=3)], ids=["dict", "OrderedDict"]
+)
+def test_a_dict_keyvals_is_the_sequence_form_on_every_door(door: str, form: dict):
+    result = _UNORDERED_DOORS[door](form)
+    wire = result["keyvals"] if door == "transform_impute" else result._kwargs["impute"]["keyvals"]
+    assert wire == {"start": 0, "stop": 3}
+
+
+@pytest.mark.parametrize("door", list(_UNORDERED_DOORS))
+def test_dict_values_is_accepted_and_read_in_insertion_order(door: str):
+    result = _UNORDERED_DOORS[door]({"z": 2, "a": 0, "m": 1}.values())
+    wire = result["keyvals"] if door == "transform_impute" else result._kwargs["impute"]["keyvals"]
+    assert wire == [2, 0, 1]
+
+
+@pytest.mark.parametrize("door", list(_UNORDERED_DOORS))
+def test_a_refused_keyvals_set_is_never_iterated(door: str):
+    keyvals = _ReadRecordingSet()
+    with pytest.raises(ValueError, match="a set has no order"):
+        _UNORDERED_DOORS[door](keyvals)
+    assert keyvals.reads == 0
+
+
+@pytest.mark.parametrize("door", list(_UNORDERED_DOORS))
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda: [0, 1, 2],
+        lambda: (0, 1, 2),
+        lambda: range(3),
+        lambda: np.array([0, 1, 2]),
+        lambda: pl.Series([0, 1, 2]),
+        lambda: pd.Series([0, 1, 2]),
+        lambda: (n for n in range(3)),
+        lambda: map(int, ["0", "1", "2"]),
+    ],
+    ids=["list", "tuple", "range", "numpy", "polars", "pandas", "generator", "map"],
+)
+def test_an_ordered_keyvals_is_still_read_once_into_its_list(door: str, make: Callable[[], Any]):
+    result = _UNORDERED_DOORS[door](make())
+    wire = result["keyvals"] if door == "transform_impute" else result._kwargs["impute"]["keyvals"]
+    assert wire == [0, 1, 2]
 
 
 def test_an_impute_keyval_that_is_nothing_a_key_holds_is_refused_in_the_encoding_voice():

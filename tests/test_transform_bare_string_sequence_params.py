@@ -35,9 +35,13 @@ from __future__ import annotations
 
 import inspect
 import typing
-from collections.abc import Sequence
+from collections import OrderedDict
+from collections.abc import Sequence, Set
+from types import MappingProxyType
 from typing import Any
 
+import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 
@@ -191,6 +195,132 @@ def test_real_sequence_still_reaches_the_wire(name, param):
     wire under the parameter's own key, unchanged."""
     spec = _call_with(name, param, list(_VALID_SAMPLE))
     assert spec[param] == _VALID_SAMPLE
+
+
+#: The noun each family parameter's refusals call its elements.
+_NOUNS = {
+    "groupby": "column names",
+    "fields": "column names",
+    "sort": "column names",
+    "as_": "output-column names",
+    "keyvals": "key values",
+}
+
+
+class _SetSubclass(Set):
+    """A third-party ``collections.abc.Set`` that is none of the builtin sets."""
+
+    def __init__(self, *items: str) -> None:
+        self._items = items
+
+    def __contains__(self, item: object) -> bool:
+        return item in self._items
+
+    def __iter__(self):
+        return iter(self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+def _bytes_text(door: str, param: str, noun: str, value: object) -> str:
+    return (
+        f"{door}: {param} must be a sequence of {noun} (list or tuple), got "
+        f"{type(value).__name__} {value!r}; iterating it yields integers"
+    )
+
+
+def _set_text(door: str, param: str, noun: str, value: object) -> str:
+    return (
+        f"{door}: {param} must be an ordered sequence of {noun}, got "
+        f"{type(value).__name__} {value!r}; a set has no order, so the output would "
+        "change from run to run; pass a list, e.g. sorted(...)"
+    )
+
+
+def _mapping_text(door: str, param: str, noun: str, value: object) -> str:
+    if param == "keyvals":
+        return (
+            f"{door}: keyvals must be a sequence of {noun} or a "
+            f"{{'start', 'stop', 'step'}} dict, got {type(value).__name__} {value!r}; "
+            "pass a list, or dict(...) for the sequence form"
+        )
+    return (
+        f"{door}: {param} must be a sequence of {noun}, got "
+        f"{type(value).__name__} {value!r}; pass a list of its keys, e.g. list(...)"
+    )
+
+
+#: (id, value, the message builder that refuses it)
+_REFUSED = [
+    ("set", {"zzz_col_a", "zzz_col_b"}, _set_text),
+    ("frozenset", frozenset({"zzz_col_a", "zzz_col_b"}), _set_text),
+    ("dict_keys", {"zzz_col_a": 1, "zzz_col_b": 2}.keys(), _set_text),
+    ("dict_items", {"zzz_col_a": 1, "zzz_col_b": 2}.items(), _set_text),
+    ("abc_set", _SetSubclass("zzz_col_a", "zzz_col_b"), _set_text),
+    ("bytes", b"ab", _bytes_text),
+    ("bytearray", bytearray(b"ab"), _bytes_text),
+    ("memoryview", memoryview(b"ab"), _bytes_text),
+    ("mappingproxy", MappingProxyType({"zzz_col_a": 1, "zzz_col_b": 2}), _mapping_text),
+]
+
+
+@pytest.mark.parametrize("name, param", _DERIVED_PARAMS, ids=lambda v: v)
+@pytest.mark.parametrize("value, builder", [v[1:] for v in _REFUSED], ids=[v[0] for v in _REFUSED])
+def test_an_unordered_or_byte_collection_is_refused_across_the_family(name, param, value, builder):
+    """A set, a dict view, a non-dict mapping and a byte string refuse at
+    construction in the door's own words, never read in hash order or as integers."""
+    with pytest.raises(ValueError) as excinfo:
+        _call_with(name, param, value)
+    assert str(excinfo.value) == builder(name, param, _NOUNS[param], value)
+
+
+@pytest.mark.parametrize(
+    "form", [{"start": 0, "stop": 3}, OrderedDict(start=0, stop=3)], ids=["dict", "OrderedDict"]
+)
+def test_a_dict_keyvals_stays_the_sequence_form(form):
+    assert fm.transform_impute("v", key="t", keyvals=form)["keyvals"] == {"start": 0, "stop": 3}
+
+
+@pytest.mark.parametrize("name, param", _DERIVED_PARAMS, ids=lambda v: v)
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda items: tuple(items),
+        lambda items: (i for i in items),
+        lambda items: map(str, items),
+        lambda items: np.array(items),
+        lambda items: pl.Series(items),
+        lambda items: pd.Series(items),
+    ],
+    ids=["tuple", "generator", "map", "numpy", "polars", "pandas"],
+)
+def test_every_ordered_sequence_kind_is_still_read_once_and_unchanged(name, param, make):
+    spec = _call_with(name, param, make(list(_VALID_SAMPLE)))
+    assert spec[param] == _VALID_SAMPLE
+
+
+@pytest.mark.parametrize("name, param", _DERIVED_PARAMS, ids=lambda v: v)
+def test_the_remedy_a_mapping_refusal_names_is_accepted(name, param):
+    """Following the named remedy (``list(...)`` of the keys; ``dict(...)`` for
+    ``keyvals``' sequence form) is read as written."""
+    proxy = MappingProxyType({"zzz_col_a": 1, "zzz_col_b": 2})
+    assert _call_with(name, param, list(proxy))[param] == _VALID_SAMPLE
+    if param == "keyvals":
+        form = dict(MappingProxyType({"start": 0, "stop": 3}))
+        assert _call_with(name, param, form)[param] == {"start": 0, "stop": 3}
+
+
+def test_dict_values_is_read_in_insertion_order():
+    values = {"z": 2, "a": 0, "m": 1}.values()
+    assert fm.transform_impute("v", key="t", keyvals=values)["keyvals"] == [2, 0, 1]
+    assert _call_with("transform_fold", "fields", {"zzz_col_b": 1, "zzz_col_a": 2}.values())[
+        "fields"
+    ] == [1, 2]
+
+
+def test_a_range_keyvals_is_read_once_and_unchanged():
+    assert fm.transform_impute("v", key="t", keyvals=range(3))["keyvals"] == [0, 1, 2]
 
 
 @pytest.mark.parametrize(

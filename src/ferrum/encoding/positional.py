@@ -124,7 +124,13 @@ class Y(ChannelBase):
       ``value``, ``keyvals``, ``frame``), each checked as ``transform_impute``
       checks it when the channel is built: a value that is not a dict, an option
       not in that list, a non-finite ``value`` and a malformed ``keyvals`` or
-      ``frame`` raise ``ValueError``. Written on the value channel, it completes
+      ``frame`` raise ``ValueError``. ``keyvals`` is an ordered sequence (list,
+      tuple, ``range``, array, Series, a generator, ``dict.values()``) or a
+      ``{"start", "stop", "step"}`` dict. A bare string (it iterates into
+      characters), a byte string (it iterates into integers), a set or a dict's
+      ``keys()`` or ``items()`` view (no order, so the output would change from run
+      to run; pass a list, e.g. ``sorted(keys)``) and a mapping that is not a
+      ``dict`` (pass a list, or ``dict(...)`` for the sequence form) are refused. Written on the value channel, it completes
       every series the layer draws along ``x``: a series that lacks an ``x``
       some row of the layer holds (or a ``keyvals`` entry) gains one row there,
       inserted at that key's place in the series, and a null or ``NaN`` ``y``

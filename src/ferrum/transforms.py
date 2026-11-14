@@ -25,6 +25,7 @@ contract.  Do not change the inner-dict key.
 from __future__ import annotations
 
 import datetime
+from collections.abc import Mapping, Set
 from typing import TYPE_CHECKING, Any, Sequence, cast
 
 import numpy as np
@@ -95,13 +96,16 @@ def _validate_as_pair(value: tuple[str, str], *, where: str) -> list[str]:
         If *value* is not a length-2 sequence of non-empty strings.
         A bare string is rejected even if it has exactly 2 characters,
         because iterating a string yields individual characters, not
-        column names.
+        column names. A byte string, a set (including a dict's ``keys()`` or
+        ``items()`` view) and a non-``dict`` mapping are refused through
+        :func:`_reject_bare_string`.
     """
     if isinstance(value, str):
         raise ValueError(
             f"{where}: as_ must be a pair of non-empty strings (tuple or list),"
             f" got a bare string {value!r}"
         )
+    _reject_bare_string(value, where=where, param="as_", noun="output-column names")
     try:
         items = list(value)
     except TypeError:
@@ -112,7 +116,7 @@ def _validate_as_pair(value: tuple[str, str], *, where: str) -> list[str]:
 
 
 def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> None:
-    """Raise ``ValueError`` if *value* is a bare string, not a sequence.
+    """Raise ``ValueError`` if *value* is a bare string, a byte string, a set or a non-``dict`` mapping.
 
     The single refusal mechanism for the class of parameter whose declared
     type is a sequence of strings (``groupby=``, ``fields=``, ``sort=``,
@@ -141,16 +145,58 @@ def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> 
         Plural noun describing what the sequence's elements are (e.g.
         ``"column names"``, ``"key values"``), used in the error message.
 
+    Beside the bare string it refuses the values whose order the output would
+    take from something other than the caller: ``bytes``, ``bytearray`` and
+    ``memoryview`` (they iterate into integers), any ``collections.abc.Set``
+    (``set``, ``frozenset``, a dict's ``keys()`` or ``items()`` view: no defined
+    order, so the output would change from run to run; ``dict.values()`` is not
+    a ``Set`` and is read in insertion order) and any ``Mapping`` that is not a ``dict`` (only a
+    ``dict`` is ``keyvals``' ``{'start', 'stop', 'step'}`` form; the other
+    parameters name ``list(...)`` of its keys as the remedy). Nothing is
+    iterated before it refuses.
+
     Raises
     ------
     ValueError
-        If *value* is a ``str``.
+        If *value* is a ``str``, a byte string, a set or a non-``dict`` mapping.
     """
     if isinstance(value, str):
         raise ValueError(
             f"{where}: {param} must be a sequence of {noun} (list or tuple), "
             f"got a bare string {value!r}; iterating a string yields individual characters"
         )
+    if _is_byte_string(value):
+        raise ValueError(
+            f"{where}: {param} must be a sequence of {noun} (list or tuple), "
+            f"got {type(value).__name__} {value!r}; iterating it yields integers"
+        )
+    if isinstance(value, Set):
+        raise ValueError(
+            f"{where}: {param} must be an ordered sequence of {noun}, "
+            f"got {type(value).__name__} {value!r}; a set has no order, so the output "
+            "would change from run to run; pass a list, e.g. sorted(...)"
+        )
+    if _is_non_dict_mapping(value):
+        if param == "keyvals":
+            raise ValueError(
+                f"{where}: keyvals must be a sequence of {noun} or a "
+                f"{{'start', 'stop', 'step'}} dict, got {type(value).__name__} {value!r}; "
+                "pass a list, or dict(...) for the sequence form"
+            )
+        raise ValueError(
+            f"{where}: {param} must be a sequence of {noun}, got "
+            f"{type(value).__name__} {value!r}; pass a list of its keys, e.g. list(...)"
+        )
+
+
+def _is_byte_string(value: object) -> bool:
+    """Whether *value* is ``bytes``, ``bytearray`` or ``memoryview``."""
+    return isinstance(value, (bytes, bytearray, memoryview))
+
+
+def _is_non_dict_mapping(value: object) -> bool:
+    """Whether *value* is a ``Mapping`` that is not a ``dict`` (an ``OrderedDict`` is a ``dict``)."""
+    return isinstance(value, Mapping) and not isinstance(value, dict)
 
 
 def _reject_bare_string_groupby(value: object, *, where: str) -> None:
@@ -191,7 +237,8 @@ def _reject_bare_string_groupby(value: object, *, where: str) -> None:
     Raises
     ------
     ValueError
-        If *value* is a ``str``.
+        If *value* is a ``str``, a byte string, a set or a non-``dict`` mapping
+        (see :func:`_reject_bare_string`).
     """
     _reject_bare_string(value, where=where, param="groupby", noun="column names")
 
@@ -1110,10 +1157,10 @@ def _impute_snapshot(options: object) -> object:
     A channel keeps the dict its caller wrote, in the caller's spelling, so this
     copy is what it stores: a fresh dict. ``keyvals`` that is a ``dict`` (the
     ``{'start', 'stop', 'step'}`` form) is copied; any other ``keyvals`` that is
-    not a string or bytes is read once into a list (a generator, ``map``, numpy
+    not a string, a byte string, a set or a non-``dict`` mapping is read once into a list (a generator, ``map``, numpy
     array or Series would otherwise be drained by the first validation). A
     ``frame`` list is copied and a 1-D numpy array of two integers becomes a tuple; a
-    tuple or ``range`` is immutable and kept, and anything else is left as it is
+    tuple or ``range`` is immutable and kept, and anything else (including the refused ``keyvals`` kinds) is left as it is
     and never read, for the validation to refuse. Validation, every rebuild and
     the emission then read the same snapshot. A value that is not a dict is
     returned as it is, for the validation to refuse; the caller's own dict is
@@ -1125,7 +1172,12 @@ def _impute_snapshot(options: object) -> object:
     keyvals = snapshot.get("keyvals")
     if isinstance(keyvals, dict):
         snapshot["keyvals"] = dict(keyvals)
-    elif keyvals is not None and not isinstance(keyvals, (str, bytes)):
+    elif (
+        keyvals is not None
+        and not isinstance(keyvals, (str, Set))
+        and not _is_byte_string(keyvals)
+        and not _is_non_dict_mapping(keyvals)
+    ):
         try:
             snapshot["keyvals"] = list(keyvals)
         except TypeError:
@@ -1224,10 +1276,15 @@ def transform_impute(
         Keys every group must hold, **added** to the keys the frame holds (the
         key universe is both). **Requires** ``key`` — passing ``keyvals``
         without ``key`` raises ``ValueError`` at render time, since there
-        is no key column for the universe to apply to. Must be a sequence
-        (list, tuple, or other iterable), never a bare string — a bare
-        string iterates into characters, not key values, and raises
-        ``ValueError`` at construction time. A ``datetime.date``,
+        is no key column for the universe to apply to. Must be an ordered
+        sequence (list, tuple, ``range``, 1-D array, Series, or another
+        iterable that yields in order, such as a generator or ``dict.values()``).
+        These raise ``ValueError`` at construction time: a bare string (it
+        iterates into characters), a byte string (it iterates into integers), a
+        set, a dict's ``keys()`` or ``items()`` view (no order, so the output
+        would change from run to run; pass a list, e.g. ``sorted(keys)``) and a
+        mapping that is not a ``dict`` (pass a list, or ``dict(...)`` for the
+        sequence form below). A ``datetime.date``,
         ``datetime.datetime`` or ``numpy.datetime64`` names an instant for a
         date key. A ``{"start": ..., "stop": ..., "step": ...}`` dict names the
         numbers from ``start`` (default ``0``) up to, not including, ``stop``
@@ -1261,8 +1318,9 @@ def transform_impute(
     Raises
     ------
     ValueError
-        If ``groupby`` or ``keyvals`` is a bare string — iterating a
-        string yields individual characters, not column/key values; or if
+        If ``groupby`` or ``keyvals`` is a bare string, a byte string, a set
+        (including a dict's ``keys()`` or ``items()`` view) or a non-``dict``
+        mapping; or if
         ``value``, ``keyvals`` or ``frame`` is malformed, or a literal (a
         ``value`` or a ``keyvals`` element) is of no accepted kind.
 
