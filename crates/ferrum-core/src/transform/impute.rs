@@ -51,7 +51,7 @@ use std::sync::Arc;
 use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
 use crate::transform::group_key::{
     group_partition_multi, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    GroupPartition, KeyValue, NullKeyPolicy,
+    GroupPartition, KeyValue, NullKeyPolicy, GROUPBY_SUPPORTED_DTYPES,
 };
 use crate::transform::numeric_util::{clean_float64_values, coerce_to_float64, USABLE};
 
@@ -314,8 +314,7 @@ pub(crate) fn apply_with_context(
         if !is_groupby_supported_dtype(&key_dtype) {
             return Err(PyValueError::new_err(format!(
                 "data_impute: key column '{key_name}' has unsupported dtype {key_dtype:?}; \
-                 supported: Utf8/LargeUtf8, Float64/Float32, \
-                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+                 supported: {GROUPBY_SUPPORTED_DTYPES}"
             )));
         }
 
@@ -545,6 +544,13 @@ fn keyvalue_from_json(v: &serde_json::Value, dt: &DataType, key_name: &str) -> P
             }
         }
         DataType::Boolean => v.as_bool().map(|b| KeyValue::Bool(b as u8)).ok_or_else(incompatible),
+        // A `Timestamp` key column is a supported key, but no `keyvals` entry is
+        // read against it: every entry is refused with that cause rather than
+        // named an unsupported dtype or an incompatible value.
+        DataType::Timestamp(..) => Err(PyValueError::new_err(format!(
+            "data_impute: keyvals value {v} cannot be used with key column '{key_name}' of dtype {dt:?}: \
+             a date key column takes no keyvals entry; drop keyvals= to impute over the observed keys"
+        ))),
         other => Err(PyValueError::new_err(format!(
             "data_impute: key column '{key_name}' has unsupported dtype {other:?}"
         ))),
@@ -1104,6 +1110,103 @@ mod tests {
         let s = spec("sales", "mean", None, Some(vec!["g"]), Some("g"), None);
         let msg = apply(&s, &batch).unwrap_err().to_string();
         assert!(msg.contains("cannot also be a groupby column"), "err: {msg}");
+    }
+
+    /// A `Timestamp` key and a `Timestamp` groupby column impute through the one
+    /// shared key reader: the missing `(group, day)` row is appended, both date
+    /// columns keep their unit and zone, and the fill is the group's own.
+    #[test]
+    fn a_timestamp_key_and_groupby_impute_and_keep_their_dtype() {
+        pyo3::Python::initialize();
+        use arrow::array::TimestampMillisecondArray;
+        use arrow::datatypes::TimeUnit;
+        let zoned = DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("Europe/Paris")));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Int64, false),
+            Field::new("day", zoned.clone(), false),
+            Field::new("sales", DataType::Float64, true),
+        ]));
+        let day = |values: Vec<i64>| {
+            Arc::new(TimestampMillisecondArray::from(values).with_timezone("Europe/Paris"))
+        };
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1i64, 1, 2])),
+                day(vec![86_400_000, 172_800_000, 86_400_000]),
+                Arc::new(Float64Array::from(vec![Some(10.0), Some(30.0), Some(100.0)])),
+            ],
+        )
+        .unwrap();
+        let s = spec("sales", "mean", None, Some(vec!["g"]), Some("day"), None);
+        let out = apply(&s, &batch).unwrap();
+        // Group 2 lacks the second day: one row appended after the three caller rows.
+        assert_eq!(out.num_rows(), 4);
+        assert_eq!(out.schema().field(1).data_type(), &zoned);
+        assert_eq!(out.column(1).to_data(), day(vec![86_400_000, 172_800_000, 86_400_000, 172_800_000]).to_data());
+        assert_eq!(col_i64(&out, 0), vec![1, 1, 2, 2]);
+        assert_eq!(col_f64(&out, 2), vec![10.0, 30.0, 100.0, 100.0]);
+
+        // A timestamp groupby column keeps its dtype on the same transform.
+        let by_day = spec("sales", "mean", None, Some(vec!["day"]), None, None);
+        let by_day = apply(&by_day, &batch).unwrap();
+        assert_eq!(by_day.schema().field(1).data_type(), &zoned);
+        assert_eq!(by_day.num_rows(), 3);
+    }
+
+    /// No `keyvals` entry is read against a timestamp key, so each is refused
+    /// with that cause, never named an unsupported dtype (a timestamp is a
+    /// supported key) or an incompatible value.
+    #[test]
+    fn keyvals_on_a_timestamp_key_are_refused_as_incompatible_not_unsupported() {
+        pyo3::Python::initialize();
+        use arrow::array::TimestampMillisecondArray;
+        use arrow::datatypes::TimeUnit;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("day", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new("sales", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0_i64, 1])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+            ],
+        )
+        .unwrap();
+        let s = spec("sales", "mean", None, None, Some("day"), Some(vec![serde_json::json!(5)]));
+        let msg = apply(&s, &batch).unwrap_err().to_string();
+        assert_eq!(
+            msg,
+            "ValueError: data_impute: keyvals value 5 cannot be used with key column 'day' of dtype \
+             Timestamp(Millisecond, None): a date key column takes no keyvals entry; drop keyvals= to \
+             impute over the observed keys"
+        );
+    }
+
+    /// An unsupported key dtype is refused with the one shared supported-dtypes
+    /// text, `Timestamp` included.
+    #[test]
+    fn the_unsupported_key_refusal_quotes_the_shared_supported_dtypes() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("d", DataType::Date32, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::Date32Array::from(vec![0, 1])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let s = spec("v", "mean", None, None, Some("d"), None);
+        let msg = apply(&s, &batch).unwrap_err().to_string();
+        assert!(
+            msg.ends_with(&format!("has unsupported dtype Date32; supported: {GROUPBY_SUPPORTED_DTYPES}")),
+            "{msg}"
+        );
     }
 
     #[test]

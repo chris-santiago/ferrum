@@ -49,8 +49,8 @@ pub(crate) fn apply_with_context(
     let values_arr = coerce_to_float64(batch.column(val_idx), "stat_outliers", &spec.field)?;
 
     // Partition rows by groupby columns, sharing the group-keying idiom used by
-    // BoxStats/LetterValue/violin (Utf8/LargeUtf8, Float64/Float32,
-    // Int8-64/UInt8-64, Boolean). A null-keyed row is excluded from every group,
+    // BoxStats/LetterValue/violin (the dtypes in
+    // `GROUPBY_SUPPORTED_DTYPES`). A null-keyed row is excluded from every group,
     // matching how the paired BoxStats/LetterValue groupby drops null groups —
     // an outlier point with no corresponding box would be orphaned otherwise.
     let partition = group_partition_multi(

@@ -54,7 +54,8 @@ def _normalize_column(col: "pyarrow.Array", pa: object, pc: object) -> "tuple[py
         return col.cast(pa.timestamp("ms")), True
 
     if pa.types.is_timestamp(field_type) and field_type.unit != "ms":
-        return col.cast(pa.timestamp("ms")), True
+        # The cast keeps the column's time zone, as a ``timestamp[ms]`` column already does.
+        return col.cast(pa.timestamp("ms", tz=field_type.tz)), True
 
     if pa.types.is_duration(field_type):
         # Arrow does not support a direct duration→timestamp cast, and
@@ -236,7 +237,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                     # Normalize Datetime(us) and Datetime(ns) to Datetime(ms) so the
                     # Rust temporal scale produces correct epoch-millisecond tick values.
                     # Datetime(ms) is the canonical temporal unit for the renderer.
-                    casts.append(pl.col(c).cast(pl.Datetime("ms")))
+                    casts.append(pl.col(c).cast(pl.Datetime("ms", dt.time_zone)))
                 elif dt == pl.Categorical or isinstance(dt, pl.Enum):
                     casts.append(pl.col(c).cast(pl.Utf8))
                 # Duration columns: do NOT pre-cast here.  polars.to_arrow()
@@ -276,7 +277,7 @@ def to_arrow_table(data: Any) -> "pyarrow.Table":
                 col = col.cast(pa.timestamp("ms"))
                 needs_cast = True
             elif pa.types.is_timestamp(field_type) and field_type.unit != "ms":
-                col = col.cast(pa.timestamp("ms"))
+                col = col.cast(pa.timestamp("ms", tz=field_type.tz))
                 needs_cast = True
             new_cols.append(col)
         if needs_cast:

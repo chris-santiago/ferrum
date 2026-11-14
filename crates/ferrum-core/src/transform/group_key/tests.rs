@@ -1088,3 +1088,325 @@ fn group_partition_multi_missing_column_reports_not_found_not_repeated() {
     let msg = err.to_string();
     assert!(msg.contains("not found"), "missing column must report 'not found': {msg}");
 }
+
+// ── Timestamp group keys ────────────────────────────────────────────────
+
+use arrow::array::{
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray,
+};
+
+const UNITS: [TimeUnit; 4] =
+    [TimeUnit::Second, TimeUnit::Millisecond, TimeUnit::Microsecond, TimeUnit::Nanosecond];
+const ZONES: [Option<&str>; 3] = [None, Some("UTC"), Some("Europe/Paris")];
+
+/// A `Timestamp(unit, zone)` column holding `values`.
+fn timestamps(unit: TimeUnit, zone: Option<&str>, values: Vec<Option<i64>>) -> ArrayRef {
+    match unit {
+        TimeUnit::Second => Arc::new(TimestampSecondArray::from(values).with_timezone_opt(zone)),
+        TimeUnit::Millisecond => {
+            Arc::new(TimestampMillisecondArray::from(values).with_timezone_opt(zone))
+        }
+        TimeUnit::Microsecond => {
+            Arc::new(TimestampMicrosecondArray::from(values).with_timezone_opt(zone))
+        }
+        TimeUnit::Nanosecond => {
+            Arc::new(TimestampNanosecondArray::from(values).with_timezone_opt(zone))
+        }
+    }
+}
+
+fn instant_keys(array: &ArrayRef) -> Vec<Vec<KeyValue>> {
+    (0..array.len())
+        .map(|row| vec![groupby_key_at(array.as_ref(), array.data_type(), row).unwrap()])
+        .collect()
+}
+
+/// A timestamp key reads as its raw value and unit and rebuilds as the same
+/// column, at every unit and in every zone: value, unit, zone and nulls survive.
+#[test]
+fn a_timestamp_key_round_trips_at_every_unit_and_zone() {
+    for unit in UNITS {
+        for zone in ZONES {
+            let column = timestamps(unit, zone, vec![Some(40), None, Some(-7), Some(40)]);
+            let keys = instant_keys(&column);
+            assert_eq!(keys[0], vec![KeyValue::Instant(40, unit)]);
+            assert_eq!(keys[1], vec![KeyValue::Null]);
+            assert_eq!(keys[2], vec![KeyValue::Instant(-7, unit)]);
+            let rebuilt = materialize_groupby_col(&keys, 0, column.data_type()).unwrap();
+            assert_eq!(rebuilt.data_type(), column.data_type(), "{unit:?} {zone:?}");
+            assert_eq!(rebuilt.to_data(), column.to_data(), "{unit:?} {zone:?}");
+        }
+    }
+}
+
+/// An empty key list still builds a zero-row column of the dtype, unit and zone.
+#[test]
+fn an_empty_timestamp_column_keeps_its_unit_and_zone() {
+    for unit in UNITS {
+        for zone in ZONES {
+            let dtype = DataType::Timestamp(unit, zone.map(Arc::from));
+            let empty = empty_groupby_col(&dtype).unwrap();
+            assert_eq!(empty.data_type(), &dtype);
+            assert_eq!(empty.len(), 0);
+        }
+    }
+}
+
+/// Instants of one column order by time, a negative value before a positive,
+/// and equal raw values are one key whatever zone the column is written in
+/// (the zone names how an instant is written, not which instant it is).
+#[test]
+fn timestamp_keys_order_by_time_and_are_equal_by_instant() {
+    let utc = timestamps(TimeUnit::Millisecond, Some("UTC"), vec![Some(5), Some(-3), Some(0)]);
+    let paris = timestamps(TimeUnit::Millisecond, Some("Europe/Paris"), vec![Some(5)]);
+    let sorted: std::collections::BTreeSet<KeyValue> =
+        instant_keys(&utc).into_iter().flatten().collect();
+    assert_eq!(
+        sorted.into_iter().collect::<Vec<_>>(),
+        vec![
+            KeyValue::Instant(-3, TimeUnit::Millisecond),
+            KeyValue::Instant(0, TimeUnit::Millisecond),
+            KeyValue::Instant(5, TimeUnit::Millisecond),
+        ]
+    );
+    assert_eq!(instant_keys(&utc)[0], instant_keys(&paris)[0]);
+    // A second-unit and a millisecond-unit key of the same raw value are different keys.
+    assert_ne!(KeyValue::Instant(5, TimeUnit::Second), KeyValue::Instant(5, TimeUnit::Millisecond));
+}
+
+/// A key whose unit is not the column's is a typed refusal, not a reinterpreted value.
+#[test]
+fn a_timestamp_key_of_another_unit_or_family_refuses_to_materialize() {
+    let dtype = DataType::Timestamp(TimeUnit::Millisecond, None);
+    let other_unit = vec![vec![KeyValue::Instant(1, TimeUnit::Second)]];
+    let message = materialize_groupby_col(&other_unit, 0, &dtype).unwrap_err();
+    assert!(message.contains("Second"), "{message}");
+    assert!(materialize_groupby_col(&[vec![KeyValue::Int(1)]], 0, &dtype).is_err());
+}
+
+fn day_batch(unit: TimeUnit, zone: Option<&str>, days: Vec<Option<i64>>) -> RecordBatch {
+    batch_with_group(timestamps(unit, zone, days))
+}
+
+/// The shared partitioner groups a timestamp column in first-appearance order,
+/// each group's key at the column's own unit, and reports the column's dtype
+/// (unit and zone) for the output.
+#[test]
+fn group_partition_multi_groups_a_timestamp_column_at_every_unit_and_zone() {
+    pyo3::Python::initialize();
+    for unit in UNITS {
+        for zone in ZONES {
+            let batch = day_batch(unit, zone, vec![Some(20), Some(10), Some(20), Some(10), Some(30)]);
+            let p = partition_skip(&batch, &["g".to_string()], "test").unwrap();
+            assert_eq!(p.dtypes[0], DataType::Timestamp(unit, zone.map(Arc::from)));
+            assert_eq!(
+                p.groups,
+                vec![
+                    (vec![KeyValue::Instant(20, unit)], vec![0_usize, 2]),
+                    (vec![KeyValue::Instant(10, unit)], vec![1_usize, 3]),
+                    (vec![KeyValue::Instant(30, unit)], vec![4_usize]),
+                ],
+                "{unit:?} {zone:?}"
+            );
+        }
+    }
+}
+
+/// A null date key is skipped and counted as any null key is, once for the field.
+#[test]
+fn a_null_timestamp_key_is_skipped_and_counted_like_any_null_key() {
+    pyo3::Python::initialize();
+    let batch = day_batch(TimeUnit::Millisecond, None, vec![Some(1), None, Some(1), None]);
+    let ctx = TransformContext::default();
+    let p = group_partition_multi(&batch, &["g".to_string()], "stat_summary", NullKeyPolicy::Skip, &ctx)
+        .unwrap();
+    assert_eq!(p.groups, vec![(vec![KeyValue::Instant(1, TimeUnit::Millisecond)], vec![0_usize, 2])]);
+    let warnings = ctx.warnings.borrow();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    let text = warnings[0].to_string();
+    assert_eq!(
+        text,
+        "Summary: 2 rows have a null 'g' and belong to no group, so they were dropped; fill or filter the nulls in 'g'"
+    );
+
+    let all_null = day_batch(TimeUnit::Millisecond, Some("UTC"), vec![None, None]);
+    let ctx = TransformContext::default();
+    let p = group_partition_multi(&all_null, &["g".to_string()], "stat_summary", NullKeyPolicy::Skip, &ctx)
+        .unwrap();
+    assert!(p.groups.is_empty());
+    assert_eq!(ctx.warnings.borrow().len(), 1);
+}
+
+/// Every null-key policy reads a timestamp key (the pooled and whole-batch
+/// policies keep a null-keyed row as its own pooled group).
+#[test]
+fn every_null_key_policy_partitions_a_timestamp_column() {
+    pyo3::Python::initialize();
+    let batch = day_batch(TimeUnit::Microsecond, None, vec![Some(1), None, Some(2)]);
+    for (policy, groups) in [
+        (NullKeyPolicy::Skip, 2),
+        (NullKeyPolicy::SkipWithWholeBatchFallback, 2),
+        (NullKeyPolicy::FillFromWholeBatch, 2),
+        (NullKeyPolicy::Pool, 3),
+    ] {
+        let p = group_partition_multi(
+            &batch,
+            &["g".to_string()],
+            "test",
+            policy,
+            &TransformContext::default(),
+        )
+        .unwrap();
+        assert_eq!(p.groups.len(), groups, "{policy:?}");
+    }
+}
+
+/// A date beside a string and an integer keys one group per distinct triple,
+/// each dimension at its own dtype.
+#[test]
+fn a_timestamp_beside_a_string_and_an_integer_keys_the_triple() {
+    pyo3::Python::initialize();
+    use arrow::array::StringArray;
+    let day = DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")));
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("s", DataType::Utf8, false),
+        Field::new("d", day.clone(), false),
+        Field::new("i", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a", "a", "b"])) as ArrayRef,
+            timestamps(TimeUnit::Millisecond, Some("UTC"), vec![Some(9), Some(9), Some(9), Some(9)]),
+            Arc::new(Int64Array::from(vec![1_i64, 1, 2, 1])) as ArrayRef,
+        ],
+    )
+    .unwrap();
+    let cols = ["s".to_string(), "d".to_string(), "i".to_string()];
+    let p = partition_skip(&batch, &cols, "test").unwrap();
+    assert_eq!(p.dtypes, vec![DataType::Utf8, day, DataType::Int64]);
+    let instant = KeyValue::Instant(9, TimeUnit::Millisecond);
+    assert_eq!(
+        p.groups,
+        vec![
+            (vec![KeyValue::Str("a".into()), instant.clone(), KeyValue::Int(1)], vec![0_usize, 1]),
+            (vec![KeyValue::Str("a".into()), instant.clone(), KeyValue::Int(2)], vec![2_usize]),
+            (vec![KeyValue::Str("b".into()), instant, KeyValue::Int(1)], vec![3_usize]),
+        ]
+    );
+}
+
+/// The validator accepts a timestamp column and returns its dtype, and so does
+/// the reader built on it.
+#[test]
+fn the_validator_and_the_reader_accept_a_timestamp_column() {
+    pyo3::Python::initialize();
+    let batch = day_batch(TimeUnit::Nanosecond, Some("Europe/Paris"), vec![Some(3)]);
+    let resolved = validate_groupby_columns(&batch, &["g".to_string()], "data_window").unwrap();
+    assert_eq!(
+        resolved,
+        vec![(0_usize, DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("Europe/Paris"))))]
+    );
+    let reader =
+        GroupKeyReader::new(&batch, &["g".to_string()], "data_window", &TransformContext::default())
+            .unwrap();
+    assert_eq!(reader.key_at(0, 0), Some(KeyValue::Instant(3, TimeUnit::Nanosecond)));
+    assert_eq!(reader.dtypes(), vec![resolved[0].1.clone()]);
+}
+
+/// The stacking template appends a timestamp group column at the column's
+/// own unit and zone, one key per stacked row.
+#[test]
+fn stack_grouped_batches_appends_a_timestamp_group_column_at_its_dtype() {
+    let dtype = DataType::Timestamp(TimeUnit::Microsecond, Some(Arc::from("Europe/Paris")));
+    let per_group = vec![
+        (vec![KeyValue::Instant(5, TimeUnit::Microsecond)], xy_group_batch(vec![1.0, 2.0], vec![1.0, 2.0])),
+        (vec![KeyValue::Instant(2, TimeUnit::Microsecond)], xy_group_batch(vec![3.0], vec![3.0])),
+    ];
+    let out = stack_grouped_batches("test", &per_group, &["g".to_string()], &[dtype.clone()]).unwrap();
+    assert_eq!(out.schema().field(2).data_type(), &dtype);
+    assert_eq!(
+        out.column(2).to_data(),
+        timestamps(TimeUnit::Microsecond, Some("Europe/Paris"), vec![Some(5), Some(5), Some(2)]).to_data()
+    );
+}
+
+/// The two-column fit template and the batch builder keep the group column's
+/// dtype too, and `pooled_group_key` pools a constant instant.
+#[test]
+fn the_fit_and_batch_builders_and_the_pooled_key_keep_a_timestamp_key() {
+    pyo3::Python::initialize();
+    let batch = day_batch(TimeUnit::Millisecond, Some("UTC"), vec![Some(7), Some(8), Some(7)]);
+    let out = grouped_two_column_fit(
+        &batch,
+        &["g".to_string()],
+        "test",
+        &("x".to_string(), "y".to_string()),
+        &TransformContext::default(),
+        |rows| Ok(xy_group_batch(vec![rows.len() as f64], vec![0.0])),
+    )
+    .unwrap();
+    assert_eq!(
+        out.column(2).to_data(),
+        timestamps(TimeUnit::Millisecond, Some("UTC"), vec![Some(7), Some(8)]).to_data()
+    );
+
+    let dtype = DataType::Timestamp(TimeUnit::Millisecond, Some(Arc::from("UTC")));
+    let keys = vec![vec![KeyValue::Instant(4, TimeUnit::Millisecond)]];
+    let built = batch_with_groupby_columns(&["g".to_string()], &[dtype.clone()], &keys, vec![], vec![], "test")
+        .unwrap();
+    assert_eq!(built.schema().field(0).data_type(), &dtype);
+    assert!(built.schema().field(0).is_nullable());
+
+    let constant = day_batch(TimeUnit::Millisecond, None, vec![Some(4), Some(4)]);
+    assert_eq!(
+        pooled_group_key(&constant, &["g".to_string()]).unwrap(),
+        vec![KeyValue::Instant(4, TimeUnit::Millisecond)]
+    );
+    let varying = day_batch(TimeUnit::Millisecond, None, vec![Some(4), Some(5)]);
+    assert_eq!(pooled_group_key(&varying, &["g".to_string()]).unwrap(), vec![KeyValue::Null]);
+}
+
+/// The supported dtypes are the five old families plus `Timestamp` of any unit
+/// and zone; the date, time and duration dtypes with no timestamp's meaning
+/// stay refused, each with the one shared text.
+#[test]
+fn the_supported_dtypes_text_names_timestamp_and_every_refusal_quotes_it() {
+    pyo3::Python::initialize();
+    for family in [
+        "Utf8/LargeUtf8",
+        "Float64/Float32",
+        "Int8/Int16/Int32/Int64",
+        "UInt8/UInt16/UInt32/UInt64",
+        "Boolean",
+        "Timestamp",
+    ] {
+        assert!(GROUPBY_SUPPORTED_DTYPES.contains(family), "{family}");
+    }
+    for unit in UNITS {
+        for zone in ZONES {
+            assert!(is_groupby_supported_dtype(&DataType::Timestamp(unit, zone.map(Arc::from))));
+        }
+    }
+    let refused = [
+        DataType::Date32,
+        DataType::Date64,
+        DataType::Time64(TimeUnit::Nanosecond),
+        DataType::Time32(TimeUnit::Second),
+        DataType::Duration(TimeUnit::Millisecond),
+        DataType::Decimal128(10, 2),
+    ];
+    for dtype in refused {
+        assert!(!is_groupby_supported_dtype(&dtype), "{dtype:?}");
+        let schema = Arc::new(Schema::new(vec![Field::new("g", dtype.clone(), true)]));
+        let batch = RecordBatch::new_empty(schema);
+        let message = validate_groupby_columns(&batch, &["g".to_string()], "stat_kde")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            message.ends_with(&format!("has unsupported dtype {dtype:?}; supported: {GROUPBY_SUPPORTED_DTYPES}")),
+            "{message}"
+        );
+    }
+}

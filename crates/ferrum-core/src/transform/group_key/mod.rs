@@ -38,9 +38,12 @@
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    RecordBatch, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    PrimitiveArray, RecordBatch, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{
+    ArrowTimestampType, DataType, Field, Schema, TimeUnit, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::PyResult;
@@ -61,9 +64,25 @@ pub(crate) enum KeyValue {
     Int(i64),   // signed integer types (i8/i16/i32/i64), widened to i64 for grouping.
     UInt(u64),  // unsigned integer types (u8/u16/u32/u64), widened to u64 for grouping.
     Bool(u8),   // boolean: 0 = false, 1 = true (nulls use Null variant above).
+    /// A `Timestamp` row: the column's raw value and its unit. The unit rides
+    /// with the value so two instants of one column never collide and order by
+    /// time (the unit is constant within a column, so the value decides). The
+    /// time zone stays on the column's dtype: a zone only names how an instant
+    /// is written, so equal raw values are one group in whatever zone the
+    /// column carries.
+    Instant(i64, TimeUnit),
 }
 
-/// Returns `true` for the Arrow dtypes supported as groupby keys.
+/// The dtypes a `groupby` key (and an impute `key`) may have, as every refusal
+/// of an unsupported dtype words them. Written once beside
+/// [`is_groupby_supported_dtype`], which it describes, so the predicate and
+/// every message that quotes it change together.
+pub(crate) const GROUPBY_SUPPORTED_DTYPES: &str = "Utf8/LargeUtf8, Float64/Float32, \
+     Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean, \
+     Timestamp (any unit and time zone)";
+
+/// Returns `true` for the Arrow dtypes supported as groupby keys
+/// ([`GROUPBY_SUPPORTED_DTYPES`] says which in words).
 pub(crate) fn is_groupby_supported_dtype(dt: &DataType) -> bool {
     matches!(
         dt,
@@ -80,6 +99,7 @@ pub(crate) fn is_groupby_supported_dtype(dt: &DataType) -> bool {
             | DataType::UInt32
             | DataType::UInt64
             | DataType::Boolean
+            | DataType::Timestamp(..)
     )
 }
 
@@ -88,6 +108,7 @@ pub(crate) fn is_groupby_supported_dtype(dt: &DataType) -> bool {
 /// Signed integers (i8/i16/i32/i64) are widened to `KeyValue::Int(i64)`.
 /// Unsigned integers (u8/u16/u32/u64) are widened to `KeyValue::UInt(u64)`.
 /// Float32 is widened to `KeyValue::Float` (f64 bits) to match Float64 grouping.
+/// A `Timestamp` of any unit reads as `KeyValue::Instant` (its raw value and unit).
 /// Null rows always produce `KeyValue::Null` regardless of dtype, so nulls from
 /// the same column always collapse into one group with no risk of colliding with
 /// a real value.
@@ -157,8 +178,46 @@ pub(crate) fn groupby_key_at(arr: &dyn Array, dt: &DataType, row: usize) -> Opti
                 KeyValue::Bool(a.value(row) as u8)
             })
         }
+        DataType::Timestamp(unit, _) => match unit {
+            TimeUnit::Second => instant_key::<TimestampSecondType>(arr, row),
+            TimeUnit::Millisecond => instant_key::<TimestampMillisecondType>(arr, row),
+            TimeUnit::Microsecond => instant_key::<TimestampMicrosecondType>(arr, row),
+            TimeUnit::Nanosecond => instant_key::<TimestampNanosecondType>(arr, row),
+        },
         _ => None,
     }
+}
+
+/// Row `row` of a `Timestamp` column of unit `T` as a [`KeyValue`].
+fn instant_key<T: ArrowTimestampType>(arr: &dyn Array, row: usize) -> Option<KeyValue> {
+    let a = arr.as_any().downcast_ref::<PrimitiveArray<T>>()?;
+    Some(if a.is_null(row) {
+        KeyValue::Null
+    } else {
+        KeyValue::Instant(a.value(row), T::UNIT)
+    })
+}
+
+/// A `Timestamp` column of unit `T` and zone `tz` built from each group's
+/// [`KeyValue::Instant`] (or `Null`) in dimension `gi`. A key whose unit is
+/// not the column's is a refusal, not a reinterpretation of its raw value.
+fn instant_column<T: ArrowTimestampType>(
+    keys: &[Vec<KeyValue>],
+    gi: usize,
+    tz: &Option<Arc<str>>,
+) -> Result<ArrayRef, String> {
+    let values = keys
+        .iter()
+        .map(|k| match &k[gi] {
+            KeyValue::Instant(value, unit) if *unit == T::UNIT => Ok(Some(*value)),
+            KeyValue::Null => Ok(None),
+            other => Err(format!(
+                "group_key: expected a {:?} instant or Null for a Timestamp column, got {other:?}",
+                T::UNIT
+            )),
+        })
+        .collect::<Result<Vec<Option<i64>>, String>>()?;
+    Ok(Arc::new(values.into_iter().collect::<PrimitiveArray<T>>().with_timezone_opt(tz.clone())))
 }
 
 /// Reconstruct the output Arrow column for a single groupby dimension from the
@@ -288,6 +347,12 @@ pub(crate) fn materialize_groupby_col(
                 .collect();
             Ok(Arc::new(BooleanArray::from(v)) as ArrayRef)
         }
+        DataType::Timestamp(unit, tz) => match unit {
+            TimeUnit::Second => instant_column::<TimestampSecondType>(keys, gi, tz),
+            TimeUnit::Millisecond => instant_column::<TimestampMillisecondType>(keys, gi, tz),
+            TimeUnit::Microsecond => instant_column::<TimestampMicrosecondType>(keys, gi, tz),
+            TimeUnit::Nanosecond => instant_column::<TimestampNanosecondType>(keys, gi, tz),
+        },
         other => Err(format!(
             "group_key: cannot materialize groupby output for dtype {other:?}"
         )),
@@ -526,8 +591,7 @@ pub(crate) fn validate_groupby_columns(
         if !is_groupby_supported_dtype(&gtype) {
             return Err(PyValueError::new_err(format!(
                 "{label}: groupby column '{col_name}' has unsupported dtype {gtype:?}; \
-                 supported: Utf8/LargeUtf8, Float64/Float32, \
-                 Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean"
+                 supported: {GROUPBY_SUPPORTED_DTYPES}"
             )));
         }
         resolved.push((gi, gtype));

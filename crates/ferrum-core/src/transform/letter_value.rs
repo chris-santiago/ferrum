@@ -1583,6 +1583,49 @@ mod tests {
         assert_eq!(seen, std::collections::BTreeSet::from([6, 8]));
     }
 
+    /// A timestamp group column renders like an integer one: the output `group`
+    /// column keeps the input's unit and zone, with one block of rows per
+    /// distinct instant, listed in the order LetterValue lists its groups.
+    #[test]
+    fn letter_value_timestamp_group_succeeds_and_preserves_unit_and_zone() {
+        pyo3::Python::initialize();
+        use arrow::array::TimestampMicrosecondArray;
+        let dtype = DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, Some(Arc::from("Europe/Paris")));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("d", dtype.clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![10.0, 20.0, 30.0, 40.0, 50.0, 1.0, 2.0, 3.0, 4.0, 5.0])),
+                Arc::new(
+                    TimestampMicrosecondArray::from(vec![9_i64, 9, 9, 9, 9, 3, 3, 3, 3, 3])
+                        .with_timezone("Europe/Paris"),
+                ),
+            ],
+        )
+        .unwrap();
+        let spec = LetterValueSpec {
+            groupby: Vec::new(),
+            value: "v".into(), group: Some("d".into()),
+            k_depth: KDepth::Tukey,
+            outlier_threshold: 1.5,
+            name: None,
+            sort: None,
+        };
+        let out = apply(&spec, &batch).unwrap();
+        assert_eq!(out.schema().field(0).data_type(), &dtype);
+        let groups = out.column(0).as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+        let mut seen: Vec<i64> = Vec::new();
+        for i in 0..out.num_rows() {
+            if !seen.contains(&groups.value(i)) {
+                seen.push(groups.value(i));
+            }
+        }
+        assert_eq!(seen, vec![3, 9], "one block of rows per instant, in the order LetterValue lists its groups");
+    }
+
     /// A group column of an unsupported dtype (e.g. Date32, which no groupby
     /// consumer in the crate accepts) still refuses, naming the column and
     /// dtype. Pins the WORDING word-for-word, not just a substring match:
@@ -1623,9 +1666,11 @@ mod tests {
         let err = apply(&spec, &batch).expect_err("a Date32 group column must refuse");
         assert_eq!(
             err.to_string(),
-            "ValueError: stat_letter_value: groupby column 'd' has unsupported dtype Date32; \
-             supported: Utf8/LargeUtf8, Float64/Float32, Int8/Int16/Int32/Int64, \
-             UInt8/UInt16/UInt32/UInt64, Boolean"
+            format!(
+                "ValueError: stat_letter_value: groupby column 'd' has unsupported dtype Date32; \
+                 supported: {}",
+                crate::transform::group_key::GROUPBY_SUPPORTED_DTYPES
+            )
         );
     }
 
@@ -1660,9 +1705,11 @@ mod tests {
         let err = extract_values(&spec, &batch, &TransformContext::default()).expect_err("a Date32 group column must refuse");
         assert_eq!(
             err.to_string(),
-            "ValueError: stat_letter_value: groupby column 'd' has unsupported dtype Date32; \
-             supported: Utf8/LargeUtf8, Float64/Float32, Int8/Int16/Int32/Int64, \
-             UInt8/UInt16/UInt32/UInt64, Boolean"
+            format!(
+                "ValueError: stat_letter_value: groupby column 'd' has unsupported dtype Date32; \
+                 supported: {}",
+                crate::transform::group_key::GROUPBY_SUPPORTED_DTYPES
+            )
         );
     }
 

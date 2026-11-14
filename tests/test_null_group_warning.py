@@ -1063,6 +1063,22 @@ def _all_keys_null_prefix(statistic: str, column: str) -> str:
     )
 
 
+# The dtypes a group key may have, as every grouped transform and statistic refuses the rest.
+GROUPBY_SUPPORTED_DTYPES = (
+    "Utf8/LargeUtf8, Float64/Float32, Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, "
+    "Boolean, Timestamp (any unit and time zone)"
+)
+
+
+def _group_dtype_refusal(entry: str, role: str, column: str, dtype: str) -> str:
+    """The refusal a grouped transform or statistic raises for a ``role`` column (``groupby``,
+    ``key`` or ``category``) of a dtype that cannot be a group key, as Python surfaces it."""
+    return (
+        f"transform failed: ValueError: {entry}: {role} column '{column}' has unsupported dtype "
+        f"{dtype}; supported: {GROUPBY_SUPPORTED_DTYPES}"
+    )
+
+
 def _not_drawn(entry: str, channel: str, field: str, mark: str) -> str:
     """The notice that a binding on a channel no layer's ``mark`` draws was ignored."""
     return (

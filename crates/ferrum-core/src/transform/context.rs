@@ -661,6 +661,42 @@ fn format_key_value(kv: &crate::transform::group_key::KeyValue) -> String {
         KeyValue::Int(i) => i.to_string(),
         KeyValue::UInt(u) => u.to_string(),
         KeyValue::Bool(b) => (*b != 0).to_string(),
+        KeyValue::Instant(raw, unit) => format_instant(*raw, *unit),
+    }
+}
+
+/// Name a `Timestamp` group key as an ISO-8601 date-time with no zone
+/// designator and no epoch integer: `2024-01-02T00:00:00`, with a fraction
+/// (3, 6 or 9 digits, the shortest that is exact) only when the instant has
+/// one. The instant is written in UTC, as every other temporal rendering in
+/// the crate is (`render::format::format_time`'s byte-determinism contract),
+/// whatever zone its column carries, because a group key holds the raw value
+/// and unit and not the column's zone.
+///
+/// An instant no calendar can express (beyond chrono's range, about
+/// +-262,000 years) is named by its raw value and unit, `4611686018427387904
+/// ms since the Unix epoch`, so it is never refused, never panics, and two
+/// distinct instants never share a name.
+fn format_instant(raw: i64, unit: arrow::datatypes::TimeUnit) -> String {
+    use arrow::datatypes::TimeUnit;
+    use chrono::{DateTime, Utc};
+
+    let (per_second, abbreviation): (i64, &str) = match unit {
+        TimeUnit::Second => (1, "s"),
+        TimeUnit::Millisecond => (1_000, "ms"),
+        TimeUnit::Microsecond => (1_000_000, "us"),
+        TimeUnit::Nanosecond => (1_000_000_000, "ns"),
+    };
+    let seconds = raw.div_euclid(per_second);
+    // The remainder is below one second, so scaling it to nanoseconds fits a `u32`.
+    let nanos = u32::try_from(raw.rem_euclid(per_second) * (1_000_000_000 / per_second)).ok();
+    match nanos.and_then(|nanos| DateTime::<Utc>::from_timestamp(seconds, nanos)) {
+        Some(dt) => {
+            // `%.f` writes the fraction (3, 6 or 9 digits, the shortest that is
+            // exact) only when the instant has one.
+            dt.naive_utc().format("%Y-%m-%dT%H:%M:%S%.f").to_string()
+        }
+        None => format!("{raw} {abbreviation} since the Unix epoch"),
     }
 }
 
@@ -1545,6 +1581,92 @@ mod tests {
         let keys = vec![KeyValue::Str("a".into()), KeyValue::Int(1)];
         let from_keys = describe_group_keys(&group_cols, &keys);
         assert_eq!(from_row, from_keys);
+    }
+
+    fn instant_label(raw: i64, unit: arrow::datatypes::TimeUnit) -> String {
+        use crate::transform::group_key::KeyValue;
+        describe_group_keys(&["day".to_string()], &[KeyValue::Instant(raw, unit)])
+    }
+
+    /// A timestamp group is named as an ISO-8601 date-time, never as its epoch
+    /// integer, at every unit; a fraction appears only when the instant has one,
+    /// at the shortest of 3, 6 or 9 digits that is exact.
+    #[test]
+    fn an_instant_group_is_named_as_an_iso_date_time_at_every_unit() {
+        use arrow::datatypes::TimeUnit::{Microsecond, Millisecond, Nanosecond, Second};
+        // 2024-01-02T00:00:00 UTC.
+        let day = 1_704_153_600_i64;
+        assert_eq!(instant_label(day, Second), "day=2024-01-02T00:00:00");
+        assert_eq!(instant_label(day * 1_000, Millisecond), "day=2024-01-02T00:00:00");
+        assert_eq!(instant_label(day * 1_000_000, Microsecond), "day=2024-01-02T00:00:00");
+        assert_eq!(instant_label(day * 1_000_000_000, Nanosecond), "day=2024-01-02T00:00:00");
+        assert_eq!(instant_label(day * 1_000 + 250, Millisecond), "day=2024-01-02T00:00:00.250");
+        assert_eq!(instant_label(day * 1_000_000 + 250, Microsecond), "day=2024-01-02T00:00:00.000250");
+        assert_eq!(instant_label(day * 1_000_000_000 + 7, Nanosecond), "day=2024-01-02T00:00:00.000000007");
+        // A millisecond-exact value read at microsecond or nanosecond precision keeps 3 digits.
+        assert_eq!(instant_label(day * 1_000_000 + 250_000, Microsecond), "day=2024-01-02T00:00:00.250");
+    }
+
+    /// An instant before the epoch counts back from the epoch, not toward it.
+    #[test]
+    fn an_instant_before_the_epoch_is_named_by_its_own_date_time() {
+        use arrow::datatypes::TimeUnit::{Millisecond, Nanosecond};
+        assert_eq!(instant_label(-1, Millisecond), "day=1969-12-31T23:59:59.999");
+        assert_eq!(instant_label(-1, Nanosecond), "day=1969-12-31T23:59:59.999999999");
+        assert_eq!(instant_label(0, Millisecond), "day=1970-01-01T00:00:00");
+    }
+
+    /// A year inside 0..=9999 keeps its four digits; one outside it is written in
+    /// ISO 8601's signed expanded form, so no two years share a name.
+    #[test]
+    fn an_instant_outside_years_0_to_9999_is_named_in_the_signed_expanded_form() {
+        use arrow::datatypes::TimeUnit::Second;
+        assert_eq!(instant_label(-62_167_219_200, Second), "day=0000-01-01T00:00:00");
+        assert_eq!(instant_label(253_370_764_800, Second), "day=9999-01-01T00:00:00");
+        assert_eq!(instant_label(253_402_300_800, Second), "day=+10000-01-01T00:00:00");
+        assert_eq!(instant_label(327_403_382_400, Second), "day=+12345-01-01T00:00:00");
+        assert_eq!(instant_label(-63_555_753_600, Second), "day=-0044-01-01T00:00:00");
+    }
+
+    /// A key far beyond any calendar is named by its raw value and unit: no
+    /// panic, no refusal, and three distinct instants get three distinct names.
+    #[test]
+    fn an_instant_no_calendar_can_express_is_named_by_its_raw_value_and_unit() {
+        use arrow::datatypes::TimeUnit::{Millisecond, Second};
+        let far = 1_i64 << 62;
+        let names = [
+            instant_label(far, Millisecond),
+            instant_label(-far, Millisecond),
+            instant_label(far - 1, Millisecond),
+        ];
+        assert_eq!(names[0], "day=4611686018427387904 ms since the Unix epoch");
+        assert_eq!(names[1], "day=-4611686018427387904 ms since the Unix epoch");
+        assert_eq!(names[2], "day=4611686018427387903 ms since the Unix epoch");
+        assert_eq!(instant_label(i64::MAX, Second), "day=9223372036854775807 s since the Unix epoch");
+        assert_eq!(instant_label(i64::MIN, Second), "day=-9223372036854775808 s since the Unix epoch");
+    }
+
+    /// Whatever zone its column carries, an instant is named in UTC, as the
+    /// crate's every other temporal rendering is.
+    #[test]
+    fn describe_group_row_names_a_zoned_instant_as_describe_group_keys_does() {
+        use crate::transform::group_key::KeyValue;
+        use arrow::array::{Array, TimestampMillisecondArray};
+        use arrow::datatypes::{Field, Schema, TimeUnit};
+        use std::sync::Arc;
+        for zone in [None, Some("UTC"), Some("Europe/Paris")] {
+            let array = TimestampMillisecondArray::from(vec![1_704_153_600_000_i64]).with_timezone_opt(zone);
+            let schema = Arc::new(Schema::new(vec![Field::new("day", array.data_type().clone(), true)]));
+            let batch = RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap();
+            let group_cols = vec!["day".to_string()];
+            let from_row = describe_group_row(&batch, &group_cols, 0).unwrap();
+            let from_keys = describe_group_keys(
+                &group_cols,
+                &[KeyValue::Instant(1_704_153_600_000, TimeUnit::Millisecond)],
+            );
+            assert_eq!(from_row, "day=2024-01-02T00:00:00", "zone {zone:?}");
+            assert_eq!(from_row, from_keys, "zone {zone:?}");
+        }
     }
 
     /// Every grid point undefined gets the "at every grid point" wording,

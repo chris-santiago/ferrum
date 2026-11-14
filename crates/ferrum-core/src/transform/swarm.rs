@@ -51,7 +51,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::transform::context::TransformContext;
-use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, report_skipped_null_keys, KeyValue, NullKeyCounts, NullKeyPolicy};
+use crate::transform::group_key::{groupby_key_at, is_groupby_supported_dtype, GROUPBY_SUPPORTED_DTYPES, report_skipped_null_keys, KeyValue, NullKeyCounts, NullKeyPolicy};
 use crate::transform::numeric_util::coerce_to_float64;
 
 fn default_point_size() -> f64 {
@@ -81,7 +81,7 @@ pub(crate) enum SwarmOrient {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SwarmSpec {
-    pub category: String, // grouping field (Utf8/LargeUtf8, Float, integer, or Boolean)
+    pub category: String, // grouping field (any dtype in `GROUPBY_SUPPORTED_DTYPES`)
     pub value: String,    // Float64
     #[serde(default = "default_point_size")]
     pub point_size: f64,
@@ -147,10 +147,8 @@ pub(crate) fn apply_with_context(
     let cat_dt = schema.field(cat_idx).data_type().clone();
     if !is_groupby_supported_dtype(&cat_dt) {
         return Err(PyValueError::new_err(format!(
-            "stat_swarm: category column '{}' has unsupported dtype {:?}; \
-             supported: Utf8/LargeUtf8, Float64/Float32, \
-             Int8/Int16/Int32/Int64, UInt8/UInt16/UInt32/UInt64, Boolean",
-            spec.category, cat_dt
+            "stat_swarm: category column '{}' has unsupported dtype {:?}; supported: {}",
+            spec.category, cat_dt, GROUPBY_SUPPORTED_DTYPES
         )));
     }
     let val_idx = schema
@@ -659,6 +657,58 @@ mod tests {
         assert_eq!(
             warnings,
             ["Swarm: every row has a null in its groupby key (grp), so the data could not be split into groups; the grouped output is empty"]
+        );
+    }
+
+    /// A timestamp category packs per instant: two instants are two bands, so
+    /// equal values in different instants share no packing, and the transform
+    /// accepts the column.
+    #[test]
+    fn a_timestamp_category_packs_each_instant_on_its_own() {
+        pyo3::Python::initialize();
+        use arrow::array::TimestampMillisecondArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "cat",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![10_i64, 10, 20, 20])),
+                Arc::new(Float64Array::from(vec![1.0, 1.0, 1.0, 1.0])),
+            ],
+        )
+        .unwrap();
+        let s = spec(5.0, 1.0, SwarmSide::Right);
+        assert_eq!(apply(&s, &batch).unwrap().num_rows(), 4);
+        // Within each instant the second tied dot steps aside; across instants the first dot of each is centred.
+        assert_eq!(place(&s, &batch, 1.0), vec![0.0, 6.0, 0.0, 6.0]);
+    }
+
+    /// An unsupported category dtype is refused with the one shared supported text.
+    #[test]
+    fn the_unsupported_category_refusal_quotes_the_shared_supported_dtypes() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Date32, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::Date32Array::from(vec![0, 1])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let msg = apply(&spec(5.0, 1.0, SwarmSide::Right), &batch).unwrap_err().to_string();
+        assert!(
+            msg.ends_with(&format!("has unsupported dtype Date32; supported: {GROUPBY_SUPPORTED_DTYPES}")),
+            "{msg}"
         );
     }
 
