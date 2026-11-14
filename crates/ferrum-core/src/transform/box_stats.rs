@@ -78,10 +78,10 @@ pub(crate) fn apply_with_context(
 
     // One partitioning idiom for every grouped transform (GH #179): the shared
     // partitioner owns column validation, the repeated-name refusal,
-    // first-appearance group order, and the null-key policy. Run BEFORE the
-    // zero-row refusal below so a malformed `groupby` is still reported as
-    // such on an empty batch, exactly as it was when the validation loop stood
-    // here — the same ordering `violin` keeps.
+    // first-appearance group order, and the null-key policy. A zero-row batch
+    // partitions into zero groups and yields zero rows of the declared schema;
+    // running the partitioner first keeps a malformed `groupby` reported as
+    // such on an empty batch.
     refuse_groupby_output_collision("stat_box_stats", &spec.groupby, &output_field_names())?;
     let partition = group_partition_multi(
         batch,
@@ -91,11 +91,6 @@ pub(crate) fn apply_with_context(
         ctx,
     )?;
     let group_dtypes = &partition.dtypes;
-
-    let n_rows = batch.num_rows();
-    if n_rows == 0 {
-        return Err(PyValueError::new_err("stat_box_stats: empty input batch"));
-    }
 
     let v_arr = coerce_to_float64(batch.column(v_idx), "stat_box_stats", &spec.field)?;
 
@@ -767,5 +762,45 @@ mod tests {
             assert_eq!(apply(&spec, &frame_with(Some(infinite))).unwrap(), twin);
         }
         assert_eq!(col_f64(&twin, "median")[0], 3.0, "group a is the median of its five finite values");
+    }
+
+    /// A zero-row batch is an empty frame, not a malformed one: the statistic
+    /// returns zero rows of its declared schema (key columns at their input
+    /// dtype), grouped or not, and reports nothing.
+    #[test]
+    fn zero_row_batch_returns_zero_rows_of_the_declared_schema() {
+        pyo3::Python::initialize();
+        let empty = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("v", DataType::Float64, true),
+                Field::new("k", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+                Arc::new(arrow::array::Int64Array::from(Vec::<i64>::new())),
+            ],
+        )
+        .unwrap();
+        let outputs: Vec<&str> = vec!["q1", "median", "q3", "lower_whisker", "upper_whisker"];
+
+        for groupby in [vec![], vec!["k".to_string()]] {
+            let spec = BoxStatsSpec { field: "v".into(), groupby: groupby.clone(), whisker_extent: WhiskerExtent::IqrMultiplier(1.5), name: None };
+            let ctx = TransformContext::default();
+            let out = apply_with_context(&spec, &empty, &ctx).unwrap();
+            assert_eq!(out.num_rows(), 0, "groupby={groupby:?}");
+            let schema = out.schema();
+            let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            let mut expected: Vec<&str> = groupby.iter().map(String::as_str).collect();
+            expected.extend(outputs.iter().copied());
+            assert_eq!(names, expected, "groupby={groupby:?}");
+            if !groupby.is_empty() {
+                assert_eq!(schema.field(0).data_type(), &DataType::Int64);
+            }
+            for name in &outputs {
+                let f = schema.field_with_name(name).unwrap();
+                assert_eq!(f.data_type(), &DataType::Float64);
+            }
+            assert!(ctx.warnings.borrow().is_empty(), "the statistic itself reports nothing");
+        }
     }
 }

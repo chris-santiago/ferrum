@@ -798,13 +798,10 @@ def test_a_date_key_null_on_every_row_matches_the_numeric_twin():
 _ZERO_ROW_OUTCOME: dict[str, tuple[str, list[str] | str]] = {
     "Kde": ("warns", [_NO_ROWS_TO_DRAW]),
     "Violin": ("warns", [_NO_ROWS_TO_DRAW]),
-    "BoxStats": ("raises", "transform failed: ValueError: stat_box_stats: empty input batch"),
+    "BoxStats": ("warns", [_NO_ROWS_TO_DRAW]),
     "Smooth": ("warns", [_whole_fit_message("Smooth", FIT_FEW_POINTS)]),
-    "Summary": ("raises", "transform failed: ValueError: stat_summary: empty input batch"),
-    "ErrorExtent": (
-        "raises",
-        "transform failed: ValueError: stat_error_extent: empty input batch",
-    ),
+    "Summary": ("warns", [_NO_ROWS_TO_DRAW]),
+    "ErrorExtent": ("warns", [_NO_ROWS_TO_DRAW]),
     "Bin": ("warns", [_NO_ROWS_TO_DRAW]),
     "QQ": ("warns", [_NO_ROWS_TO_DRAW]),
     "LetterValue": ("warns", [_NO_ROWS_TO_DRAW]),
