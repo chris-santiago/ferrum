@@ -125,6 +125,16 @@ class _TemporalParseError(ValueError):
     """
 
 
+class _SubMillisecondError(ValueError):
+    """A temporal value finer than a whole millisecond.
+
+    A distinct type, as :class:`_TemporalParseError` is, because the one consumer
+    of :func:`temporal_to_whole_epoch_ms` (the impute options) re-words THIS
+    refusal in its own vocabulary while passing the seam's other refusals (NaT,
+    out-of-range ``datetime64``) through as they are.
+    """
+
+
 def _is_iso8601_string(s: str) -> bool:
     """Return True if *s* can be parsed as an ISO-8601 date or datetime string.
 
@@ -384,6 +394,80 @@ def temporal_coord_to_epoch_ms(value: _dt.date | _dt.datetime | str | np.datetim
     raise TypeError(
         "temporal value must be a datetime.date, datetime.datetime, "
         "numpy.datetime64, or an ISO-8601 date/datetime string; got "
+        f"{type(value).__name__}"
+    )
+
+
+_EPOCH_NAIVE = _dt.datetime(1970, 1, 1)
+_EPOCH_AWARE = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
+
+
+def temporal_to_whole_epoch_ms(value: _dt.date | _dt.datetime | np.datetime64) -> int:
+    """Convert a temporal value to an exact whole number of epoch milliseconds (UTC).
+
+    The integer sibling of :func:`temporal_coord_to_epoch_ms`, for a door whose
+    wire carries a millisecond as an integer (the impute ``value`` and
+    ``keyvals``). It uses integer arithmetic only, so a whole-millisecond
+    instant never loses a millisecond to a float round trip, and a value finer
+    than a millisecond is refused instead of rounded.
+
+    Parameters
+    ----------
+    value : datetime.date, datetime.datetime, or numpy.datetime64
+        A ``datetime.date`` is midnight UTC. A naive ``datetime.datetime`` is
+        UTC and an aware one is converted to UTC; ``pandas.Timestamp`` rides
+        this branch and its ``nanosecond`` part is read. A ``numpy.datetime64``
+        of any unit is read exactly. A string is text, not a time, and is
+        refused.
+
+    Returns
+    -------
+    int
+        Milliseconds since the Unix epoch, negative before 1970.
+
+    Raises
+    ------
+    ValueError
+        If the value is not-a-time (``pandas.NaT``, ``numpy.datetime64('NaT')``)
+        or a ``numpy.datetime64`` is out of range. A value finer than a
+        millisecond raises :class:`_SubMillisecondError`, a ``ValueError``
+        subclass the caller re-words.
+    TypeError
+        If the value is not a ``date``, ``datetime`` or ``datetime64``.
+
+    Examples
+    --------
+    >>> from datetime import datetime
+    >>> temporal_to_whole_epoch_ms(datetime(2004, 3, 4, 5, 56, 53, 945000))
+    1078379813945
+    """
+    if isinstance(value, _dt.datetime):
+        if value != value:
+            # `pandas.NaT` is a `datetime.datetime` subclass that is not equal to itself.
+            raise ValueError(f"{value!r} {_NOT_A_TIME}")
+        epoch = _EPOCH_NAIVE if value.tzinfo is None else _EPOCH_AWARE
+        delta = value - epoch
+        micros = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+        if micros % 1000 or getattr(value, "nanosecond", 0):
+            raise _SubMillisecondError(f"{value!r} is finer than a millisecond")
+        return micros // 1000
+    if isinstance(value, _dt.date):
+        return (value - _EPOCH_DATE).days * _MS_PER_DAY
+    if _is_datetime64(value):
+        import numpy as np
+
+        if np.isnat(value):
+            raise ValueError(f"{value!r} {_NOT_A_TIME}")
+        micros = _epoch_us_for_datetime64(value)
+        unit, count = np.datetime_data(value.dtype)
+        if unit in _DATETIME64_EXACT_UNITS:
+            numerator, denominator = _DATETIME64_US_PER_TICK[unit]
+            ticks = int(value.astype("int64")) * count * numerator
+            if ticks % (denominator * 1000):
+                raise _SubMillisecondError(f"{value!r} is finer than a millisecond")
+        return micros // 1000
+    raise TypeError(
+        "temporal value must be a datetime.date, datetime.datetime or numpy.datetime64; got "
         f"{type(value).__name__}"
     )
 

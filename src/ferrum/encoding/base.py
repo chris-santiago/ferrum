@@ -473,6 +473,21 @@ def _emit_format_type(value: Any, out: dict) -> None:
         out["format_type"] = value
 
 
+def _emit_impute(value: Any, out: dict) -> None:
+    """Emit the ``impute`` option dict in its wire form.
+
+    The channel keeps a snapshot of the dict its caller wrote, in the caller's
+    spelling (``scale``, ``legend`` and ``format`` keep theirs), so a rebuild of
+    the channel validates that spelling again; the wire form (a tagged instant,
+    a frame as a list) is made here. The snapshot passed construction and nothing
+    can change it, so it cannot be refused here.
+    """
+    if value is not None:
+        from ferrum.transforms import _impute_options
+
+        out["impute"] = _impute_options("impute", value, value_label="impute value")
+
+
 def _emit_passthrough(key: str):
     """Return a handler that copies a non-None kwarg verbatim under *key*."""
 
@@ -524,7 +539,7 @@ _SPEC_DICT_HANDLERS = {
     "legend": _emit_legend,
     "sort": _emit_passthrough("sort"),
     "stack": _emit_passthrough("stack"),
-    "impute": _emit_passthrough("impute"),
+    "impute": _emit_impute,
     "scheme": _emit_passthrough("scheme"),
     "format": _emit_format,
     "format_type": _emit_format_type,
@@ -704,6 +719,19 @@ class ChannelBase:
         sort = self._kwargs.get("sort")
         if sort is not None and "sort" in self._honored_kwargs:
             _validate_sort_object(self.__class__.__name__, sort)
+        impute = self._kwargs.get("impute")
+        if impute is not None and "impute" in self._honored_kwargs:
+            # The caller's dict is snapshotted once (an iterable `keyvals` is read
+            # here, not drained by every later validation), then checked by the one
+            # impute validation (the transform's own), so a malformed option is
+            # refused here and not as a parser message at render. The snapshot
+            # stays in the caller's spelling; `_emit_impute` converts it.
+            from ferrum.transforms import _impute_options, _impute_snapshot
+
+            door = f"{self.__class__.__name__}(impute=...)"
+            snapshot = _impute_snapshot(impute)
+            _impute_options(door, snapshot, value_label=f"{door} value")
+            self._kwargs["impute"] = snapshot
         self._validate_legend_value()
 
     def _explicit_scale_range(self) -> Any:

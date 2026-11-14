@@ -992,7 +992,7 @@ pub(crate) fn all_transform_spec_instances() -> Vec<(&'static str, TransformSpec
         })),
         ("impute", Impute(ImputeSpec {
             field: "v".into(), method: "mean".into(), value: None, groupby: None, key: None,
-            keyvals: None, name: None,
+            keyvals: None, frame: None, name: None,
         })),
         ("flatten", Flatten(FlattenSpec { fields: vec![], as_: None, name: None })),
         ("sample", Sample(SampleSpec { n: 10, seed: 0, name: None })),
@@ -1633,10 +1633,11 @@ fn door_spec(
         "impute" => TransformSpec::Impute(t::impute::ImputeSpec {
             field: field.into(),
             method: method.to_string(),
-            value: Some(0.0),
+            value: None,
             groupby: None,
             key: None,
             keyvals: None,
+            frame: None,
             name: None,
         }),
         "top_k" => TransformSpec::TopK(t::top_k::TopKSpec {
@@ -1988,10 +1989,11 @@ fn impute_methods_accepted_and_bogus_method_rejected() {
     let spec_with = |method: &str| ImputeSpec {
         field: "v".into(),
         method: method.to_string(),
-        value: Some(0.0),
+        value: None,
         groupby: None,
         key: None,
         keyvals: None,
+        frame: None,
         name: None,
     };
     for &method in &entry_for_kind("impute").unwrap().methods {

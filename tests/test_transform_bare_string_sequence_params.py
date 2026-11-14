@@ -23,11 +23,12 @@ tomorrow with that annotation joins the parametrize automatically; if its
 wrapper has no entry in ``_MINIMAL_CALLS`` the coverage test fails loudly
 (an ``AssertionError``, not a skip) rather than under-covering silently.
 
-Numeric-element sequence parameters (``transform_density(extent=)``,
-``transform_window(frame=)``) are outside the derived set by the same rule
-that defines it, and ``test_numeric_sequence_params_are_refused_downstream``
-pins *why* that exclusion is safe rather than asserting it in prose: their
-char-split reaches a typed wire boundary that refuses it loudly.
+Numeric-element sequence parameters (``transform_density(extent=)``) are outside
+the derived set by the same rule that defines it, and
+``test_numeric_sequence_params_are_refused_downstream`` pins *why* that exclusion
+is safe rather than asserting it in prose: its char-split reaches a typed wire
+boundary that refuses it loudly. ``transform_window(frame=)`` has its own typed
+check at construction.
 """
 
 from __future__ import annotations
@@ -196,12 +197,11 @@ def test_real_sequence_still_reaches_the_wire(name, param):
     "transform, expected_type",
     [
         (lambda: fm.transform_density("x", extent="ab"), "f64"),
-        (lambda: fm.transform_window({"op": "row_number", "as": "r"}, frame="ab"), "i64"),
     ],
 )
 def test_numeric_sequence_params_are_refused_downstream(transform, expected_type):
-    """Why numeric-element sequence parameters are outside the derived set,
-    pinned rather than asserted: their char-split does reach the wire, but the
+    """Why a numeric-element sequence parameter is outside the derived set,
+    pinned rather than asserted: its char-split does reach the wire, but the
     typed deserialization boundary refuses the resulting strings loudly, so
     there is no silent-corruption mode to guard against at the wrapper."""
     df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]})

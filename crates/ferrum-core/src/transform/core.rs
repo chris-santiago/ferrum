@@ -1332,7 +1332,7 @@ mod tests {
                 "Impute",
                 TransformSpec::Impute(ImputeSpec {
                     field: "sales".into(), method: "mean".into(), value: None,
-                    groupby: Some(vec!["g".into()]), key: None, keyvals: None, name: None,
+                    groupby: Some(vec!["g".into()]), key: None, keyvals: None, frame: None, name: None,
                 }),
                 batch,
             ));

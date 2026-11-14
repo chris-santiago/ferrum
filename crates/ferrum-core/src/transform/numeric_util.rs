@@ -72,16 +72,22 @@ pub(crate) fn coerce_to_float64(
     ctx: &str,
     field: &str,
 ) -> PyResult<Float64Array> {
+    float64_column(col, ctx, field).map_err(PyValueError::new_err)
+}
+
+/// [`coerce_to_float64`] with its refusal as plain text, for a core shared by a
+/// PyO3 door and the render, which wrap it each in their own error type.
+pub(crate) fn float64_column(
+    col: &ArrayRef,
+    ctx: &str,
+    field: &str,
+) -> Result<Float64Array, String> {
     match col.data_type() {
         DataType::Float64 => col
             .as_any()
             .downcast_ref::<Float64Array>()
             .cloned()
-            .ok_or_else(|| {
-                PyValueError::new_err(format!(
-                    "{ctx}: expected Float64Array for column '{field}'"
-                ))
-            }),
+            .ok_or_else(|| format!("{ctx}: expected Float64Array for column '{field}'")),
         DataType::Int8
         | DataType::Int16
         | DataType::Int32
@@ -93,23 +99,15 @@ pub(crate) fn coerce_to_float64(
         | DataType::Float16
         | DataType::Float32 => {
             let casted = arrow::compute::cast(col, &DataType::Float64).map_err(|e| {
-                PyValueError::new_err(format!(
-                    "{ctx}: could not cast column '{field}' to Float64: {e}"
-                ))
+                format!("{ctx}: could not cast column '{field}' to Float64: {e}")
             })?;
             casted
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .cloned()
-                .ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "{ctx}: cast to Float64 failed for column '{field}'"
-                    ))
-                })
+                .ok_or_else(|| format!("{ctx}: cast to Float64 failed for column '{field}'"))
         }
-        other => Err(PyValueError::new_err(format!(
-            "{ctx}: column '{field}' must be numeric, got {other:?}"
-        ))),
+        other => Err(format!("{ctx}: column '{field}' must be numeric, got {other:?}")),
     }
 }
 
@@ -577,6 +575,23 @@ mod tests {
 
     fn arr_from_vals(vals: Vec<f64>) -> Float64Array {
         Float64Array::from(vals)
+    }
+
+    // ---------- float64_column ----------
+
+    /// The plain-text core and its PyO3 wrapper refuse with one text.
+    #[test]
+    fn float64_column_and_coerce_to_float64_refuse_with_one_text() {
+        pyo3::Python::initialize();
+        let text: ArrayRef = Arc::new(StringArray::from(vec!["a"]));
+        let plain = float64_column(&text, "door", "g").unwrap_err();
+        assert_eq!(plain, "door: column 'g' must be numeric, got Utf8");
+        let wrapped = coerce_to_float64(&text, "door", "g").unwrap_err().to_string();
+        assert_eq!(wrapped, format!("ValueError: {plain}"));
+        let ints: ArrayRef = Arc::new(Int32Array::from(vec![Some(1), None]));
+        let got = float64_column(&ints, "door", "g").unwrap();
+        assert_eq!(got.value(0), 1.0);
+        assert!(got.is_null(1));
     }
 
     // ---------- clean_float64_values ----------

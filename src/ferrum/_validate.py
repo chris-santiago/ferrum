@@ -65,6 +65,17 @@ Independent predicates live here:
   lengths, the conditional numeric literal, and the ``transform_filter`` /
   ``transform_impute`` number literals).
 
+- ``coerce_frame`` is the one check of a ``frame=`` argument (``transform_window``,
+  ``transform_impute`` and the impute option dict): two ends, each ``None`` or an
+  integer a 64-bit row offset holds.
+
+- ``coerce_impute_options`` is the one normalizer of the impute option dict
+  (``method``, ``value``, ``keyvals``, ``frame``) that ``Y(impute=...)``,
+  ``X(impute=...)`` and ``transform_impute`` share, so the two doors refuse
+  the same malformed option with the same words. It takes the literal
+  normalizers as arguments (the temporal conversion lives in a module this
+  leaf may not import, as ``validate_color_value`` takes its color parser).
+
 - ``coerce_positive_real`` is ``coerce_finite_real``'s ``> 0`` sibling, for a
   dimensionless ratio (a figure function's ``aspect``).
 
@@ -127,7 +138,8 @@ import decimal
 import math
 import numbers
 import operator
-from typing import Any, Callable, Sequence
+from collections.abc import Mapping
+from typing import Any, Callable, Sequence, cast
 
 
 def is_real_number(value: Any) -> bool:
@@ -500,6 +512,148 @@ def coerce_finite_real(label: str, value: Any, *, required: bool = False) -> int
     if as_float is None:
         raise ValueError(f"{label} must be a finite number a float can hold; received {value!r}")
     return operator.index(value) if is_integer_number(value) else as_float
+
+
+#: The ``{'start', 'stop', 'step'}`` spelling of ``keyvals``: the key names a
+#: sequence takes, in wire order.
+_KEYVALS_SEQUENCE_NAMES = ("start", "stop", "step")
+
+
+def coerce_impute_options(
+    door: str,
+    options: Any,
+    *,
+    accepted: Sequence[str],
+    normalize_value: Callable[[Any], Any],
+    normalize_keyval: Callable[[Any], Any],
+) -> dict[str, Any]:
+    """Return the impute *options* in their wire form, or raise ``ValueError`` if they are malformed.
+
+    *door* is the pre-composed public door (``"Y(impute=...)"``,
+    ``"transform_impute"``) that every refusal speaks as. *options* must be a
+    ``dict`` whose keys are all in *accepted*, the option names the engine's
+    registry publishes for ``impute`` (``method``, ``value``, ``keyvals``,
+    ``frame``). An option whose value is ``None`` is unset and dropped. The
+    result holds the options that were given, in ``method``, ``value``,
+    ``keyvals``, ``frame`` order, each normalized:
+
+    - ``method``: a string (the vocabulary is the engine's to check);
+    - ``value``: whatever *normalize_value* returns (a number, string, bool or
+      epoch-millisecond number);
+    - ``keyvals``: a list of *normalize_keyval* results, or a
+      ``{'start', 'stop', 'step'}`` dict of finite numbers with ``stop``
+      required (the sequence's own refusals, a zero step and a text or
+      ``Boolean`` key, depend on the data and are the engine's);
+    - ``frame``: a ``[preceding, following]`` pair of integer row offsets,
+      ``None`` for an open end.
+
+    Raises
+    ------
+    ValueError
+        If *options* is not a dict, names an option that is not in *accepted*,
+        or holds an option value that is malformed. *normalize_value* and
+        *normalize_keyval* raise their own refusals for a bad literal.
+    """
+    if not isinstance(options, dict):
+        raise ValueError(
+            f"{door} must be a dict of impute options ({', '.join(accepted)}), "
+            f"got {type(options).__name__} {options!r}"
+        )
+    for name in options:
+        if name not in accepted:
+            raise ValueError(f"{door}: unknown option {name!r}; expected {'|'.join(accepted)}")
+    out: dict[str, Any] = {}
+    if options.get("method") is not None:
+        validate_str(door, "method", options["method"])
+        out["method"] = options["method"]
+    if options.get("value") is not None:
+        out["value"] = normalize_value(options["value"])
+    if options.get("keyvals") is not None:
+        out["keyvals"] = _coerce_impute_keyvals(door, options["keyvals"], normalize_keyval)
+    if options.get("frame") is not None:
+        out["frame"] = coerce_frame(door, options["frame"])
+    return out
+
+
+def _coerce_impute_keyvals(
+    door: str, keyvals: Any, normalize_keyval: Callable[[Any], Any]
+) -> list[Any] | dict[str, int | float]:
+    """The ``keyvals`` option as a list of normalized keys or a normalized sequence dict."""
+    if isinstance(keyvals, dict):
+        unknown = [name for name in keyvals if name not in _KEYVALS_SEQUENCE_NAMES]
+        if unknown:
+            raise ValueError(
+                f"{door}: keyvals={{...}} has unknown key {unknown[0]!r}; "
+                f"expected {'|'.join(_KEYVALS_SEQUENCE_NAMES)}"
+            )
+        if "stop" not in keyvals:
+            raise ValueError(f"{door}: keyvals={{...}} needs 'stop'; got {keyvals!r}")
+        return {
+            name: cast(
+                "int | float",
+                coerce_finite_real(f"{door}: keyvals {name}", keyvals[name], required=True),
+            )
+            for name in _KEYVALS_SEQUENCE_NAMES
+            if name in keyvals
+        }
+    try:
+        items = list(keyvals)
+    except TypeError:
+        raise ValueError(
+            f"{door}: keyvals must be a sequence of key values or a "
+            f"{{'start', 'stop', 'step'}} dict, got {type(keyvals).__name__} {keyvals!r}"
+        ) from None
+    return [normalize_keyval(item) for item in items]
+
+
+def coerce_frame(door: str, frame: Any) -> list[int | None]:
+    """Return a window *frame* as ``[preceding, following]`` row offsets, or raise ``ValueError``.
+
+    The one check of a ``frame=`` argument, asked by ``transform_window`` and
+    ``transform_impute`` (and the ``impute`` option dict). A frame is a list, tuple,
+    ``range`` or 1-D numpy array of two ends; each end is ``None`` (unbounded) or an integer
+    (:func:`is_integer_number`: a numpy integer passes, a ``bool`` or a float
+    does not) a signed 64-bit row offset holds. Nothing else is read: a set, an
+    iterator or generator, a mapping, a string and bytes are refused without being
+    read. The result holds builtin ``int`` and ``None``. *door* is the public call
+    the refusals speak as.
+    """
+    ends = _frame_ends(frame)
+    if ends is None or len(ends) != 2 or not all(e is None or is_integer_number(e) for e in ends):
+        raise ValueError(
+            f"{door}: frame must be a (preceding, following) pair of row offsets, "
+            f"each an integer or None; got {frame!r}"
+        )
+    for end in ends:
+        if end is not None and not _MIN_ROW_OFFSET <= end <= _MAX_ROW_OFFSET:
+            raise ValueError(
+                f"{door}: frame offset {end} is beyond a 64-bit row offset; "
+                "use None for an unbounded end"
+            )
+    return [None if end is None else operator.index(end) for end in ends]
+
+
+def _frame_ends(frame: Any) -> list[Any] | None:
+    """The two ends of a frame, or ``None`` if *frame* is not an ordered pair held in a list, tuple, ``range`` or 1-D numpy array.
+
+    Only those four types are read, and only when their length is 2 (checked
+    before any item is read, so a huge ``range`` is not materialized). A set
+    (no order), an iterator or generator (it may never end, and reading it
+    consumes it), a mapping, a string and bytes are not read at all.
+    """
+    import numpy as np
+
+    ordered = isinstance(frame, (list, tuple, range)) or (
+        isinstance(frame, np.ndarray) and frame.ndim == 1
+    )
+    if not ordered or len(frame) != 2:
+        return None
+    return list(frame)
+
+
+#: The row offsets a window frame end can hold: the signed 64-bit range the engine reads.
+_MIN_ROW_OFFSET = -(2**63)
+_MAX_ROW_OFFSET = 2**63 - 1
 
 
 def coerce_positive_real(label: str, value: Any, *, required: bool = False) -> int | float | None:

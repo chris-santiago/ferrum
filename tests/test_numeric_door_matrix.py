@@ -19,7 +19,9 @@ default, ``ncols``/``columns``, mark style kwargs, ``transform_impute(value=)``)
 and a refusal where the argument is required. The expression and key-universe
 literals of ``transform_filter`` and ``transform_impute(keyvals=)`` also take
 strings, booleans and ``None`` as literals of their own type, so only the
-numeric kinds are cells there.
+numeric kinds are cells there; ``transform_impute(value=)`` takes a string and a
+boolean as the fill of a text or boolean column, so those two kinds are not cells
+there (``tests/test_impute_options.py`` pins them).
 
 Every accepted cell must produce the same output as the builtin spelling of
 the same value, and each door carries a control value whose output must
@@ -181,6 +183,17 @@ def _real_refusal(label: str) -> Callable[[str, Any], str]:
     return refusal
 
 
+def _impute_value_refusal(kind: str, v: Any) -> str:
+    """``transform_impute(value=)`` takes a string, a bool or a time as literals of their own kind
+    (their cells are skipped); a list is no kind a column holds, and every other kind is a number."""
+    if kind == "list":
+        return (
+            "transform_impute(value=...) must be a number, a string, True or False, a date or a "
+            f"datetime, not list; received {v!r}"
+        )
+    return _real_refusal("transform_impute(value=...)")(kind, v)
+
+
 def _int_refusal(label: str, expects: str = "a positive int") -> Callable[[str, Any], str]:
     """The ``coerce_*_int`` refusals, in the door's voice."""
 
@@ -253,6 +266,8 @@ class Door(NamedTuple):
 
 _REAL = frozenset({"int", "float", "np_int", "np_float", "np_float32", "Decimal", "None"})
 _LITERAL_OF_ANOTHER_TYPE = frozenset({"bool", "str", "list", "None"})
+# An impute fill of a text or boolean column: each is a value of its own kind, not a number.
+_LITERAL_OF_ITS_OWN_KIND = frozenset({"bool", "str"})
 _INTEGER = frozenset({"int", "np_int", "None"})
 _TSNE_LABEL = "ModelSource.embeddings(method='tsne', perplexity=...)"
 _TEXT = pl.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0], "t": ["abcdefghijkl", "mnopqrstuvwx"]})
@@ -341,7 +356,13 @@ DOORS: dict[str, Door] = {
         _LITERAL_OF_ANOTHER_TYPE,
     ),
     "transform_impute_value": Door(
-        _impute_value, 5, None, 10, _real_refusal("transform_impute(value=...)"), _REAL
+        _impute_value,
+        5,
+        None,
+        10,
+        _impute_value_refusal,
+        _REAL,
+        _LITERAL_OF_ITS_OWN_KIND,
     ),
     "facet_ncols": Door(
         _facet_ncols, 2, "int", None, _int_refusal("Chart.facet(ncols=...)"), _INTEGER

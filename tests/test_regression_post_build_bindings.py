@@ -1413,7 +1413,8 @@ _CHANNEL_OPTIONS: dict[str, tuple[dict, str, str]] = {
     # fm.Axis(...) (not the no-op None) so a drop and an honor read apart too.
     "axis": ({"axis": fm.Axis(label_angle=45)}, "differs", "differs"),
     "sort": ({"sort": "-x"}, "identical", "identical"),
-    "impute": ({"impute": "zero"}, "identical", "identical"),
+    # A value that is not a dict of impute options is refused where the channel is built.
+    "impute": ({"impute": "zero"}, "refused", "refused"),
     "stack": ({"stack": True}, "identical", "identical"),
     "legend": ({"legend": None}, "identical", "identical"),
 }
@@ -1476,11 +1477,15 @@ def test_every_channel_option_is_honored_refused_or_inert_on_every_form_and_door
     baseline = plain.to_svg()
     field = "v" if channel == "x" else _y_field_of(form_name)
     cls = X if channel == "x" else Y
-    binding = cls(field, **kwargs)
+    # The binding is built inside the outcome: an option a channel refuses at construction
+    # (a malformed impute) is a refusal of the door like any other.
     if door == "later_dot_encode":
-        outcome = _outcome(lambda: plain.encode(**{channel: binding}).to_svg(), baseline)
+        outcome = _outcome(
+            lambda: plain.encode(**{channel: cls(field, **kwargs)}).to_svg(), baseline
+        )
     else:
         outcome = _outcome(
-            lambda: _build_with_encode_kwarg(form_name, channel, binding).to_svg(), baseline
+            lambda: _build_with_encode_kwarg(form_name, channel, cls(field, **kwargs)).to_svg(),
+            baseline,
         )
     assert outcome == post_build_expected, (form_name, option, channel, door)

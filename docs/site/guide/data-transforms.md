@@ -510,7 +510,7 @@ If a group has *no* usable (non-null, finite) values to compute a statistic from
 
 #### `key=` / `keyvals=` — filling in missing rows, not just missing values
 
-`transform_impute` can also *add* rows, following Vega's `impute` semantics. `key=` names a column whose values define a "should exist" universe within each group; any `(group, key)` combination missing from the data gets one row appended, with the key's own column filled to the missing value and every other non-group column set to null:
+`transform_impute` can also *add* rows, following Vega's `impute` semantics. `key=` names a column whose values define a "should exist" universe within each group; any `(group, key)` combination missing from the data gets one row inserted at its key's place in its group, with the key's own column filled to the missing value and every other non-group column set to null:
 
 ```python
 df = pl.DataFrame({
@@ -523,11 +523,19 @@ fm.transform_impute(
     "sales", method="mean",
     groupby=["region"], key="month", keyvals=[1, 2, 3],
 )
-# East already has months 1 and 2; month 3 is appended with sales = East's
-# own mean. West only has month 1; months 2 and 3 are appended the same way.
+# East holds months 1 and 2, so month 3 is inserted after its month-2 row with
+# East's own mean. West holds month 1, so months 2 and 3 follow its row.
 ```
 
-The key universe is `keyvals=` when given, else the distinct values of `key` observed across the whole batch. `keyvals=` requires `key=` — passing it alone raises, since a key universe is meaningless without a key column. Appended rows use the same per-group fill value (including the whole-column fallback above, for a group with no data of its own) as the ordinary null-filling path.
+The key universe is the distinct values of `key` across the whole batch plus any `keyvals=` adds (`keyvals=` never removes an observed key). `keyvals=` takes a list, dates for a date key, or a `{"start": 0, "stop": 5, "step": 1}` dict that names the numbers from `start` up to, not including, `stop`. `keyvals=` requires `key=`: passing it alone raises, since a key universe is meaningless without a key column. Inserted rows use the same per-group fill value (including the whole-column fallback above, for a group with no data of its own) as the ordinary null-filling path. A row the caller wrote never moves: an imputed row goes right after the group's last row whose key comes earlier, or before the group's first row when none does.
+
+#### `frame=` — a windowed statistic
+
+With `"mean"`, `"median"`, `"min"` or `"max"`, `frame=(preceding, following)` makes each fill the statistic of the usable values within that many rows of it, counted in key order (in row order with no `key=`) with imputed rows counted as rows that hold no value. `None` leaves an end open, so `frame=(None, 0)` is a running statistic. A window with no usable value falls back to the group's statistic, then the column's, with a warning. Each end is `None` or an integer a 64-bit row offset holds, and an offset past the group reads to its edge. `frame=` with `method="value"` is refused, since a constant has no window.
+
+#### Date, text and boolean fields
+
+The fill is of the field's own kind. A numeric field defaults to `value=0`; a date, text or boolean field has no default, so `value=` is required there: a `datetime.date`, `datetime.datetime` or `numpy.datetime64` for a date field, a string for a text field, `True` or `False` for a boolean field. A time finer than a millisecond is refused rather than rounded.
 
 ### `transform_stack` — stacking positions
 

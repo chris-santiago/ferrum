@@ -613,7 +613,7 @@ class TestImputeGroupbyHandComputed:
 class TestImputeKeyGeneration:
     """`key=`/`keyvals=` (Vega semantics, spec §4.3): within each group, key
     values present in the universe but missing from that group get one
-    appended row — the group's own columns, the missing key, and that
+    imputed row — the group's own columns, the missing key, and that
     group's own imputed value; every other column is null.
     """
 
@@ -644,8 +644,8 @@ class TestImputeKeyGeneration:
             .encode(x=fm.X("month", scale=xscale), y=fm.Y("sales", scale=yscale))
         )
 
-        # Group 1 is missing month 3: appended fill = mean(10, 30) = 20.
-        # Group 2 is missing month 1: appended fill = mean(100, 300) = 200.
+        # Group 1 is missing month 3: imputed fill = mean(10, 30) = 20.
+        # Group 2 is missing month 1: imputed fill = mean(100, 300) = 200.
         # Using the WRONG group's fill (a swapped-group bug) would produce
         # 200 for group 1 or 20 for group 2 here instead.
         g1 = self._group_points(base, xscale, yscale, 1)
@@ -653,44 +653,40 @@ class TestImputeKeyGeneration:
         assert g1 == pytest.approx([(1.0, 10.0), (2.0, 30.0), (3.0, 20.0)], abs=1e-3), g1
         assert g2 == pytest.approx([(1.0, 200.0), (2.0, 100.0), (3.0, 300.0)], abs=1e-3), g2
 
-    def test_keyvals_overrides_the_observed_universe(self):
+    def test_keyvals_add_to_the_observed_universe(self):
+        # Group 2 holds only month 1. The observed keys are {1, 2}; keyvals=[1, 3]
+        # ADDS month 3, so every group is completed over {1, 2, 3}: 6 points. A
+        # keyvals that replaced the observed keys would complete over {1, 3}
+        # alone and draw 5.
         df = pl.DataFrame(
             {
-                "g": [1, 1, 2, 2],
-                "month": [1.0, 2.0, 1.0, 2.0],
-                "sales": [10.0, 20.0, 100.0, 200.0],
+                "g": [1, 1, 2],
+                "month": [1.0, 2.0, 1.0],
+                "sales": [10.0, 20.0, 100.0],
             }
         )
         xscale = fm.LinearScale(domain=(0.0, 4.0), range=(0.0, 400.0))
         yscale = fm.LinearScale(domain=(0.0, 300.0), range=(0.0, 300.0))
 
-        # Without keyvals: both groups already cover the whole OBSERVED
-        # universe {1, 2} — nothing is missing, 4 points total.
-        t_default = fm.transform_impute("sales", method="mean", groupby=["g"], key="month")
-        svg_default = (
-            fm.Chart(df, width=400, height=300)
-            .transform(t_default)
-            .mark_point()
-            .encode(x=fm.X("month", scale=xscale), y=fm.Y("sales", scale=yscale))
-            .to_svg()
-        )
-        assert len(_point_positions(svg_default)) == 4, "no keyvals override: nothing is missing"
+        def chart(keyvals):
+            step = fm.transform_impute(
+                "sales", method="mean", groupby=["g"], key="month", keyvals=keyvals
+            )
+            return (
+                fm.Chart(df, width=400, height=300)
+                .transform(step)
+                .mark_point()
+                .encode(x=fm.X("month", scale=xscale), y=fm.Y("sales", scale=yscale))
+            )
 
-        # With keyvals=[1,2,3]: month 3 enters the universe, missing from
-        # BOTH groups (never observed in the data at all) -> 2 appended rows.
-        t_override = fm.transform_impute(
-            "sales", method="mean", groupby=["g"], key="month", keyvals=[1.0, 2.0, 3.0]
-        )
-        base_override = (
-            fm.Chart(df, width=400, height=300)
-            .transform(t_override)
-            .mark_point()
-            .encode(x=fm.X("month", scale=xscale), y=fm.Y("sales", scale=yscale))
-        )
-        g1 = self._group_points(base_override, xscale, yscale, 1)
-        g2 = self._group_points(base_override, xscale, yscale, 2)
+        # Without keyvals: group 2 lacks month 2 (observed in group 1): 4 points.
+        assert len(_point_positions(chart(None).to_svg())) == 4
+        added = chart([1, 3])
+        assert len(_point_positions(added.to_svg())) == 6
+        g1 = self._group_points(added, xscale, yscale, 1)
+        g2 = self._group_points(added, xscale, yscale, 2)
         assert g1 == pytest.approx([(1.0, 10.0), (2.0, 20.0), (3.0, 15.0)], abs=1e-3), g1
-        assert g2 == pytest.approx([(1.0, 100.0), (2.0, 200.0), (3.0, 150.0)], abs=1e-3), g2
+        assert g2 == pytest.approx([(1.0, 100.0), (2.0, 100.0), (3.0, 100.0)], abs=1e-3), g2
 
     def test_key_without_groupby_treats_whole_batch_as_one_group(self):
         # Vega's "no groupby means one implicit group" rule.
@@ -711,8 +707,8 @@ class TestImputeKeyGeneration:
             f"that group's own mean(10, 20)=15, got {points}"
         )
 
-    def test_key_column_dtype_preserved_on_appended_rows(self):
-        # A Utf8 key column's appended value must be a real category string,
+    def test_key_column_dtype_preserved_on_imputed_rows(self):
+        # A Utf8 key column's imputed value must be a real category string,
         # not a stringified numeral or a corrupted value.
         df = pl.DataFrame(
             {
@@ -733,7 +729,7 @@ class TestImputeKeyGeneration:
         # The mark's own text is the LAST `<text>` element (axis/chrome labels
         # precede it in document order) — same convention as F-L05-04's repro.
         assert _text_values(svg)[-1] == "Mar", (
-            f"group 1's appended row (sales=mean(10,30)=20) must carry month='Mar', "
+            f"group 1's imputed row (sales=mean(10,30)=20) must carry month='Mar', "
             f"got {_text_values(svg)[-1]!r}"
         )
 
@@ -746,7 +742,7 @@ class TestImputeKeyGeneration:
         )
         svg2 = chart2.to_svg()
         assert _text_values(svg2)[-1] == "Jan", (
-            f"group 2's appended row (sales=mean(100,300)=200) must carry month='Jan', "
+            f"group 2's imputed row (sales=mean(100,300)=200) must carry month='Jan', "
             f"got {_text_values(svg2)[-1]!r}"
         )
 
@@ -798,11 +794,15 @@ class TestImputeKeyvalsValidation:
     def test_keyvals_rejects_non_json_serializable_element_with_named_error(self):
         # A bad element must raise a typed error naming `transform_impute`
         # and `keyvals` at spec-construction time, not a bare "Object of
-        # type X is not JSON serializable" surfacing deep in render.
-        import datetime
-
-        with pytest.raises(TypeError, match="transform_impute.*keyvals"):
-            fm.transform_impute("sales", method="mean", keyvals=[datetime.date(2020, 1, 1)])
+        # type X is not JSON serializable" surfacing deep in render. (A
+        # date is an instant now and is accepted; see test_impute_options.)
+        no_kind = object()
+        with pytest.raises(ValueError) as excinfo:
+            fm.transform_impute("sales", method="mean", keyvals=[no_kind])
+        assert str(excinfo.value) == (
+            f"transform_impute: object {no_kind!r} not allowed in keyvals; "
+            "accepted: string, number, bool, date or datetime"
+        )
 
     def test_keyvals_integral_float_coerces_onto_int_key_column(self):
         # M1's "coerce numerics, raise on the rest": a whole-valued float
@@ -814,7 +814,7 @@ class TestImputeKeyvalsValidation:
         svg = fm.Chart(df).transform(t).mark_point().encode(x="month:Q", y="sales:Q").to_svg()
         assert len(_point_positions(svg)) == 3, (
             "1.0/2.0 coerce onto the Int64 key column and match the two observed "
-            "rows; 3.0 is genuinely missing and appended"
+            "rows; 3.0 is genuinely missing and imputed"
         )
 
     def test_keyvals_rejects_bare_string(self):
@@ -826,14 +826,14 @@ class TestImputeKeyvalsValidation:
             fm.transform_impute("sales", method="mean", key="month", keyvals="Mar")
 
 
-class TestImputeAppendedRowNullability:
-    """§4.3: an appended row leaves every column other than field/key/
+class TestImputedRowNullability:
+    """§4.3: an imputed row leaves every column other than field/key/
     groupby null. Previously unreached by any fixture in either suite —
     both reviewers flagged the `new_null_array` branch and nullability
     widening as untested.
     """
 
-    def test_appended_row_leaves_unrelated_column_null(self):
+    def test_imputed_row_leaves_unrelated_column_null(self):
         df = pl.DataFrame(
             {
                 "g": [1, 1, 2, 2],
@@ -844,17 +844,17 @@ class TestImputeAppendedRowNullability:
         )
         t = fm.transform_impute("sales", method="mean", groupby=["g"], key="month")
 
-        # Row count: 4 original + 2 appended (group 1 missing month 3,
+        # Row count: 4 original + 2 imputed (group 1 missing month 3,
         # group 2 missing month 1).
         count_chart = fm.Chart(df).transform(t).mark_point().encode(x="month:N", y="g:N")
         assert len(_point_positions(count_chart.to_svg())) == 6
 
-        # Nullability: the appended rows' `note` must be a real Arrow null,
+        # Nullability: the imputed rows' `note` must be a real Arrow null,
         # not a stringified/synthesized value — a text mark emits nothing
         # for a null-encoded row, so only the 4 original notes should
         # appear, never a 5th or 6th entry.
         text_chart = fm.Chart(df).transform(t).mark_text().encode(x="month:N", y="g:N", text="note")
         notes = [v for v in _text_values(text_chart.to_svg()) if v in {"p", "q", "r", "s"}]
         assert sorted(notes) == ["p", "q", "r", "s"], (
-            f"appended rows must not introduce a synthesized 'note' value, got {notes}"
+            f"imputed rows must not introduce a synthesized 'note' value, got {notes}"
         )

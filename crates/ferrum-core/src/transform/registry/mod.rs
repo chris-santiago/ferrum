@@ -763,7 +763,7 @@ pub(crate) fn entry_for_kind(kind: &str) -> Option<TransformRegistryEntry> {
             method_canonical: identity_canonical(crate::transform::impute::METHODS),
             outputs: vec![],
             secondary_outputs: vec![],
-            params: vec!["field", "method", "value", "groupby", "key", "keyvals", "name"],
+            params: vec!["field", "method", "value", "groupby", "key", "keyvals", "frame", "name"],
         },
         "flatten" => TransformRegistryEntry {
             outputs: vec![],

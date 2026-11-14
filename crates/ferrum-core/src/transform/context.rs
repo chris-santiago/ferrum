@@ -652,7 +652,7 @@ pub(crate) fn panel_clause(panel: Option<&str>) -> String {
 /// human-readable text `describe_group_row`/`describe_group_keys` embed in a
 /// `"col=value"` label — the one place either of them turns a `KeyValue`
 /// into a string, so both stay byte-identical for the same value.
-fn format_key_value(kv: &crate::transform::group_key::KeyValue) -> String {
+pub(crate) fn format_key_value(kv: &crate::transform::group_key::KeyValue) -> String {
     use crate::transform::group_key::KeyValue;
     match kv {
         KeyValue::Null => "null".to_string(),
@@ -677,7 +677,7 @@ fn format_key_value(kv: &crate::transform::group_key::KeyValue) -> String {
 /// +-262,000 years) is named by its raw value and unit, `4611686018427387904
 /// ms since the Unix epoch`, so it is never refused, never panics, and two
 /// distinct instants never share a name.
-fn format_instant(raw: i64, unit: arrow::datatypes::TimeUnit) -> String {
+pub(crate) fn format_instant(raw: i64, unit: arrow::datatypes::TimeUnit) -> String {
     use arrow::datatypes::TimeUnit;
     use chrono::{DateTime, Utc};
 

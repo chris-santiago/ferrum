@@ -49,7 +49,11 @@ class X(ChannelBase):
     - ``stack`` — ``True`` / one of ``"zero"``, ``"normalize"``, ``"center"``, or
       a falsy spelling (``False``, ``"false"``, ``"null"``, ``"none"``) to
       disable stacking.
-    - ``impute`` — an imputation dict applied before mapping.
+    - ``impute`` — a dict of the options ``transform_impute`` takes (``method``,
+      ``value``, ``keyvals``, ``frame``), each checked as ``transform_impute``
+      checks it when the channel is built: a value that is not a dict, an option
+      not in that list, a non-finite ``value`` and a malformed ``keyvals`` or
+      ``frame`` raise ``ValueError``.
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
     - ``legend`` — a ``Legend(...)`` instance or a raw legend dict.  Honored
@@ -114,7 +118,11 @@ class Y(ChannelBase):
     - ``stack`` — ``True`` / one of ``"zero"``, ``"normalize"``, ``"center"``, or
       a falsy spelling (``False``, ``"false"``, ``"null"``, ``"none"``) to
       disable stacking.
-    - ``impute`` — an imputation dict applied before mapping.
+    - ``impute`` — a dict of the options ``transform_impute`` takes (``method``,
+      ``value``, ``keyvals``, ``frame``), each checked as ``transform_impute``
+      checks it when the channel is built: a value that is not a dict, an option
+      not in that list, a non-finite ``value`` and a malformed ``keyvals`` or
+      ``frame`` raise ``ValueError``.
     - ``format`` — a tick-format string, paired with ``format_type`` /
       ``formatType`` (``"number"`` or ``"time"``).
     - ``legend`` — a ``Legend(...)`` instance or a raw legend dict.  Honored

@@ -1,59 +1,76 @@
-//! Data transform: Impute — fill missing (null/NaN) values. An infinite cell
-//! is the caller's value and is kept; the fill statistic skips it.
+//! Data transform: Impute: fill missing (null/NaN) values and complete series
+//! over their keys. An infinite cell is the caller's value and is kept; the
+//! fill statistic skips it.
 //!
-//! Supports imputation methods: value (constant), mean, median, min, max.
+//! One computation, [`complete_series`], serves `transform_impute` here and the
+//! encoding door (`Y(impute=)`, `X(impute=)`), with Vega-Lite's options:
 //!
-//! ## Groupby + key/keyvals (batch-D M3, F-L05-04)
+//! - `method`: `value` (default), `mean`, `median`, `min`, `max`.
+//! - `value`: the constant for `method="value"`, default 0, of the column's own
+//!   kind (a number, a timestamp at its unit and zone, text, a boolean).
+//!   Refused beside a statistic.
+//! - `keyvals`: keys every series must hold, added to the keys the batch holds
+//!   (a list, or a `{start, stop, step}` sequence).
+//! - `frame`: `(preceding, following)` row offsets around each fill, counted in
+//!   key order, for the statistic methods. Refused beside `value`.
 //!
-//! `impute` is row-preserving, unlike the concat-and-rebuild template
-//! `smooth.rs`/`regression_data.rs` use for grouped fits: every input row
-//! keeps its position, so grouping here is partition-then-scatter (the
-//! `data_window` shape) rather than partition-fit-concat. Rows partition via
+//! ## Groupby + key/keyvals
+//!
+//! `impute` is row-preserving: every input row keeps its place relative to
+//! every other input row. Rows partition via
 //! [`group_key::group_partition_multi`] (empty `groupby` yields exactly one
-//! implicit group holding every row, in original order — which is why the
-//! ungrouped path below is byte-identical to the pre-groupby implementation:
-//! it is the SAME per-group computation, just over the one group that
-//! happens to be the whole batch). A row whose groupby key is null still
-//! needs a value, since this transform is row-preserving; it falls back to
-//! the whole-column statistic instead (a case that never arises when
-//! `groupby` is unset). That fallback is GH #197's stated exemption for
-//! this transform — the call site passes `NullKeyPolicy::FillFromWholeBatch`,
-//! the one variant that keeps and fills every null-keyed row rather than
-//! dropping it, so the all-null warning names THIS disposition rather than
-//! claiming an empty output this transform can never produce.
-//! The same whole-column statistic is also the fallback for a group whose
-//! own cleaned value set is empty (every value in that group is unusable: null, NaN or infinite):
-//! without it, `mean`/`median` would silently fill with `0.0` and `min`/`max`
-//! would fill with `±f64::INFINITY`, either of which is worse than falling
-//! back to a wider window — `0.0` is a real plottable value and `±inf`
-//! drops the group's rows from the render entirely.
+//! implicit group holding every row, in original order, which is why the
+//! ungrouped path is the same per-group computation over the one group that
+//! happens to be the whole batch). A row whose groupby key is null belongs to
+//! no group but still needs a value, so it falls back to the whole-column
+//! statistic. That fallback is GH #197's stated exemption for this transform:
+//! the call site passes `NullKeyPolicy::FillFromWholeBatch`, the one variant
+//! that keeps and fills every null-keyed row rather than dropping it. The same
+//! whole-column statistic is the fallback for a group whose own usable values
+//! are none (each is null, NaN or infinite), since `0.0` is a real plottable
+//! value and `±inf` drops the group's rows from the render entirely.
 //!
-//! `key=`/`keyvals=` implement Vega's keyed-imputation semantics: within
-//! each group, the key universe (`keyvals` if given, else the distinct `key`
-//! values observed across the whole batch, in first-appearance order) minus
-//! the key values actually present in that group is the set of missing
-//! keys, and each gets one appended row — the group's own columns, the
-//! missing key, and the group's own fill value; every other column is null.
+//! `key=` completes every series over the key universe (see [`keys`]): each
+//! key a series lacks gets one row, carrying the series' own columns, the
+//! missing key and the series' fill, with every other column null. A null or
+//! `NaN` cell of the value column is filled the same way, and an infinite cell
+//! is kept. Each imputed row is inserted at its key's place (see [`insert`]),
+//! so a line draws `1, 2, 3` and not `1, 3, 2`, and a caller's row never moves.
 //! `key` without `groupby` is Vega's "no groupby means one implicit group"
-//! rule: the whole batch is that one group. Appended rows land after all
-//! original rows, in group-then-key order (both deterministic). `keyvals`
-//! is meaningless without `key` (there is no universe to speak of), so it
-//! is a refusal, not a silent no-op, to pass one without the other.
+//! rule. `keyvals` is meaningless without `key`, so passing one without the
+//! other is a refusal, not a silent no-op.
 
-use arrow::array::{Array, ArrayRef, Float64Array, RecordBatch};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+mod fill;
+mod insert;
+mod keys;
+mod literal;
+#[cfg(test)]
+mod complete_tests;
+
+use arrow::array::{Array, ArrayRef, BooleanArray, Float64Array, RecordBatch, Scalar, UInt32Array};
+use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::transform::context::{describe_group_keys, TransformContext, TransformWarning};
-use crate::transform::group_key::{
-    group_partition_multi, groupby_key_at, is_groupby_supported_dtype, materialize_groupby_col,
-    GroupPartition, KeyValue, NullKeyPolicy, GROUPBY_SUPPORTED_DTYPES,
+use crate::transform::context::{
+    describe_group_keys, format_key_value, TransformContext, TransformWarning,
 };
-use crate::transform::numeric_util::{clean_float64_values, coerce_to_float64, USABLE};
+use crate::transform::data_window::frame_range;
+use crate::transform::group_key::{
+    group_partition_multi, is_groupby_supported_dtype, materialize_groupby_col, GroupPartition,
+    KeyValue, NullKeyPolicy, GROUPBY_SUPPORTED_DTYPES,
+};
+use crate::transform::numeric_util::{clean_float64_values, float64_column, USABLE};
+use fill::{
+    fill_array, resolve_literal, window_statistic, Entry, Method, Statistic, ValueKind,
+};
+use insert::{key_ordered, missing_keys, Missing};
+use keys::KeyUniverse;
+
+/// The door `transform_impute` speaks as in every refusal and warning.
+const TRANSFORM_DOOR: &str = "data_impute";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -63,62 +80,193 @@ pub(crate) struct ImputeSpec {
     /// Imputation method: "value", "mean", "median", "min", "max".
     #[serde(default = "default_method")]
     pub method: String,
-    /// Constant value for method="value".
+    /// Constant for method="value", default 0: a number, a string, a bool, or
+    /// a date as a tagged instant (`{"epoch_ms": <integer>}`), of the kind the
+    /// column holds.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub value: Option<f64>,
+    pub value: Option<serde_json::Value>,
     /// Group-by columns (impute within groups).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub groupby: Option<Vec<String>>,
     /// Key column: within each group, missing values of this column (against
-    /// the key universe — see `keyvals`) get an appended row.
+    /// the key universe, see `keyvals`) get an inserted row.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub key: Option<String>,
-    /// The key universe. Requires `key` (a refusal, not a silent no-op, if
-    /// `key` is unset). When absent, the universe is the distinct `key`
-    /// values observed across the whole batch. Each value is typed per the
-    /// key column's own dtype at apply time: an integral JSON float (e.g.
-    /// `1.0`) coerces onto an Int/UInt key column (M1's "coerce numerics,
-    /// raise on the rest" posture — a non-integral float against an
-    /// Int/UInt key column stays a typed refusal, since that coercion would
-    /// be lossy). Any other dtype mismatch (e.g. a string against a numeric
-    /// key column) is a typed refusal, not a silent drop.
+    /// Keys added to the observed ones. Requires `key` (a refusal, not a
+    /// silent no-op, if `key` is unset). Each value is typed per the key
+    /// column's own dtype at apply time: an integral JSON float (e.g. `1.0`)
+    /// coerces onto an Int/UInt key column (a non-integral float against an
+    /// Int/UInt key column is a typed refusal, since that coercion would be
+    /// lossy), a tagged instant
+    /// or an epoch-millisecond number is an instant on a temporal key, and any
+    /// other dtype mismatch is a typed refusal, not a silent drop.
     #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub keyvals: Option<Vec<serde_json::Value>>,
+    pub keyvals: Option<Keyvals>,
+    /// `(preceding, following)` row offsets, `None` unbounded, of the window
+    /// each statistic fill reads. Refused for `method="value"`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub frame: Option<(Option<i64>, Option<i64>)>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub name: Option<String>,
 }
 
+/// The `keyvals` option: the keys listed, or the `{start, stop, step}` sequence
+/// that makes them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub(crate) enum Keyvals {
+    List(Vec<serde_json::Value>),
+    Sequence(KeySequence),
+}
+
+/// Vega's `sequence`: `start` (default 0) up to but not including `stop`, by
+/// `step` (default 1, or -1 when `stop < start`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeySequence {
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub start: Option<f64>,
+    pub stop: f64,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub step: Option<f64>,
+}
+
 /// The single source of truth for `Impute`'s free-string `method`
-/// vocabulary. Read by [`validate_method`] (the enforcement site), its error
-/// message, and `registry::entry_for_kind("impute")`'s `methods` list — R1
-/// design finding 1, mirroring the `smooth::METHODS` precedent.
+/// vocabulary. Read by [`Method::parse`] (the enforcement site), its error
+/// message, and `registry::entry_for_kind("impute")`'s `methods` list,
+/// mirroring `smooth::METHODS`.
 pub(crate) const METHODS: &[&str] = &["value", "mean", "median", "min", "max"];
 
 fn default_method() -> String {
     "value".into()
 }
 
-/// Per-group context shared by the row-fill scatter and key-row generation:
-/// one `group_partition_multi` call's partition (groups paired with their row
-/// indices, plus the group columns' original dtypes), each group's own
-/// computed fill value, and the groupby columns' schema indices. Bundled
-/// because every downstream step needs the same pieces of that one call.
-struct GroupContext<'a> {
-    partition: &'a GroupPartition,
-    col_indices: &'a [usize],
-    fill_values: &'a [f64],
+/// The options both doors share, borrowed from whichever spec carries them.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImputeOptions<'a> {
+    pub method: &'a str,
+    pub value: Option<&'a serde_json::Value>,
+    pub keyvals: Option<&'a Keyvals>,
+    pub frame: Option<(Option<i64>, Option<i64>)>,
 }
 
-/// The key column's identity, bundled for the same reason as
-/// [`GroupContext`]: `generate_missing_key_rows` needs the key column's
-/// name, schema index, and dtype together, and bundling them keeps the
-/// function's argument count under clippy's `too_many_arguments` threshold
-/// while letting the caller pass `key_name` once instead of re-deriving it
-/// from `spec.key` inside the callee.
-struct KeyMeta<'a> {
-    name: &'a str,
-    col_idx: usize,
-    dtype: &'a DataType,
+impl ImputeSpec {
+    fn options(&self) -> ImputeOptions<'_> {
+        ImputeOptions {
+            method: &self.method,
+            value: self.value.as_ref(),
+            keyvals: self.keyvals.as_ref(),
+            frame: self.frame,
+        }
+    }
+}
+
+/// Which observed keys join the key universe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservedKeys {
+    /// Every non-null key: a `NaN` or infinite float key is a key of its own,
+    /// completed into every series as `group_key` keys it (`transform_impute`).
+    Every,
+    /// Only the keys a key axis places: a `NaN` or infinite float key adds no
+    /// key, and its row holds no place in the key order (it is treated as a
+    /// null-keyed row: never completed, never a slot anchor, and after every
+    /// keyed position in a frame). Instants, integers, text and booleans are
+    /// always placed (the encoding door).
+    // The encoding door constructs this; until it calls `complete_series`, only
+    // tests do.
+    #[allow(dead_code)]
+    Placed,
+}
+
+/// The column series are completed along.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImputeKey<'a> {
+    /// The key column.
+    pub field: &'a str,
+    /// Which observed keys join the universe.
+    pub observed: ObservedKeys,
+    /// Columns that ride with the key (a binned key's `bin_end`, an `x2`): an
+    /// imputed row copies each from the first row holding its key. Rows that
+    /// share a key must agree on them, and a `keyvals` key no row holds has
+    /// nothing to copy, so both are refused.
+    pub companions: &'a [String],
+}
+
+/// The columns a completion reads.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ImputeColumns<'a> {
+    /// The column whose missing values are filled.
+    pub value: &'a str,
+    /// The column series are completed along, if any.
+    pub key: Option<ImputeKey<'a>>,
+    /// The columns an imputed row copies from its series' first row: the
+    /// columns that name the series, and any column constant within the batch
+    /// the caller hands in (a facet partition's facet columns).
+    pub series: &'a [String],
+}
+
+/// Which series each row belongs to. Ids may be any numbering of
+/// `0..labels.len()`, each id holding at least one row.
+#[derive(Debug, Clone)]
+pub(crate) struct Series {
+    /// Each row's series, `None` for a row in no series (a null in its groupby
+    /// key), which takes the whole-column statistic and is never completed.
+    pub of_row: Vec<Option<usize>>,
+    /// Each series' name as a warning gives it (`g=b`), or `None` for the one
+    /// series that is the whole frame.
+    pub labels: Vec<Option<String>>,
+}
+
+impl Series {
+    /// The series a `group_partition_multi` call made, named by `groupby`.
+    fn of_partition(partition: &GroupPartition, groupby: &[String], n_rows: usize) -> Self {
+        let mut of_row = vec![None; n_rows];
+        let mut labels = Vec::with_capacity(partition.groups.len());
+        for (index, (key, rows)) in partition.groups.iter().enumerate() {
+            for &row in rows {
+                of_row[row] = Some(index);
+            }
+            labels.push((!groupby.is_empty()).then(|| describe_group_keys(groupby, key)));
+        }
+        Self { of_row, labels }
+    }
+}
+
+/// Why a completion was refused. A plain value, not a Python error, so the
+/// transform door and the render each wrap it in their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ImputeRefusal {
+    /// A refusal whose text is final, already prefixed with its door.
+    Refused(String),
+    /// Rows that share one key disagree on a companion column, so an imputed
+    /// row has no one value to copy. `key` is the first such key in key order.
+    CompanionDiffers { door: String, key: String, companion: String },
+    /// A `keyvals` key that no row holds, with a companion to copy.
+    CompanionUnheld { door: String, key: String, companion: String },
+}
+
+impl std::fmt::Display for ImputeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(text) => f.write_str(text),
+            Self::CompanionDiffers { door, key, companion } => write!(
+                f,
+                "{door}: rows with key {key} hold different '{companion}' values, so an imputed \
+                 row has no one '{companion}' to copy"
+            ),
+            Self::CompanionUnheld { door, key, companion } => write!(
+                f,
+                "{door}: keyvals key {key} is held by no row, so an imputed row has no \
+                 '{companion}' to copy"
+            ),
+        }
+    }
+}
+
+impl From<String> for ImputeRefusal {
+    fn from(text: String) -> Self {
+        Self::Refused(text)
+    }
 }
 
 pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
@@ -126,532 +274,683 @@ pub(crate) fn apply(spec: &ImputeSpec, batch: &RecordBatch) -> PyResult<RecordBa
 }
 
 /// Context-aware entry point (#162): identical to [`apply`], plus
-/// `ctx.warnings` as the sink for this transform's two fallback shapes: a
-/// group whose own cleaned value set is empty, and a row whose groupby key
-/// is null — both fall back to the whole-column statistic (see the module
-/// doc's "Groupby + key/keyvals" section for the full rationale).
+/// `ctx.warnings` as the sink for this transform's fallback shapes: a group
+/// whose own usable values are none, a row whose groupby key is null, and a
+/// frame that holds no usable value for a fill. All fall back to a wider
+/// statistic (see the module doc).
 pub(crate) fn apply_with_context(
     spec: &ImputeSpec,
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    validate_method(&spec.method)?;
-    if spec.keyvals.is_some() && spec.key.is_none() {
-        return Err(PyValueError::new_err(
-            "data_impute: keyvals requires key=; the key universe is meaningless without a key column",
-        ));
-    }
-
-    let schema = batch.schema();
-
-    let field_col_idx = schema.index_of(&spec.field).map_err(|_| {
-        PyValueError::new_err(format!("data_impute: column '{}' not found", spec.field))
-    })?;
-
-    // Any numeric dtype is accepted; the imputed column is emitted as Float64
-    // (the fill value is a float, so the column widens by construction).
-    let col = coerce_to_float64(batch.column(field_col_idx), "data_impute", &spec.field)?;
-
-    let n_rows = batch.num_rows();
-
-    // Partition rows for a per-group fill value (M3, F-L05-04). See the
-    // module doc for why the ungrouped path is byte-identical by
-    // construction rather than a separate branch.
     let groupby: &[String] = spec.groupby.as_deref().unwrap_or(&[]);
+    if let Some(key) = &spec.key {
+        if groupby.contains(key) {
+            return Err(PyValueError::new_err(format!(
+                "{TRANSFORM_DOOR}: key column '{key}' cannot also be a groupby column"
+            )));
+        }
+    }
     // `FillFromWholeBatch` is #197's stated exemption for this transform:
-    // `Impute` is row-preserving by contract, so a null-keyed row is kept
-    // and gets the whole column's statistic (below) rather than being
-    // dropped — nothing to count — and the all-null warning says so instead
-    // of claiming an empty output.
+    // `Impute` is row-preserving by contract, so a null-keyed row is kept and
+    // gets the whole column's statistic rather than being dropped (nothing to
+    // count), and the all-null warning says so instead of claiming an empty
+    // output.
     let partition = group_partition_multi(
         batch,
         groupby,
-        "data_impute",
+        TRANSFORM_DOOR,
         NullKeyPolicy::FillFromWholeBatch,
         ctx,
     )?;
-    let groupby_col_indices: Vec<usize> = groupby
-        .iter()
-        .map(|name| {
-            schema.index_of(name).map_err(|_| {
-                PyValueError::new_err(format!("data_impute: groupby column '{name}' not found"))
-            })
-        })
-        .collect::<PyResult<_>>()?;
+    let series = Series::of_partition(&partition, groupby, batch.num_rows());
+    let columns = ImputeColumns {
+        value: &spec.field,
+        key: spec.key.as_deref().map(|field| ImputeKey {
+            field,
+            observed: ObservedKeys::Every,
+            companions: &[],
+        }),
+        series: groupby,
+    };
+    complete_series(batch, &columns, &series, &spec.options(), TRANSFORM_DOOR, ctx)
+        .map_err(|refusal| PyValueError::new_err(refusal.to_string()))
+}
 
+/// The key column of a completion, read once: its place in the schema, its
+/// dtype, the universe of keys, each row's place in it and the columns that
+/// ride with it.
+struct KeyColumn {
+    index: usize,
+    dtype: DataType,
+    universe: KeyUniverse,
+    ranks: Vec<Option<usize>>,
+    /// The companion columns' places in the schema.
+    companions: Vec<usize>,
+}
+
+impl KeyColumn {
+    fn read(
+        batch: &RecordBatch,
+        key: &ImputeKey<'_>,
+        value_index: usize,
+        series_indices: &[usize],
+        options: &ImputeOptions<'_>,
+        door: &str,
+    ) -> Result<Self, ImputeRefusal> {
+        let schema = batch.schema();
+        let name = key.field;
+        let index = schema
+            .index_of(name)
+            .map_err(|_| format!("{door}: key column '{name}' not found"))?;
+        if index == value_index {
+            return Err(format!(
+                "{door}: key column '{name}' cannot be the same as the imputed field '{}'",
+                schema.field(value_index).name()
+            )
+            .into());
+        }
+        let dtype = schema.field(index).data_type().clone();
+        if !is_groupby_supported_dtype(&dtype) {
+            return Err(format!(
+                "{door}: key column '{name}' has unsupported dtype {dtype:?}; \
+                 supported: {GROUPBY_SUPPORTED_DTYPES}"
+            )
+            .into());
+        }
+        let companions = key
+            .companions
+            .iter()
+            .map(|companion| {
+                let at = schema
+                    .index_of(companion)
+                    .map_err(|_| format!("{door}: column '{companion}' not found"))?;
+                let role = if at == value_index {
+                    Some("the value")
+                } else if at == index {
+                    Some("the key")
+                } else if series_indices.contains(&at) {
+                    Some("a series column")
+                } else {
+                    None
+                };
+                match role {
+                    Some(role) => Err(format!(
+                        "{door}: internal error: column '{companion}' cannot be both the key's \
+                         companion and {role}"
+                    )),
+                    None => Ok(at),
+                }
+            })
+            .collect::<Result<Vec<usize>, String>>()?;
+        let arr = batch.column(index);
+        let universe =
+            KeyUniverse::build(arr.as_ref(), &dtype, name, options.keyvals, key.observed, door)?;
+        let ranks = universe.row_ranks(arr.as_ref(), &dtype);
+        let read = Self { index, dtype, universe, ranks, companions };
+        read.check_companions_agree(batch, door)?;
+        Ok(read)
+    }
+
+    /// Every row holding a ranked key must agree with its key's first row on
+    /// each companion (a null equals a null, a `NaN` a `NaN`), else the first
+    /// such key in key order is named.
+    fn check_companions_agree(&self, batch: &RecordBatch, door: &str) -> Result<(), ImputeRefusal> {
+        let n_rows = batch.num_rows();
+        let sources = (0..n_rows)
+            .map(|row| {
+                let first = self.ranks[row].and_then(|rank| self.universe.first_row(rank));
+                u32::try_from(first.unwrap_or(row))
+                    .map_err(|_| format!("{door}: internal error: more rows than a batch indexes"))
+            })
+            .collect::<Result<Vec<u32>, String>>()
+            .map(UInt32Array::from)?;
+        let schema = batch.schema();
+        for &at in &self.companions {
+            // `distinct` orders floats totally, which tells 0.0 from -0.0; they are
+            // one position, so the sign of zero is not a disagreement.
+            let column = unsigned_zero(batch.column(at));
+            let door_error = |e: arrow::error::ArrowError| format!("{door}: {e}");
+            let firsts = arrow::compute::take(column.as_ref(), &sources, None).map_err(door_error)?;
+            let differs = arrow::compute::kernels::cmp::distinct(&column, &firsts).map_err(door_error)?;
+            let worst = (0..n_rows)
+                .filter(|&row| differs.value(row))
+                .filter_map(|row| self.ranks[row])
+                .min();
+            if let Some(rank) = worst {
+                return Err(ImputeRefusal::CompanionDiffers {
+                    door: door.to_string(),
+                    key: self.spelled(rank),
+                    companion: schema.field(at).name().clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// The key at place `rank` as a warning spells a key.
+    fn spelled(&self, rank: usize) -> String {
+        self.universe.key(rank).map_or_else(String::new, format_key_value)
+    }
+
+    /// The key column of the imputed rows: each row's key, at the column's dtype.
+    fn imputed_column(&self, imputed: &[Imputed]) -> Result<ArrayRef, String> {
+        let keys: Vec<Vec<KeyValue>> = imputed
+            .iter()
+            .filter_map(|row| self.universe.key(row.rank).cloned())
+            .map(|key| vec![key])
+            .collect();
+        materialize_groupby_col(&keys, 0, &self.dtype)
+    }
+
+    /// An imputed row has a companion to copy only from a row that holds its
+    /// key; the first imputed key (in key order) that no row holds is refused.
+    fn check_companions_held(
+        &self,
+        imputed: &[Imputed],
+        batch: &RecordBatch,
+        door: &str,
+    ) -> Result<(), ImputeRefusal> {
+        let Some(&first_companion) = self.companions.first() else {
+            return Ok(());
+        };
+        let unheld = imputed
+            .iter()
+            .filter(|row| self.universe.first_row(row.rank).is_none())
+            .map(|row| row.rank)
+            .min();
+        match unheld {
+            Some(rank) => Err(ImputeRefusal::CompanionUnheld {
+                door: door.to_string(),
+                key: self.spelled(rank),
+                companion: batch.schema().field(first_companion).name().clone(),
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// A companion column of the imputed rows: each row's value from the first
+    /// row holding its key.
+    fn imputed_companion(&self, column: &ArrayRef, imputed: &[Imputed]) -> Result<ArrayRef, String> {
+        let sources = imputed
+            .iter()
+            .map(|row| {
+                self.universe
+                    .first_row(row.rank)
+                    .and_then(|first| u32::try_from(first).ok())
+                    .ok_or_else(|| "internal error: an imputed key has no first row".to_string())
+            })
+            .collect::<Result<Vec<u32>, String>>()
+            .map(UInt32Array::from)?;
+        arrow::compute::take(column.as_ref(), &sources, None).map_err(|e| e.to_string())
+    }
+}
+
+/// What is being completed: the series, each one's rows, the keys each lacks
+/// and the key column.
+struct Layout<'a> {
+    series: &'a Series,
+    /// Each series' rows, in ascending batch order; none is empty.
+    rows_of: Vec<Vec<usize>>,
+    /// Each series' missing keys, in key order.
+    missing: Vec<Vec<Missing>>,
+    key: Option<KeyColumn>,
+    /// The places of the series columns in the schema.
+    series_indices: Vec<usize>,
+}
+
+impl<'a> Layout<'a> {
+    fn read(
+        batch: &RecordBatch,
+        columns: &ImputeColumns<'_>,
+        series: &'a Series,
+        value_index: usize,
+        options: &ImputeOptions<'_>,
+        door: &str,
+    ) -> Result<Self, ImputeRefusal> {
+        let schema = batch.schema();
+        let n_series = series.labels.len();
+        let mut rows_of: Vec<Vec<usize>> = vec![Vec::new(); n_series];
+        for (row, series_index) in series.of_row.iter().enumerate() {
+            if let Some(index) = series_index {
+                rows_of
+                    .get_mut(*index)
+                    .ok_or_else(|| {
+                        format!(
+                            "{door}: internal error: row {row} is in series {index}, but there \
+                             are {n_series} series"
+                        )
+                    })?
+                    .push(row);
+            }
+        }
+        if let Some(empty) = rows_of.iter().position(Vec::is_empty) {
+            return Err(format!("{door}: internal error: series {empty} holds no row").into());
+        }
+        let series_indices = columns
+            .series
+            .iter()
+            .map(|name| {
+                schema
+                    .index_of(name)
+                    .map_err(|_| format!("{door}: groupby column '{name}' not found"))
+            })
+            .collect::<Result<Vec<usize>, String>>()?;
+        let key = columns
+            .key
+            .as_ref()
+            .map(|key| KeyColumn::read(batch, key, value_index, &series_indices, options, door))
+            .transpose()?;
+        let missing = rows_of
+            .iter()
+            .map(|rows| match &key {
+                Some(key) => missing_keys(rows, &key.ranks, key.universe.len()),
+                None => Vec::new(),
+            })
+            .collect();
+        Ok(Self { series, rows_of, missing, key, series_indices })
+    }
+
+    /// The imputed rows in the order they are inserted: by slot, then by the
+    /// first row of their series, then by key. At one slot at most two series
+    /// meet, the one that owns the row before it (its rows go after its last
+    /// earlier row) and the one whose first row is the slot (its rows go before
+    /// its first row), and the series whose first row is earlier comes first.
+    fn imputed(&self) -> Vec<Imputed> {
+        let mut rows: Vec<Imputed> = self
+            .missing
+            .iter()
+            .enumerate()
+            .flat_map(|(series, keys)| {
+                keys.iter().enumerate().map(move |(index, m)| Imputed {
+                    slot: m.slot,
+                    series,
+                    index,
+                    rank: m.rank,
+                })
+            })
+            .collect();
+        rows.sort_by_key(|row| (row.slot, self.rows_of[row.series][0], row.rank));
+        rows
+    }
+}
+
+/// An imputed row, once its place is decided.
+struct Imputed {
+    /// The row of the batch it is inserted before.
+    slot: usize,
+    series: usize,
+    /// Its place among its series' missing keys.
+    index: usize,
+    /// The key's place in the key order.
+    rank: usize,
+}
+
+/// The fills a statistic method computes: one for every caller row (read only
+/// where its cell is missing) and one for every missing key of every series.
+struct StatisticFills {
+    per_row: Vec<f64>,
+    imputed: Vec<Vec<f64>>,
+}
+
+/// The value column of a completion: the callers' cells with their missing
+/// ones filled, and the values of the imputed rows.
+struct FilledValues {
+    callers: ArrayRef,
+    imputed: ArrayRef,
+}
+
+/// Complete every series of `batch` and fill its missing values.
+///
+/// `series` says which series each row belongs to, `columns` which columns hold
+/// the value, the key (with the observed keys it admits and the companions that
+/// ride with it) and the series' own values, and `options` how to fill (see the
+/// module doc). The key order is the order the key's dtype places its values
+/// (see [`keys`]). `door` prefixes every refusal and warning (`data_impute`
+/// for the transform).
+///
+/// The result holds every caller row in its place, a row inserted for each key
+/// a series lacks, and the value column filled at its own dtype: a numeric
+/// column is read and written as `Float64`, and every other kind keeps its
+/// dtype. The schema's metadata and each field's survive.
+pub(crate) fn complete_series(
+    batch: &RecordBatch,
+    columns: &ImputeColumns<'_>,
+    series: &Series,
+    options: &ImputeOptions<'_>,
+    door: &str,
+    ctx: &TransformContext,
+) -> Result<RecordBatch, ImputeRefusal> {
+    let method = Method::parse(door, options.method)?;
+    check_options(method, options, columns.key.is_some(), door)?;
+
+    let schema = batch.schema();
+    let n_rows = batch.num_rows();
+    if series.of_row.len() != n_rows {
+        return Err(format!(
+            "{door}: internal error: {} series assignments for {n_rows} rows",
+            series.of_row.len()
+        )
+        .into());
+    }
+    let value_index = schema
+        .index_of(columns.value)
+        .map_err(|_| format!("{door}: column '{}' not found", columns.value))?;
+    let layout = Layout::read(batch, columns, series, value_index, options, door)?;
+    let imputed = layout.imputed();
+    if let Some(key) = &layout.key {
+        key.check_companions_held(&imputed, batch, door)?;
+    }
+
+    let value_col = batch.column(value_index);
+    let filled = match method {
+        Method::Statistic(stat) => {
+            let col = float64_column(value_col, door, columns.value)?;
+            let fills = statistic_fills(stat, &col, options.frame, &layout, ctx);
+            FilledValues {
+                callers: per_row_values(&col, &fills.per_row),
+                imputed: Arc::new(Float64Array::from_iter_values(
+                    imputed.iter().map(|row| fills.imputed[row.series][row.index]),
+                )),
+            }
+        }
+        Method::Value => constant_values(value_col, options, columns.value, imputed.len(), door)?,
+    };
+    warn_rows_in_no_series(series, n_rows, method, layout.key.is_some(), ctx);
+
+    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    fields[value_index] = fields[value_index]
+        .clone()
+        .with_data_type(filled.callers.data_type().clone())
+        .with_nullable(false);
+    let mut out_columns: Vec<ArrayRef> = batch.columns().to_vec();
+    out_columns[value_index] = filled.callers.clone();
+    let finish = |fields: Vec<Field>, out_columns: Vec<ArrayRef>| {
+        let out_schema = Schema::new(fields).with_metadata(schema.metadata().clone());
+        RecordBatch::try_new(Arc::new(out_schema), out_columns)
+            .map_err(|e| ImputeRefusal::Refused(format!("{door}: {e}")))
+    };
+    if imputed.is_empty() {
+        return finish(fields, out_columns);
+    }
+
+    let first_rows = imputed
+        .iter()
+        .map(|row| {
+            u32::try_from(layout.rows_of[row.series][0])
+                .map_err(|_| format!("{door}: internal error: more rows than a batch indexes"))
+        })
+        .collect::<Result<Vec<u32>, String>>()
+        .map(UInt32Array::from)?;
+    let picks = insertion_picks(n_rows, &imputed);
+    let door_error = |e: arrow::error::ArrowError| format!("{door}: {e}");
+    for (index, column) in out_columns.iter_mut().enumerate() {
+        let appended: ArrayRef = if index == value_index {
+            filled.imputed.clone()
+        } else if let Some(key) = layout.key.as_ref().filter(|key| key.index == index) {
+            key.imputed_column(&imputed)?
+        } else if let Some(key) = layout.key.as_ref().filter(|key| key.companions.contains(&index)) {
+            key.imputed_companion(column, &imputed).map_err(|e| format!("{door}: {e}"))?
+        } else if layout.series_indices.contains(&index) {
+            arrow::compute::take(column.as_ref(), &first_rows, None).map_err(door_error)?
+        } else {
+            // Every other column may carry a null in an imputed row.
+            fields[index] = fields[index].clone().with_nullable(true);
+            arrow::array::new_null_array(column.data_type(), imputed.len())
+        };
+        *column = arrow::compute::interleave(&[column.as_ref(), appended.as_ref()], &picks)
+            .map_err(door_error)?;
+    }
+    finish(fields, out_columns)
+}
+
+/// The refusals of option pairs that mean nothing together.
+fn check_options(
+    method: Method,
+    options: &ImputeOptions<'_>,
+    has_key: bool,
+    door: &str,
+) -> Result<(), String> {
+    if options.keyvals.is_some() && !has_key {
+        return Err(format!(
+            "{door}: keyvals requires key=; the key universe is meaningless without a key column"
+        ));
+    }
+    match method {
+        Method::Statistic(_) if options.value.is_some() => Err(format!(
+            "{door}: value= applies to method='value', not '{}'; drop value= or set method='value'",
+            options.method
+        )),
+        Method::Value if options.frame.is_some() => Err(format!(
+            "{door}: frame= applies to mean, median, min and max; method 'value' fills a constant"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Rows no series holds are filled with the whole column's statistic, or with
+/// the constant, and are never completed. Reported once, and only when some
+/// (not every) row is in no series: when every row is, `group_partition_multi`
+/// already said so. A statistic names the fallback it took. A constant fill
+/// fell back to nothing, so with no key there is nothing to say, and with a key
+/// the notice says the rows were left out of the completion.
+fn warn_rows_in_no_series(
+    series: &Series,
+    n_rows: usize,
+    method: Method,
+    has_key: bool,
+    ctx: &TransformContext,
+) {
+    let in_none = series.of_row.iter().filter(|s| s.is_none()).count();
+    if in_none == 0 || in_none == n_rows {
+        return;
+    }
+    let reason = match (method, has_key) {
+        (Method::Statistic(_), _) => format!(
+            "{in_none} row(s) have a null groupby key; the whole column's \
+             statistic was used instead"
+        ),
+        (Method::Value, true) => format!(
+            "{in_none} row(s) have a null groupby key, so they belong to no group and no key \
+             is completed for them"
+        ),
+        (Method::Value, false) => return,
+    };
+    ctx.warn(TransformWarning::FallbackApplied {
+        transform: "Impute".into(),
+        group: None,
+        reason,
+    });
+}
+
+/// A float column with every `-0.0` read as `0.0` (adding `0.0` does it and
+/// leaves every other value, `NaN` included, as it was); any other column as it is.
+fn unsigned_zero(column: &ArrayRef) -> ArrayRef {
+    use arrow::array::Float32Array;
+    if let Some(floats) = column.as_any().downcast_ref::<Float64Array>() {
+        return Arc::new(floats.unary::<_, arrow::datatypes::Float64Type>(|x| x + 0.0));
+    }
+    if let Some(floats) = column.as_any().downcast_ref::<Float32Array>() {
+        return Arc::new(floats.unary::<_, arrow::datatypes::Float32Type>(|x| x + 0.0));
+    }
+    column.clone()
+}
+
+/// Whether a cell is one the impute fills: null or `NaN` (an infinite cell is
+/// the caller's value and is kept).
+fn needs_fill(col: &Float64Array, row: usize) -> bool {
+    col.is_null(row) || col.value(row).is_nan()
+}
+
+/// The value column of a statistic fill: each cell as it is, or its fill.
+fn per_row_values(col: &Float64Array, fills: &[f64]) -> ArrayRef {
+    let values: Vec<f64> = (0..col.len())
+        .map(|row| if needs_fill(col, row) { fills[row] } else { col.value(row) })
+        .collect();
+    Arc::new(Float64Array::from(values))
+}
+
+/// The value column of `method="value"`: the one constant, of the column's own
+/// kind, written over each missing cell and into each of the `n_imputed` rows.
+fn constant_values(
+    value_col: &ArrayRef,
+    options: &ImputeOptions<'_>,
+    field: &str,
+    n_imputed: usize,
+    door: &str,
+) -> Result<FilledValues, String> {
+    let kind = ValueKind::of(value_col.data_type());
+    let literal = resolve_literal(options.value, kind, door, field)?;
+    let door_error = |e: arrow::error::ArrowError| format!("{door}: {e}");
+    // A numeric column is read as `Float64`, where a `NaN` is a missing cell too.
+    let (base, missing): (ArrayRef, BooleanArray) = if kind == ValueKind::Numbers {
+        let col = float64_column(value_col, door, field)?;
+        let missing = (0..col.len()).map(|row| Some(needs_fill(&col, row))).collect();
+        (Arc::new(col), missing)
+    } else {
+        (value_col.clone(), arrow::compute::is_null(value_col).map_err(door_error)?)
+    };
+    let dtype = base.data_type().clone();
+    let constant = Scalar::new(fill_array(&literal, &dtype, 1, door, field)?);
+    Ok(FilledValues {
+        callers: arrow::compute::kernels::zip::zip(&missing, &constant, &base).map_err(door_error)?,
+        imputed: fill_array(&literal, &dtype, n_imputed, door, field)?,
+    })
+}
+
+/// For every output row, which of the two columns `interleave` reads it from
+/// (0 the caller's, 1 the imputed) and its place there: each imputed row lands
+/// before the caller row at its slot.
+fn insertion_picks(n_rows: usize, imputed: &[Imputed]) -> Vec<(usize, usize)> {
+    let mut picks = Vec::with_capacity(n_rows + imputed.len());
+    let mut next = 0;
+    for slot in 0..=n_rows {
+        while next < imputed.len() && imputed[next].slot == slot {
+            picks.push((1, next));
+            next += 1;
+        }
+        if slot < n_rows {
+            picks.push((0, slot));
+        }
+    }
+    picks
+}
+
+/// The statistic fill of every missing cell and every imputed row: a series'
+/// own statistic, or with a `frame` the statistic of the usable values inside
+/// each fill's window in key order, where a window with none takes the series'
+/// statistic and a series with none takes the whole column's (each warned).
+fn statistic_fills(
+    stat: Statistic,
+    col: &Float64Array,
+    frame: Option<(Option<i64>, Option<i64>)>,
+    layout: &Layout<'_>,
+    ctx: &TransformContext,
+) -> StatisticFills {
     // The whole-column statistic, computed once up front. It serves two
-    // fallback cases below: a row whose groupby key is null (belongs to no
-    // group) and a group whose own cleaned value set is empty. When even the
-    // whole column has no usable values (a pathological empty-batch input),
-    // `degenerate_default` reproduces the pre-groupby implementation's
-    // degenerate return (`0.0` for mean/median, `±f64::INFINITY` for
-    // min/max) — unchanged from before this transform supported grouping.
-    // `fill_value_for` returns `None` only when `method` is data-dependent
-    // AND the restricted value set is empty (`method = "value"` never does),
-    // so this warns exactly the pathological-input case.
-    let whole_column_fv = fill_value_for(&col, None, &spec.method, spec.value);
-    if whole_column_fv.is_none() {
+    // fallback cases below: a row that belongs to no series and a series whose
+    // own usable values are none. When even the whole column has none (a
+    // pathological empty-batch input), `degenerate_default` is the pre-groupby
+    // implementation's degenerate return.
+    let whole = stat.of(clean_float64_values(col, None));
+    if whole.is_none() {
         ctx.warn(TransformWarning::FallbackApplied {
             transform: "Impute".into(),
             group: None,
             reason: format!(
                 "the column has no {USABLE} values at all; used the {} method's \
                  degenerate default instead",
-                spec.method
+                stat.name()
             ),
         });
     }
-    let whole_column_fill = whole_column_fv.unwrap_or_else(|| degenerate_default(&spec.method));
+    let whole_fill = whole.unwrap_or_else(|| stat.degenerate_default());
 
-    let mut row_fill = vec![f64::NAN; n_rows];
-    let mut assigned = vec![false; n_rows];
-    let mut group_fill_values: Vec<f64> = Vec::with_capacity(partition.groups.len());
-    for (key, rows) in &partition.groups {
-        // A group whose own cleaned value set is empty (no value in the
-        // group is usable: each is null, NaN or infinite) falls back to the whole-column statistic
-        // instead of `fill_value_for`'s degenerate return — see the module
-        // doc. Appended key rows for this group read the same value via
-        // `group_fill_values`/`groups.fill_values`.
-        let group_fv = fill_value_for(&col, Some(rows), &spec.method, spec.value);
-        // `groupby.is_empty()` means this loop's ONE key is the implicit
-        // whole-batch group (`group_partition_multi`'s empty-`group_cols`
-        // contract): its `rows` cover every row in original order, so
-        // `fill_value_for(&col, Some(rows), ...)` here is provably identical
-        // to the `fill_value_for(&col, None, ...)` call above — same data,
-        // same computation. Warning here too would double-fire the SAME
-        // degenerate condition already reported at `whole_column_fv` above,
-        // and `describe_group_keys(&[], &[])` would format it as an empty
-        // string (`group: Some("")`), breaking the documented contract that
-        // `group: None` means "genuinely the whole frame" (reviewer finding,
-        // post-#162 close). Skip it; the ungrouped case is fully covered by
-        // the `whole_column_fv` check.
-        if group_fv.is_none() && !groupby.is_empty() {
+    // A frame open on both sides is the series' whole statistic.
+    let frame = frame.filter(|&frame| frame != (None, None));
+    // Rows that belong to no series keep the whole column's statistic.
+    let mut per_row = vec![whole_fill; col.len()];
+    let mut imputed: Vec<Vec<f64>> = Vec::with_capacity(layout.rows_of.len());
+    for (index, rows) in layout.rows_of.iter().enumerate() {
+        let label = &layout.series.labels[index];
+        let own = stat.of(clean_float64_values(col, Some(rows)));
+        // `label` is `None` for the one series that is the whole frame: its
+        // degenerate case is already reported at `whole` above, and warning
+        // here too would double-fire it with an empty group name.
+        if let (None, Some(label)) = (own, label) {
             ctx.warn(TransformWarning::FallbackApplied {
                 transform: "Impute".into(),
-                group: Some(describe_group_keys(groupby, key)),
+                group: Some(label.clone()),
                 // `Display`'s `Some(g)` arm already renders `"group {g} "`
-                // ahead of this text (`"{transform}: group {g} {reason}"`),
-                // so this clause must not repeat "group" itself — it did
-                // ("group g=b the group has no ...") until this fix.
+                // ahead of this text, so this clause must not repeat "group".
                 reason: format!(
                     "has no {USABLE} values; the whole column's statistic was used instead"
                 ),
             });
         }
-        let fv = group_fv.unwrap_or(whole_column_fill);
-        group_fill_values.push(fv);
-        for &r in rows {
-            row_fill[r] = fv;
-            assigned[r] = true;
+        let fill = own.unwrap_or(whole_fill);
+        for &row in rows {
+            per_row[row] = fill;
         }
+        let mut series_imputed = vec![fill; layout.missing[index].len()];
+        if let Some(frame) = frame {
+            let entries = match &layout.key {
+                Some(key) => key_ordered(rows, &key.ranks, &layout.missing[index]),
+                None => rows.iter().map(|&row| Entry::Caller(row)).collect(),
+            };
+            let mut fell_back = 0_usize;
+            for (position, entry) in entries.iter().enumerate() {
+                if matches!(entry, Entry::Caller(row) if !needs_fill(col, *row)) {
+                    continue;
+                }
+                let window = frame_range((position, position), frame, entries.len());
+                let value = window_statistic(stat, col, &entries, window).unwrap_or_else(|| {
+                    fell_back += 1;
+                    fill
+                });
+                match entry {
+                    Entry::Caller(row) => per_row[*row] = value,
+                    Entry::Imputed(i) => series_imputed[*i] = value,
+                }
+            }
+            // A series with no usable value of its own already said so above.
+            if fell_back > 0 && own.is_some() {
+                ctx.warn(frame_fallback(label.as_deref(), fell_back, stat));
+            }
+        }
+        imputed.push(series_imputed);
     }
-    // A row whose groupby key contains a null value belongs to no group
-    // (`group_partition_multi`'s null-key policy). It still needs a fill
-    // value to keep this transform row-preserving, so it falls back to the
-    // same whole-column statistic the ungrouped path would use. This never
-    // triggers when `groupby` is empty (every row is in the one implicit
-    // group) or has no null keys. Reported once (not per row) — and only for
-    // the PARTIAL case (some, not all, rows null-keyed): when EVERY row is
-    // null-keyed (`null_keyed_rows == n_rows`), `group_partition_multi`
-    // already pushed `TransformWarning::GroupKeyAllNull` for this exact
-    // condition, whose `FillFromWholeBatch` disposition text ("the
-    // whole batch was used as one ungrouped computation instead") already
-    // says what this rollup would restate — reporting both reads as two
-    // problems for the one condition (wave-1 close remediation, reviewer
-    // finding).
-    let null_keyed_rows = assigned.iter().filter(|&&a| !a).count();
-    if null_keyed_rows > 0 && null_keyed_rows < n_rows {
-        ctx.warn(TransformWarning::FallbackApplied {
+    StatisticFills { per_row, imputed }
+}
+
+/// The notice that `rows` fills of a series had no usable value inside their
+/// frame and took the series' whole statistic.
+fn frame_fallback(label: Option<&str>, rows: usize, stat: Statistic) -> TransformWarning {
+    let name = stat.name();
+    match label {
+        Some(label) => TransformWarning::FallbackApplied {
+            transform: "Impute".into(),
+            group: Some(label.to_string()),
+            reason: format!(
+                "has {rows} row(s) with no {USABLE} value within the frame; the group's whole \
+                 {name} was used instead"
+            ),
+        },
+        None => TransformWarning::FallbackApplied {
             transform: "Impute".into(),
             group: None,
             reason: format!(
-                "{null_keyed_rows} row(s) have a null groupby key; the whole column's \
-                 statistic was used instead"
+                "{rows} row(s) have no {USABLE} value within the frame; the whole column's \
+                 {name} was used instead"
             ),
-        });
+        },
     }
-    for (r, is_assigned) in assigned.iter().enumerate() {
-        if !is_assigned {
-            row_fill[r] = whole_column_fill;
-        }
-    }
-
-    let mut imputed: Vec<f64> = Vec::with_capacity(n_rows);
-    for (i, &fill) in row_fill.iter().enumerate() {
-        if col.is_null(i) {
-            imputed.push(fill);
-        } else {
-            let v = col.value(i);
-            imputed.push(if v.is_nan() { fill } else { v });
-        }
-    }
-
-    let mut columns: Vec<ArrayRef> = (0..batch.num_columns())
-        .map(|i| batch.column(i).clone())
-        .collect();
-    columns[field_col_idx] = Arc::new(Float64Array::from(imputed));
-
-    let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
-    fields[field_col_idx] = Field::new(&spec.field, DataType::Float64, false);
-
-    // `key=`/`keyvals=` (Vega semantics — see the module doc).
-    if let Some(key_name) = &spec.key {
-        let key_col_idx = schema.index_of(key_name).map_err(|_| {
-            PyValueError::new_err(format!("data_impute: key column '{key_name}' not found"))
-        })?;
-        if key_col_idx == field_col_idx {
-            return Err(PyValueError::new_err(format!(
-                "data_impute: key column '{key_name}' cannot be the same as the imputed field '{}'",
-                spec.field
-            )));
-        }
-        if groupby_col_indices.contains(&key_col_idx) {
-            return Err(PyValueError::new_err(format!(
-                "data_impute: key column '{key_name}' cannot also be a groupby column"
-            )));
-        }
-        let key_dtype = schema.field(key_col_idx).data_type().clone();
-        if !is_groupby_supported_dtype(&key_dtype) {
-            return Err(PyValueError::new_err(format!(
-                "data_impute: key column '{key_name}' has unsupported dtype {key_dtype:?}; \
-                 supported: {GROUPBY_SUPPORTED_DTYPES}"
-            )));
-        }
-
-        let groups = GroupContext {
-            partition: &partition,
-            col_indices: &groupby_col_indices,
-            fill_values: &group_fill_values,
-        };
-        let key_meta = KeyMeta { name: key_name, col_idx: key_col_idx, dtype: &key_dtype };
-        if let Some(appended_cols) =
-            generate_missing_key_rows(spec, batch, &schema, field_col_idx, &key_meta, &groups)?
-        {
-            for (idx, field) in fields.iter_mut().enumerate() {
-                if idx == field_col_idx || idx == key_col_idx || groupby_col_indices.contains(&idx) {
-                    continue;
-                }
-                // Every other column may carry a null in an appended row.
-                *field = Field::new(field.name(), field.data_type().clone(), true);
-            }
-            for (idx, appended_col) in appended_cols.into_iter().enumerate() {
-                columns[idx] =
-                    arrow::compute::concat(&[columns[idx].as_ref(), appended_col.as_ref()])
-                        .map_err(|e| PyValueError::new_err(format!("data_impute: {e}")))?;
-            }
-        }
-    }
-
-    let out_schema = Arc::new(Schema::new(fields));
-    RecordBatch::try_new(out_schema, columns)
-        .map_err(|e| PyValueError::new_err(format!("data_impute: {e}")))
-}
-
-fn validate_method(method: &str) -> PyResult<()> {
-    crate::transform::vocabulary::check_declared(METHODS, "data_impute", "method", method)
-}
-
-/// The fill value for one method, restricted to `rows` when given (a group's
-/// row indices) or the whole column when `None`. With `rows = None`, this
-/// iterates the column in the exact same order (`0..len`) the pre-groupby
-/// implementation always did, so the ungrouped path's arithmetic — including
-/// summation order for `mean` — is unchanged.
-///
-/// Returns `None` when `method` is `mean`/`median`/`min`/`max` and the
-/// restricted value set is empty (no value at `rows` is usable: each is null, NaN or infinite) — the
-/// caller is expected to fall back to a wider window (see `apply`'s
-/// `whole_column_fill`) rather than accept this function's own degenerate
-/// default. `method = "value"` never returns `None`, since the constant
-/// doesn't depend on the data. `method` is assumed already validated by
-/// [`validate_method`] (called once at `apply`'s entry), so this function is
-/// infallible.
-fn fill_value_for(
-    col: &Float64Array,
-    rows: Option<&[usize]>,
-    method: &str,
-    value: Option<f64>,
-) -> Option<f64> {
-    match method {
-        "value" => Some(value.unwrap_or(0.0)),
-        "mean" => {
-            let vals = clean_float64_values(col, rows);
-            if vals.is_empty() {
-                None
-            } else {
-                Some(vals.iter().sum::<f64>() / vals.len() as f64)
-            }
-        }
-        "median" => {
-            let mut vals = clean_float64_values(col, rows);
-            if vals.is_empty() {
-                None
-            } else {
-                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                let n = vals.len();
-                Some(if n % 2 == 1 {
-                    vals[n / 2]
-                } else {
-                    0.5 * (vals[n / 2 - 1] + vals[n / 2])
-                })
-            }
-        }
-        "min" => {
-            let vals = clean_float64_values(col, rows);
-            if vals.is_empty() {
-                None
-            } else {
-                Some(vals.iter().fold(f64::INFINITY, |a, &b| a.min(b)))
-            }
-        }
-        "max" => {
-            let vals = clean_float64_values(col, rows);
-            if vals.is_empty() {
-                None
-            } else {
-                Some(vals.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b)))
-            }
-        }
-        other => unreachable!(
-            "data_impute: method '{other}' should have been refused by validate_method at apply's entry"
-        ),
-    }
-}
-
-/// `fill_value_for`'s degenerate default for the pathological case where
-/// even the whole column has no usable values — unchanged from the
-/// pre-groupby implementation's behavior. Never reached for `method =
-/// "value"` (that arm of `fill_value_for` never returns `None`).
-fn degenerate_default(method: &str) -> f64 {
-    match method {
-        "mean" | "median" => 0.0,
-        "min" => f64::INFINITY,
-        "max" => f64::NEG_INFINITY,
-        other => unreachable!(
-            "data_impute: method '{other}' should have been refused by validate_method at apply's entry"
-        ),
-    }
-}
-
-/// An integral JSON float (e.g. `1.0`, produced by `json.dumps` for a Python
-/// `float` that happens to be whole-valued) narrowed to `i64`, or `None` if
-/// it has a fractional part or doesn't fit in range. Used to let `keyvals`
-/// coerce a whole-valued float onto an Int key column (M1's "coerce
-/// numerics, raise on the rest" posture) without silently truncating a
-/// genuinely fractional or out-of-range value. The caller is responsible for
-/// further range-checking against the specific signed-integer width.
-/// The upper bound is strict (`f < -(i64::MIN as f64)`) to prevent saturation
-/// before the range check; `i64::MAX as f64` equals 2^63, one above the actual max.
-fn integral_f64_as_i64(f: f64) -> Option<i64> {
-    (f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < -(i64::MIN as f64))
-        .then_some(f as i64)
-}
-
-/// Same as [`integral_f64_as_i64`], narrowed to `u64` (non-negative only).
-/// The caller is responsible for further range-checking against the specific
-/// unsigned-integer width.
-/// The upper bound is strict (`f < 18446744073709551616.0`, i.e. 2^64) to prevent
-/// saturation before the range check; `u64::MAX as f64` equals 2^64, one above the actual max.
-fn integral_f64_as_u64(f: f64) -> Option<u64> {
-    (f.is_finite() && f.fract() == 0.0 && (0.0..18446744073709551616.0).contains(&f))
-        .then_some(f as u64)
-}
-
-/// Range bounds for a signed integer dtype, returning (min, max) as i64.
-/// Called by `keyvalue_from_json` to range-check a keyval before narrowing.
-fn signed_int_bounds(dt: &DataType) -> Option<(i64, i64)> {
-    match dt {
-        DataType::Int8 => Some((i8::MIN as i64, i8::MAX as i64)),
-        DataType::Int16 => Some((i16::MIN as i64, i16::MAX as i64)),
-        DataType::Int32 => Some((i32::MIN as i64, i32::MAX as i64)),
-        DataType::Int64 => Some((i64::MIN, i64::MAX)),
-        _ => None,
-    }
-}
-
-/// Range bounds for an unsigned integer dtype, returning (min, max) as u64.
-/// Called by `keyvalue_from_json` to range-check a keyval before narrowing.
-fn unsigned_int_bounds(dt: &DataType) -> Option<(u64, u64)> {
-    match dt {
-        DataType::UInt8 => Some((u8::MIN as u64, u8::MAX as u64)),
-        DataType::UInt16 => Some((u16::MIN as u64, u16::MAX as u64)),
-        DataType::UInt32 => Some((u32::MIN as u64, u32::MAX as u64)),
-        DataType::UInt64 => Some((u64::MIN, u64::MAX)),
-        _ => None,
-    }
-}
-
-/// Convert one `keyvals` JSON entry to a [`KeyValue`] typed per the key
-/// column's own dtype. A JSON value that doesn't fit that dtype's family
-/// (e.g. a string against a numeric key column, or a non-integral float
-/// against an Int/UInt key column — the genuinely lossy case) is a typed
-/// refusal.
-fn keyvalue_from_json(v: &serde_json::Value, dt: &DataType, key_name: &str) -> PyResult<KeyValue> {
-    let incompatible = || {
-        PyValueError::new_err(format!(
-            "data_impute: keyvals value {v} is not compatible with key column '{key_name}' dtype {dt:?}"
-        ))
-    };
-    match dt {
-        DataType::Utf8 | DataType::LargeUtf8 => {
-            v.as_str().map(|s| KeyValue::Str(s.to_string())).ok_or_else(incompatible)
-        }
-        DataType::Float64 => {
-            v.as_f64().map(|f| KeyValue::Float(f.to_bits())).ok_or_else(incompatible)
-        }
-        // Float32 key values are widened to f64 through an `f32` round-trip
-        // in `group_key::groupby_key_at` — matching that exactly here (not
-        // just `as_f64()`) is required, since a JSON value that isn't
-        // exactly representable in f32 would otherwise never equal any
-        // value actually present in the group.
-        DataType::Float32 => v
-            .as_f64()
-            .map(|f| KeyValue::Float((f as f32 as f64).to_bits()))
-            .ok_or_else(incompatible),
-        // M1's "coerce numerics, raise on the rest": an integral JSON float
-        // (e.g. `1.0`, from `df["month"].unique().to_list()` off a float
-        // column) is accepted; a non-integral float is the genuinely lossy
-        // case and stays refused. Range-check against the target dtype's width,
-        // both in the fast path (as_i64) and the integral-float fallback, to
-        // prevent silent wrapping when narrowing to smaller integer types.
-        DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
-            let (min_bound, max_bound) =
-                signed_int_bounds(dt).unwrap_or_else(|| unreachable!(
-                    "signed_int_bounds should always succeed for Int8/Int16/Int32/Int64"
-                ));
-            let val = v
-                .as_i64()
-                .or_else(|| v.as_f64().and_then(integral_f64_as_i64))
-                .ok_or_else(incompatible)?;
-            if val >= min_bound && val <= max_bound {
-                Ok(KeyValue::Int(val))
-            } else {
-                Err(incompatible())
-            }
-        }
-        DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
-            let (min_bound, max_bound) =
-                unsigned_int_bounds(dt).unwrap_or_else(|| unreachable!(
-                    "unsigned_int_bounds should always succeed for UInt8/UInt16/UInt32/UInt64"
-                ));
-            let val = v
-                .as_u64()
-                .or_else(|| v.as_f64().and_then(integral_f64_as_u64))
-                .ok_or_else(incompatible)?;
-            if val >= min_bound && val <= max_bound {
-                Ok(KeyValue::UInt(val))
-            } else {
-                Err(incompatible())
-            }
-        }
-        DataType::Boolean => v.as_bool().map(|b| KeyValue::Bool(b as u8)).ok_or_else(incompatible),
-        // A `Timestamp` key column is a supported key, but no `keyvals` entry is
-        // read against it: every entry is refused with that cause rather than
-        // named an unsupported dtype or an incompatible value.
-        DataType::Timestamp(..) => Err(PyValueError::new_err(format!(
-            "data_impute: keyvals value {v} cannot be used with key column '{key_name}' of dtype {dt:?}: \
-             a date key column takes no keyvals entry; drop keyvals= to impute over the observed keys"
-        ))),
-        other => Err(PyValueError::new_err(format!(
-            "data_impute: key column '{key_name}' has unsupported dtype {other:?}"
-        ))),
-    }
-}
-
-/// Build the appended rows for `key=`/`keyvals=`, one per (group, missing
-/// key) pair in group-then-key order, or `None` when nothing is missing.
-/// Returns one `ArrayRef` per schema column, each of the same length M —
-/// ready for the caller to `concat` onto the original per-column arrays.
-fn generate_missing_key_rows(
-    spec: &ImputeSpec,
-    batch: &RecordBatch,
-    schema: &SchemaRef,
-    field_col_idx: usize,
-    key: &KeyMeta,
-    groups: &GroupContext,
-) -> PyResult<Option<Vec<ArrayRef>>> {
-    let key_arr = batch.column(key.col_idx);
-
-    // The key universe: `keyvals` if given (first occurrence wins on a
-    // duplicate), else the distinct key values observed across the WHOLE
-    // batch, in first-appearance order.
-    let mut universe: Vec<KeyValue> = Vec::new();
-    let mut seen: BTreeSet<KeyValue> = BTreeSet::new();
-    if let Some(raw_vals) = &spec.keyvals {
-        for v in raw_vals {
-            let kv = keyvalue_from_json(v, key.dtype, key.name)?;
-            if seen.insert(kv.clone()) {
-                universe.push(kv);
-            }
-        }
-    } else {
-        for row in 0..batch.num_rows() {
-            if let Some(kv) = groupby_key_at(key_arr.as_ref(), key.dtype, row) {
-                if matches!(kv, KeyValue::Null) {
-                    continue;
-                }
-                if seen.insert(kv.clone()) {
-                    universe.push(kv);
-                }
-            }
-        }
-    }
-    if universe.is_empty() {
-        return Ok(None);
-    }
-
-    let mut appended_group_keys: Vec<Vec<KeyValue>> = Vec::new();
-    let mut appended_key_values: Vec<KeyValue> = Vec::new();
-    let mut appended_field_values: Vec<f64> = Vec::new();
-
-    for (gi, (group_key, rows)) in groups.partition.groups.iter().enumerate() {
-        let mut present: BTreeSet<KeyValue> = BTreeSet::new();
-        for &row in rows {
-            if let Some(kv) = groupby_key_at(key_arr.as_ref(), key.dtype, row) {
-                if !matches!(kv, KeyValue::Null) {
-                    present.insert(kv);
-                }
-            }
-        }
-        for kv in &universe {
-            if !present.contains(kv) {
-                appended_group_keys.push(group_key.clone());
-                appended_key_values.push(kv.clone());
-                appended_field_values.push(groups.fill_values[gi]);
-            }
-        }
-    }
-
-    let m = appended_field_values.len();
-    if m == 0 {
-        return Ok(None);
-    }
-
-    let mut appended_cols: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
-    for (idx, field) in schema.fields().iter().enumerate() {
-        if idx == field_col_idx {
-            appended_cols.push(Arc::new(Float64Array::from(appended_field_values.clone())));
-        } else if idx == key.col_idx {
-            let wrapped: Vec<Vec<KeyValue>> =
-                appended_key_values.iter().cloned().map(|k| vec![k]).collect();
-            appended_cols.push(
-                materialize_groupby_col(&wrapped, 0, key.dtype).map_err(PyValueError::new_err)?,
-            );
-        } else if let Some(gi) = groups.col_indices.iter().position(|&gci| gci == idx) {
-            appended_cols.push(
-                materialize_groupby_col(&appended_group_keys, gi, &groups.partition.dtypes[gi])
-                    .map_err(PyValueError::new_err)?,
-            );
-        } else {
-            appended_cols.push(arrow::array::new_null_array(field.data_type(), m));
-        }
-    }
-    Ok(Some(appended_cols))
 }
 
 // ─── PyO3 wrapper ──────────────────────────────────────────────────────────
 
-use pyo3::prelude::*;
 use crate::transform::core::TransformSpec;
+use pyo3::prelude::*;
 
 #[pyclass(module = "ferrum._core", name = "Impute")]
 #[derive(Debug, Clone)]
@@ -661,23 +960,34 @@ pub(crate) struct PyImpute(pub(crate) TransformSpec);
 impl PyImpute {
     #[new]
     #[pyo3(signature = (field, *, method = "value", value = None, name = None))]
-    fn new(field: String, method: &str, value: Option<f64>, name: Option<String>) -> Self {
-        PyImpute(TransformSpec::Impute(ImputeSpec {
+    fn new(field: String, method: &str, value: Option<f64>, name: Option<String>) -> PyResult<Self> {
+        let value = value
+            .map(|v| {
+                serde_json::Number::from_f64(v).map(serde_json::Value::Number).ok_or_else(|| {
+                    PyValueError::new_err("Impute: value must be a finite number")
+                })
+            })
+            .transpose()?;
+        Ok(PyImpute(TransformSpec::Impute(ImputeSpec {
             field,
             method: method.into(),
             value,
             groupby: None,
             key: None,
             keyvals: None,
+            frame: None,
             name,
-        }))
+        })))
     }
 
     fn __repr__(&self) -> String {
         match &self.0 {
             TransformSpec::Impute(s) => format!(
                 "Impute(field='{}', method='{}', value={:?}, name={:?})",
-                s.field, s.method, s.value, s.name,
+                s.field,
+                s.method,
+                s.value.as_ref().and_then(serde_json::Value::as_f64),
+                s.name,
             ),
             _ => "Impute(?)".to_string(),
         }
@@ -702,10 +1012,11 @@ mod tests {
         ImputeSpec {
             field: field.into(),
             method: method.into(),
-            value,
+            value: value.map(|v| serde_json::json!(v)),
             groupby: groupby.map(|g| g.into_iter().map(String::from).collect()),
             key: key.map(String::from),
-            keyvals,
+            keyvals: keyvals.map(Keyvals::List),
+            frame: None,
             name: None,
         }
     }
@@ -941,10 +1252,10 @@ mod tests {
         assert!(!out.schema().field(2).is_nullable(), "imputed field column stays non-nullable");
     }
 
-    /// `keyvals=` overrides the batch-wide universe: a value absent from the
-    /// data entirely still generates one appended row per group.
+    /// `keyvals=` adds to the batch-wide universe: a value absent from the
+    /// data entirely still generates one inserted row per group.
     #[test]
-    fn keyvals_override_expands_the_universe_beyond_observed_values() {
+    fn keyvals_add_to_the_universe_beyond_observed_values() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Int64, false),
             Field::new("month", DataType::Float64, false),
@@ -960,14 +1271,14 @@ mod tests {
         )
         .unwrap();
 
-        // Without keyvals: both groups already have {1, 2} — the whole
-        // observed universe — so nothing is missing.
+        // Without keyvals: both groups already have {1, 2}, the whole
+        // observed universe, so nothing is missing.
         let s_default = spec("sales", "mean", None, Some(vec!["g"]), Some("month"), None);
         let out_default = apply(&s_default, &batch).unwrap();
-        assert_eq!(out_default.num_rows(), 4, "no keyvals override: nothing is missing");
+        assert_eq!(out_default.num_rows(), 4, "no keyvals: nothing is missing");
 
         // With keyvals=[1,2,3]: month 3 is now in the universe, missing from
-        // BOTH groups, so 2 rows get appended.
+        // BOTH groups, so 2 rows get inserted.
         let s_override = spec(
             "sales",
             "mean",
@@ -980,10 +1291,9 @@ mod tests {
         assert_eq!(out_override.num_rows(), 6, "keyvals=[1,2,3] adds month 3 for both groups");
         let month = col_f64(&out_override, 1);
         let sales = col_f64(&out_override, 2);
-        let mut appended: Vec<f64> = (4..6).map(|i| sales[i]).collect();
-        appended.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        assert_eq!(appended, vec![15.0, 150.0], "group 1 fill=mean(10,20)=15, group 2 fill=mean(100,200)=150");
-        assert!(month[4..6].iter().all(|&m| m == 3.0));
+        let imputed: Vec<f64> =
+            (0..6).filter(|&i| month[i] == 3.0).map(|i| sales[i]).collect();
+        assert_eq!(imputed, vec![15.0, 150.0], "group 1 fill=mean(10,20)=15, group 2 fill=mean(100,200)=150");
     }
 
     /// `key` without `groupby`: Vega's "no groupby means one implicit group"
@@ -1022,7 +1332,7 @@ mod tests {
     /// The key column's own dtype (Utf8 here) is preserved on appended rows,
     /// not coerced or corrupted.
     #[test]
-    fn key_column_dtype_preserved_on_appended_rows() {
+    fn key_column_dtype_preserved_on_imputed_rows() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Int64, false),
             Field::new("month", DataType::Utf8, false),
@@ -1044,14 +1354,15 @@ mod tests {
         let month = out.column(1).as_any().downcast_ref::<StringArray>().unwrap();
         let g = col_i64(&out, 0);
         let sales = col_f64(&out, 2);
-        let mut appended: Vec<(i64, String, f64)> = (4..6)
+        let mut imputed: Vec<(i64, String, f64)> = (0..6)
+            .filter(|&i| sales[i] == 20.0 || sales[i] == 200.0)
             .map(|i| (g[i], month.value(i).to_string(), sales[i]))
             .collect();
-        appended.sort_by(|a, b| a.0.cmp(&b.0));
+        imputed.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
-            appended,
+            imputed,
             vec![(1, "Mar".to_string(), 20.0), (2, "Jan".to_string(), 200.0)],
-            "appended rows carry a real Utf8 category, not a numeral or corrupted value"
+            "imputed rows carry a real Utf8 category, not a numeral or corrupted value"
         );
     }
 
@@ -1152,36 +1463,6 @@ mod tests {
         let by_day = apply(&by_day, &batch).unwrap();
         assert_eq!(by_day.schema().field(1).data_type(), &zoned);
         assert_eq!(by_day.num_rows(), 3);
-    }
-
-    /// No `keyvals` entry is read against a timestamp key, so each is refused
-    /// with that cause, never named an unsupported dtype (a timestamp is a
-    /// supported key) or an incompatible value.
-    #[test]
-    fn keyvals_on_a_timestamp_key_are_refused_as_incompatible_not_unsupported() {
-        pyo3::Python::initialize();
-        use arrow::array::TimestampMillisecondArray;
-        use arrow::datatypes::TimeUnit;
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("day", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-            Field::new("sales", DataType::Float64, true),
-        ]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(TimestampMillisecondArray::from(vec![0_i64, 1])),
-                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
-            ],
-        )
-        .unwrap();
-        let s = spec("sales", "mean", None, None, Some("day"), Some(vec![serde_json::json!(5)]));
-        let msg = apply(&s, &batch).unwrap_err().to_string();
-        assert_eq!(
-            msg,
-            "ValueError: data_impute: keyvals value 5 cannot be used with key column 'day' of dtype \
-             Timestamp(Millisecond, None): a date key column takes no keyvals entry; drop keyvals= to \
-             impute over the observed keys"
-        );
     }
 
     /// An unsupported key dtype is refused with the one shared supported-dtypes
@@ -1387,8 +1668,7 @@ mod tests {
         );
     }
 
-    /// Fix 4: M1's "coerce numerics, raise on the rest" — an integral JSON
-    /// float against an Int key column is a numeric, not a dtype mismatch.
+    /// An integral JSON float against an Int key column is a numeric, not a dtype mismatch.
     #[test]
     fn keyvals_integral_float_coerces_onto_int_key_column() {
         let schema = Arc::new(Schema::new(vec![
@@ -1531,7 +1811,7 @@ mod tests {
     /// on an appended row, previously unreached by any fixture in either
     /// suite.
     #[test]
-    fn appended_row_leaves_unrelated_column_null_and_widens_its_nullability() {
+    fn imputed_row_leaves_unrelated_column_null_and_widens_its_nullability() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("g", DataType::Int64, false),
             Field::new("month", DataType::Int64, false),
@@ -1558,14 +1838,16 @@ mod tests {
             "'note' must widen to nullable once a row is appended"
         );
         let note = out.column(3).as_any().downcast_ref::<StringArray>().unwrap();
-        assert!(note.is_null(4), "appended row 0 leaves 'note' null");
-        assert!(note.is_null(5), "appended row 1 leaves 'note' null");
-        for i in 0..4 {
-            assert!(!note.is_null(i), "original row {i}'s 'note' must stay untouched");
+        let sales = col_f64(&out, 2);
+        let kept: Vec<&str> = (0..6).filter(|&i| !note.is_null(i)).map(|i| note.value(i)).collect();
+        assert_eq!(kept, vec!["p", "q", "r", "s"], "original rows keep their 'note', in order");
+        for i in 0..6 {
+            let is_original = [10.0, 30.0, 100.0, 300.0].contains(&sales[i]);
+            assert_eq!(note.is_null(i), !is_original, "row {i}: only an imputed row has a null 'note'");
         }
     }
 
-    /// Finding 1 (cycle 3): the 64-bit boundary (2^63 for signed, 2^64 for unsigned)
+    /// The 64-bit boundary (2^63 for signed, 2^64 for unsigned)
     /// must refuse, not saturate to the max representable value. The hardening tightens
     /// the upper bound from `f <= i64::MAX as f64` (which equals 2^63, one above actual max)
     /// to `f < -(i64::MIN as f64)` (which equals 2^63). `2^63` itself is a keyval user might
@@ -1728,7 +2010,7 @@ mod tests {
         assert!(ctx.warnings.borrow().is_empty());
     }
 
-    /// Rust-quality-reviewer finding 1 (post-#162 close): an UNGROUPED
+    /// An UNGROUPED
     /// `Impute` (no `groupby`) with a data-dependent method over a wholly
     /// null/NaN column used to double-fire — one `FallbackApplied { group:
     /// None, .. }` from the `whole_column_fv` check, and a SECOND
@@ -1794,7 +2076,7 @@ mod tests {
         assert_eq!(filled.value(2), 15.0, "the null row takes the whole column's mean");
 
         let warnings = ctx.warnings.borrow();
-        // Wave-1 close remediation (reviewer finding): an all-null groupby
+        // An all-null groupby
         // key used to ALSO push a `FallbackApplied` from the null-keyed-row
         // rollup below `GroupKeyAllNull` — the same condition reported
         // twice. Exactly one warning total now: `GroupKeyAllNull` alone

@@ -640,7 +640,7 @@ def test_a_boxplot_by_a_date_ordinal_reaches_the_band_axis_refusal():
 
 
 # ---------------------------------------------------------------------------
-# transform_impute over a date (appended rows, as every other key dtype)
+# transform_impute over a date (each imputed row inserted at its key's place, as for every other key dtype)
 # ---------------------------------------------------------------------------
 
 
@@ -658,6 +658,7 @@ def test_impute_keyed_by_a_date_adds_the_series_missing_row():
     frame = _series_missing_its_last_day()
     impute = fm.transform_impute("v", value=0, key="day", groupby=["h"])
     chart = fm.Chart(frame).transform(impute).mark_point().encode(x="day", y="v", color="h")
+    # series y ends the frame, so its missing last day is inserted at the end of the frame
     written_out = pl.concat(
         [frame, pl.DataFrame({"day": [_DAYS[2]], "h": ["y"], "v": [0.0]})], how="vertical"
     )

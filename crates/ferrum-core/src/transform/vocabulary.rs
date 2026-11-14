@@ -114,11 +114,38 @@ pub(crate) fn require_field<V: FieldOperand>(
 /// `<door>: unknown <param> '<s>'; expected a|b|c`, the rendering
 /// [`Vocabulary::parse_or_refuse`] uses.
 pub(crate) fn check_declared(declared: &[&str], door: &str, param: &str, s: &str) -> PyResult<()> {
+    refuse_undeclared(declared, door, param, s).map_err(PyValueError::new_err)
+}
+
+/// [`check_declared`]'s refusal as plain text, for a core shared by a PyO3
+/// door and the render, which wrap it each in their own error type.
+pub(crate) fn refuse_undeclared(
+    declared: &[&str],
+    door: &str,
+    param: &str,
+    s: &str,
+) -> Result<(), String> {
     if declared.contains(&s) {
         return Ok(());
     }
-    Err(PyValueError::new_err(format!(
-        "{door}: unknown {param} '{s}'; expected {}",
-        declared.join("|")
-    )))
+    Err(format!("{door}: unknown {param} '{s}'; expected {}", declared.join("|")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The plain-text core and its PyO3 wrapper refuse with one text, and the
+    /// core accepts exactly the declared spellings.
+    #[test]
+    fn the_declared_check_and_its_reason_spell_one_refusal() {
+        pyo3::Python::initialize();
+        let declared = ["a", "b"];
+        assert_eq!(refuse_undeclared(&declared, "door", "method", "a"), Ok(()));
+        let plain = refuse_undeclared(&declared, "door", "method", "z").unwrap_err();
+        assert_eq!(plain, "door: unknown method 'z'; expected a|b");
+        let wrapped = check_declared(&declared, "door", "method", "z").unwrap_err().to_string();
+        assert_eq!(wrapped, format!("ValueError: {plain}"));
+        assert!(check_declared(&declared, "door", "method", "b").is_ok());
+    }
 }

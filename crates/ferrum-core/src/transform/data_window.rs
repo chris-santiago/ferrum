@@ -568,17 +568,20 @@ impl PeerGroups {
 /// ≥ 0 (rows after it), and `None` on either side means unbounded. A frame that
 /// falls entirely outside the partition yields an empty range rather than
 /// wrapping around to the whole partition.
-fn frame_range(
+pub(crate) fn frame_range(
     anchor: (usize, usize),
     (preceding, following): (Option<i64>, Option<i64>),
     len: usize,
 ) -> (usize, usize) {
-    let lo = preceding.map_or(0, |p| anchor.0 as i64 + p);
-    let hi = following.map_or(len as i64 - 1, |f| anchor.1 as i64 + f);
-    if hi < lo || hi < 0 || lo >= len as i64 {
+    // Saturating, and clamped to the partition before any cast, so an offset of
+    // any `i64` reads to the partition's edge instead of wrapping.
+    let last = len as i64 - 1;
+    let lo = preceding.map_or(0, |p| (anchor.0 as i64).saturating_add(p)).max(0);
+    let hi = following.map_or(last, |f| (anchor.1 as i64).saturating_add(f)).min(last);
+    if hi < lo {
         return (0, 0);
     }
-    (lo.max(0) as usize, (hi as usize + 1).min(len))
+    (lo as usize, hi as usize + 1)
 }
 
 /// Build sort order. Returns indices in sorted order.
@@ -1908,4 +1911,60 @@ mod tests {
         assert_eq!(col_values(&twin, 1), vec![1.0, 1.0, 4.0, 8.0], "the running sum of the finite values");
         assert_eq!(col_values(&twin, 3), vec![1.0, 1.0, 2.0, 3.0], "the running count of the finite values");
     }
+    /// A frame offset of any `i64` reads to the batch's edge. `(0, i64::MAX)`
+    /// wrapped to a window before the row, and `(i64::MIN, 0)` overflowed.
+    #[test]
+    fn a_frame_offset_past_the_batch_reads_to_its_edge() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        for (frame, expected) in [
+            ((Some(0), Some(i64::MAX)), vec![10.0, 9.0, 7.0, 4.0]),
+            ((Some(i64::MIN), Some(0)), vec![1.0, 3.0, 6.0, 10.0]),
+            ((Some(i64::MIN), Some(i64::MAX)), vec![10.0; 4]),
+            ((None, Some(i64::MAX)), vec![10.0; 4]),
+        ] {
+            let spec = DataWindowSpec {
+                sort: Some(vec!["t".into()]),
+                frame: Some(frame),
+                ..window_spec(vec![op("sum", Some("v"), "s")])
+            };
+            let out = apply(&spec, &batch).unwrap();
+            assert_eq!(col_values(&out, 2), expected, "{frame:?}");
+        }
+    }
+
+    /// Wherever the unclamped bounds do not overflow, the clamped range is the
+    /// range they give, checked against `i128` arithmetic.
+    #[test]
+    fn frame_range_matches_the_unclamped_bounds_wherever_they_do_not_overflow() {
+        let ends: Vec<Option<i64>> = std::iter::once(None).chain((-8..=8).map(Some)).collect();
+        for len in 0..6_usize {
+            for anchor in 0..6_usize {
+                for &preceding in &ends {
+                    for &following in &ends {
+                        let lo = preceding.map_or(0_i128, |p| anchor as i128 + p as i128);
+                        let hi = following.map_or(len as i128 - 1, |f| anchor as i128 + f as i128);
+                        let expected = if hi < lo || hi < 0 || lo >= len as i128 {
+                            (0, 0)
+                        } else {
+                            (lo.max(0) as usize, ((hi + 1) as usize).min(len))
+                        };
+                        let got = frame_range((anchor, anchor), (preceding, following), len);
+                        assert_eq!(got, expected, "len {len} anchor {anchor} {preceding:?} {following:?}");
+                    }
+                }
+            }
+        }
+    }
+
 }

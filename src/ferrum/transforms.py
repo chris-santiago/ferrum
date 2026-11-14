@@ -24,9 +24,17 @@ contract.  Do not change the inner-dict key.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Sequence
+import datetime
+from typing import TYPE_CHECKING, Any, Sequence, cast
 
-from ferrum._validate import coerce_finite_real, is_real_number
+import numpy as np
+
+from ferrum._validate import (
+    coerce_finite_real,
+    coerce_frame,
+    coerce_impute_options,
+    is_real_number,
+)
 from ferrum.position import _validate_stack_offset
 
 if TYPE_CHECKING:
@@ -718,7 +726,7 @@ def transform_window(
     *window_transforms: dict,
     sort: Sequence[str] | None = None,
     groupby: Sequence[str] | None = None,
-    frame: tuple[int | None, int | None] | None = None,
+    frame: Sequence[int | None] | None = None,
     ignore_peers: bool = False,
 ) -> dict:
     """Window transform (ranking, lag/lead, rolling aggregates).
@@ -736,8 +744,12 @@ def transform_window(
         ``1, 1, 2`` for ``dense_rank``).
     groupby : list of str, optional
         Partition-by columns.
-    frame : tuple of (int or None, int or None), optional
-        Window frame bounds: (preceding, following). None means unbounded.
+    frame : pair of (int or None), optional
+        Window frame bounds: (preceding, following), a tuple, list, ``range`` or
+        1-D numpy array of two ends. None means unbounded.
+        Each end is None or an integer a 64-bit row offset holds; anything
+        else raises ``ValueError`` at construction, and an offset past the
+        batch reads to its edge.
     ignore_peers : bool, default False
         Whether a rolling frame ignores *peers* — rows tied on every ``sort``
         column. Left ``False`` (the same default *setting* Vega chose), a
@@ -781,7 +793,7 @@ def transform_window(
         _reject_bare_string_groupby(groupby, where="transform_window")
         spec["groupby"] = list(groupby)
     if frame is not None:
-        spec["frame"] = list(frame)
+        spec["frame"] = coerce_frame("transform_window", frame)
     # Omitted at the default so specs built before this parameter existed
     # serialize byte-identically.
     if ignore_peers:
@@ -995,40 +1007,170 @@ def transform_loess(
     return spec
 
 
-def _normalize_keyval(value: object, *, key: str | None) -> bool | int | float | str:
-    """Normalize one ``transform_impute(keyvals=...)`` element to a plain,
-    JSON-serializable Python scalar.
+_IMPUTE_KINDS = "string, number, bool, date or datetime"
 
-    Mirrors ``_expr_literal``'s ABC-based (not concrete-type) numeric/bool
-    acceptance boundary: a numpy scalar from ``df[col].unique()`` — the
-    routine way to build a ``keyvals`` list off the key column itself —
-    normalizes the same way its Python-native twin does (``np.int64`` and
-    ``np.float64`` both accepted), rather than reaching the JSON encoder as
-    an unserializable numpy scalar (``TypeError: Object of type int64 is
-    not JSON serializable``, naming neither ``transform_impute`` nor
-    ``keyvals``). Unlike ``_expr_literal``, this returns a plain scalar
-    rather than a grammar-literal string, since ``keyvals`` rides the wire
-    as JSON, not an expression. The number is normalized by
-    :func:`ferrum._validate.coerce_finite_real`, as ``_expr_literal``'s is.
+#: The registry params of ``impute`` that are not options of the impute rule: the
+#: transform's own columns and its output name. Every other param is an option
+#: both doors accept.
+_IMPUTE_NOT_OPTIONS = frozenset({"field", "groupby", "key", "name"})
+
+
+def _finite_real(label: str, value: object) -> int | float:
+    """*value* in its wire form, refused in *label*'s voice unless it is a finite real number."""
+    return cast("int | float", coerce_finite_real(label, value, required=True))
+
+
+def _temporal_epoch_ms(label: str, value: object) -> dict[str, int] | None:
+    """*value* as a tagged instant ``{"epoch_ms": n}`` when it is a date, datetime or numpy ``datetime64``, else ``None``.
+
+    The tag tells the engine this number is an instant, which a temporal column
+    or key reads as that time and a numeric, text or boolean one refuses, where
+    a bare number is just a number. The milliseconds come from
+    :func:`ferrum.annotation.coords.temporal_to_whole_epoch_ms`, which is exact
+    integer arithmetic. The wire holds a whole millisecond, so a value finer
+    than that is refused (not rounded), as is a not-a-time (``NaT``), in
+    *label*'s voice.
     """
-    if isinstance(value, bool):
-        return value
-    # Accept numpy bool scalars the same way we accept their Python twin.
-    try:
-        import numpy as np
+    if not isinstance(value, (datetime.date, np.datetime64)):
+        return None
+    from ferrum.annotation.coords import _SubMillisecondError, temporal_to_whole_epoch_ms
 
-        if isinstance(value, np.bool_):
-            return bool(value)
-    except (ImportError, AttributeError):
-        pass
+    try:
+        millis = temporal_to_whole_epoch_ms(value)
+    except _SubMillisecondError:
+        raise ValueError(
+            f"{label}: {value!r} is finer than a millisecond, which an impute value or key "
+            "cannot carry; round it to a whole millisecond"
+        ) from None
+    except ValueError as exc:
+        raise ValueError(f"{label}: {exc}") from exc
+    return {"epoch_ms": millis}
+
+
+def _impute_literal(label: str, value: object) -> bool | int | float | str | dict[str, int] | None:
+    """Normalize one impute literal (a ``value=`` or a ``keyvals`` element) to its wire form.
+
+    The one dispatch both options read: a bool or ``numpy.bool_`` is a bool, a
+    string is kept, a date, datetime or numpy ``datetime64`` is a tagged instant
+    (:func:`_temporal_epoch_ms`), and a real number is its finite wire form
+    (:func:`ferrum._validate.coerce_finite_real`). Anything else returns
+    ``None`` for the caller to refuse in its own words. Which of these a column
+    or key can hold is the engine's to check, since only it sees the dtype.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
     if isinstance(value, str):
         return value
-    where = f" for key {key!r}" if key is not None else ""
+    instant = _temporal_epoch_ms(label, value)
+    if instant is not None:
+        return instant
     if is_real_number(value):
-        return coerce_finite_real(f"transform_impute: keyvals value{where}", value)
-    raise TypeError(
-        f"transform_impute: {type(value).__name__} {value!r} not allowed in "
-        f"keyvals{where}; accepted: string, number, or bool"
+        return _finite_real(label, value)
+    return None
+
+
+def _normalize_keyval(
+    value: object, *, key: str | None, door: str = "transform_impute"
+) -> bool | int | float | str | dict[str, int]:
+    """Normalize one ``keyvals`` element to a plain, JSON-serializable wire literal.
+
+    A numpy scalar from ``df[col].unique()``, the routine way to build a
+    ``keyvals`` list off the key column itself, normalizes the same way its
+    Python-native twin does, through :func:`_impute_literal`. *door* is the
+    public call the refusal speaks as (``"Y(impute=...)"`` on the encoding dict).
+
+    Raises
+    ------
+    ValueError
+        If the element is of no kind a key holds, or is a number that is not
+        finite, or an instant finer than a millisecond.
+    """
+    where = f" for key {key!r}" if key is not None else ""
+    literal = _impute_literal(f"{door}: keyvals value{where}", value)
+    if literal is None:
+        raise ValueError(
+            f"{door}: {type(value).__name__} {value!r} not allowed in "
+            f"keyvals{where}; accepted: {_IMPUTE_KINDS}"
+        )
+    return literal
+
+
+def _normalize_impute_value(label: str, value: object) -> bool | int | float | str | dict[str, int]:
+    """Normalize an impute ``value=`` to the literal that rides the wire (see :func:`_impute_literal`).
+
+    *label* is the pre-composed door (``"transform_impute(value=...)"``).
+    """
+    literal = _impute_literal(label, value)
+    if literal is None:
+        raise ValueError(
+            f"{label} must be a number, a string, True or False, a date or a datetime, "
+            f"not {type(value).__name__}; received {value!r}"
+        )
+    return literal
+
+
+def _impute_snapshot(options: object) -> object:
+    """Copy an impute option dict so the caller cannot change or drain it afterwards.
+
+    A channel keeps the dict its caller wrote, in the caller's spelling, so this
+    copy is what it stores: a fresh dict. ``keyvals`` that is a ``dict`` (the
+    ``{'start', 'stop', 'step'}`` form) is copied; any other ``keyvals`` that is
+    not a string or bytes is read once into a list (a generator, ``map``, numpy
+    array or Series would otherwise be drained by the first validation). A
+    ``frame`` list is copied and a 1-D numpy array of two integers becomes a tuple; a
+    tuple or ``range`` is immutable and kept, and anything else is left as it is
+    and never read, for the validation to refuse. Validation, every rebuild and
+    the emission then read the same snapshot. A value that is not a dict is
+    returned as it is, for the validation to refuse; the caller's own dict is
+    never changed.
+    """
+    if not isinstance(options, dict):
+        return options
+    snapshot = dict(options)
+    keyvals = snapshot.get("keyvals")
+    if isinstance(keyvals, dict):
+        snapshot["keyvals"] = dict(keyvals)
+    elif keyvals is not None and not isinstance(keyvals, (str, bytes)):
+        try:
+            snapshot["keyvals"] = list(keyvals)
+        except TypeError:
+            pass
+    frame = snapshot.get("frame")
+    if isinstance(frame, list):
+        snapshot["frame"] = list(frame)
+    elif isinstance(frame, np.ndarray) and frame.ndim == 1 and len(frame) == 2:
+        ends = frame.tolist()
+        if all(end is None or type(end) is int for end in ends):
+            snapshot["frame"] = tuple(ends)
+    return snapshot
+
+
+def _impute_options(
+    door: str, options: object, *, key: str | None = None, value_label: str
+) -> dict[str, Any]:
+    """Validate an impute option dict for ``transform_impute`` and the encoding dict.
+
+    Wires :func:`ferrum._validate.coerce_impute_options` to the literal
+    normalizers and to the option names the engine's registry publishes for
+    ``impute`` (the registry's params that are options of the rule, in its
+    order), so a ``Y(impute=...)`` and a ``transform_impute(...)`` refuse the
+    same malformed option in the same words. *door* is the public call the
+    refusals speak as, *key* the key column's name where the door has one, and
+    *value_label* the label ``value`` is refused under.
+    """
+    from ferrum._core import transform_registry
+
+    accepted = [
+        name for name in transform_registry("impute")["params"] if name not in _IMPUTE_NOT_OPTIONS
+    ]
+    if isinstance(options, dict):
+        _reject_bare_string(options.get("keyvals"), where=door, param="keyvals", noun="key values")
+    return coerce_impute_options(
+        door,
+        options,
+        accepted=accepted,
+        normalize_value=lambda value: _normalize_impute_value(value_label, value),
+        normalize_keyval=lambda keyval: _normalize_keyval(keyval, key=key, door=door),
     )
 
 
@@ -1036,22 +1178,41 @@ def transform_impute(
     field: str,
     *,
     method: str = "value",
-    value: float | None = None,
+    value: float | str | bool | datetime.date | np.datetime64 | None = None,
     groupby: Sequence[str] | None = None,
     key: str | None = None,
-    keyvals: Sequence[Any] | None = None,
+    keyvals: Sequence[Any] | dict[str, Any] | None = None,
+    frame: Sequence[int | None] | None = None,
 ) -> dict:
     """Impute missing values in a column.
+
+    A missing value is a null or ``NaN`` cell of ``field``, and, with ``key``,
+    a row a group lacks for a key. Each is filled as ``method`` says. An
+    infinite value is a value, not a gap, and is left as it is. The rule is
+    Vega's keyed imputation, and the encoding dict ``Y(impute={...})`` takes the
+    same options.
 
     Parameters
     ----------
     field : str
-        Column to impute.
+        Column to impute. Any numeric column is read and written as a float; a
+        date, text or boolean column keeps its own dtype and takes a ``value``
+        of its own kind.
     method : str, default "value"
         Imputation method; see ``transform_registry("impute")["methods"]``
-        for the accepted vocabulary.
-    value : float, optional
-        Constant value for method="value".
+        for the accepted vocabulary: ``"value"`` fills a constant, and
+        ``"mean"``, ``"median"``, ``"min"`` and ``"max"`` fill the group's
+        statistic over its usable (non-null, finite) values.
+    value : float, str, bool, datetime.date or datetime.datetime, optional
+        Constant fill for ``method="value"``, of the column's own kind: a
+        number for a numeric column (``0`` when omitted), a string for a text
+        column, ``True`` or ``False`` for a boolean column, and a
+        ``datetime.date``, ``datetime.datetime``, ``numpy.datetime64`` or a
+        number of epoch milliseconds for a date column. A date, text or boolean
+        column has no default, so ``value`` is required there (omitting it
+        raises ``ValueError`` at render time). An instant finer than a
+        millisecond raises ``ValueError`` at construction. Given with another
+        ``method`` it raises ``ValueError`` at render time.
     groupby : list of str, optional
         Impute within groups: the fill value (per ``method``) is computed
         separately for each group, not once across the whole column. A
@@ -1062,24 +1223,47 @@ def transform_impute(
     key : str, optional
         Key column. Within each group (or, with no ``groupby``, the whole
         batch as one implicit group — Vega's "no groupby means one group"
-        rule), a key value present in the key universe (see ``keyvals``)
-        but missing from that group gets one appended row: the group's own
-        columns, the missing key, and that group's own imputed value; every
-        other column is null.
-    keyvals : list or tuple, optional
-        The key universe. **Requires** ``key`` — passing ``keyvals``
+        rule), a key value in the key universe (see ``keyvals``) but missing
+        from that group gets one imputed row: the group's own columns, the
+        missing key and the group's fill; every other column is null. The row
+        is inserted right after the group's last row whose key comes earlier in
+        the key order, or before the group's first row when none does; imputed
+        rows that land at one place keep key order among themselves, and a row
+        the caller wrote never moves. The key order is ascending for a number or
+        a date (``NaN`` last), ``False`` before ``True``, and for text the order
+        each key first appears, ``keyvals`` first.
+    keyvals : list, tuple or dict, optional
+        Keys every group must hold, **added** to the keys the frame holds (the
+        key universe is both). **Requires** ``key`` — passing ``keyvals``
         without ``key`` raises ``ValueError`` at render time, since there
         is no key column for the universe to apply to. Must be a sequence
         (list, tuple, or other iterable), never a bare string — a bare
         string iterates into characters, not key values, and raises
-        ``ValueError`` at construction time.
-        When omitted, the universe is the distinct ``key`` values observed
-        across the whole batch. Each value is typed against the key
+        ``ValueError`` at construction time. A ``datetime.date``,
+        ``datetime.datetime`` or ``numpy.datetime64`` names an instant for a
+        date key. A ``{"start": ..., "stop": ..., "step": ...}`` dict names the
+        numbers from ``start`` (default ``0``) up to, not including, ``stop``
+        by ``step`` (default ``1``, or ``-1`` when ``stop`` is below
+        ``start``); ``stop`` is required, a zero ``step`` and a sequence on a
+        text or boolean key raise ``ValueError`` at render time. Each value is
+        typed against the key
         column's own dtype at render time: a whole-valued float (e.g.
         ``1.0``) coerces onto an integer key column, but a genuinely
         fractional float against an integer key column raises ``ValueError``
         (that coercion would be lossy); a string against a numeric key
         column raises the same way.
+    frame : pair of (int or None), optional
+        A tuple, list, ``range`` or 1-D numpy array of two ends.
+        For ``mean``, ``median``, ``min`` and ``max``: the window each fill
+        reads, ``(preceding, following)`` row offsets with ``None`` for an open
+        end, counted in key order (in row order with no ``key``) with imputed
+        rows counted as rows that hold no value. Default ``(None, None)``, the
+        whole group. A window with no usable value falls back to the group's
+        statistic, then the column's, each with a warning. Each end is ``None``
+        or an integer a 64-bit row offset holds; anything else raises
+        ``ValueError`` at construction, and an offset past the group reads to
+        its edge. Given with ``method="value"`` it raises ``ValueError`` at
+        render time.
 
     Returns
     -------
@@ -1090,7 +1274,9 @@ def transform_impute(
     ------
     ValueError
         If ``groupby`` or ``keyvals`` is a bare string — iterating a
-        string yields individual characters, not column/key values.
+        string yields individual characters, not column/key values; or if
+        ``value``, ``keyvals`` or ``frame`` is malformed, or a literal (a
+        ``value`` or a ``keyvals`` element) is of no accepted kind.
 
     Examples
     --------
@@ -1100,18 +1286,27 @@ def transform_impute(
     'impute'
     >>> t["method"]
     'mean'
+    >>> fm.transform_impute("sales", method="mean", key="month", frame=(-1, 1))["frame"]
+    [-1, 1]
     """
-    spec: dict = {"type": "impute", "field": field, "method": method}
-    if value is not None:
-        spec["value"] = coerce_finite_real("transform_impute(value=...)", value)
+    given = {"method": method, "value": value, "keyvals": keyvals, "frame": frame}
+    options = _impute_options(
+        "transform_impute",
+        {name: option for name, option in given.items() if option is not None},
+        key=key,
+        value_label="transform_impute(value=...)",
+    )
+    spec: dict = {"type": "impute", "field": field, "method": options.get("method", "value")}
+    if "value" in options:
+        spec["value"] = options["value"]
     if groupby is not None:
         _reject_bare_string_groupby(groupby, where="transform_impute")
         spec["groupby"] = list(groupby)
     if key is not None:
         spec["key"] = key
-    if keyvals is not None:
-        _reject_bare_string(keyvals, where="transform_impute", param="keyvals", noun="key values")
-        spec["keyvals"] = [_normalize_keyval(v, key=key) for v in keyvals]
+    for option in ("keyvals", "frame"):
+        if option in options:
+            spec[option] = options[option]
     return spec
 
 
