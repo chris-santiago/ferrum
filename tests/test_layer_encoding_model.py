@@ -67,6 +67,7 @@ from tests.test_null_group_warning import (
     _all_keys_null_fallback_message,
     _all_keys_null_message,
     _facet_key_dropped_message,
+    _facet_sort_partial_message,
     _fit_message,
     _not_drawn,
     _null_key_dropped_message,
@@ -12857,11 +12858,7 @@ def test_a_partial_facet_sort_says_which_values_it_left_unsorted(door):
     """
     chart = _FACET_DECLARATIONS[door](P() + mk("point", _S_ONLY, x="v3", y="w3"))
     svg, caught = _warned(chart.to_svg)
-    assert caught == [
-        'facet sort left the values ["s"] unsorted: their rows in the layer that draws '
-        "them carry no 'y' value, so they sort as values with no rows; the other panels "
-        "are sorted"
-    ]
+    assert caught == [_facet_sort_partial_message(["s"], "'y' value")]
     sums = df.group_by("c").agg(pl.col("y").sum()).sort("y", descending=True)["c"].to_list()
     assert _facet_titles(svg) == [*sums, "s"]
 

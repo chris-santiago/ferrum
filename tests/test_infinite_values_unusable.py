@@ -30,7 +30,6 @@ import pytest
 import ferrum as fm
 from tests._pixel_capture import parse_circles
 from tests._svg_extents import text_elements
-from tests.test_domain_rows_left_out import _domain_warning, _statistic_cut_warning
 from tests.test_null_group_warning import (
     _NO_ROWS_TO_DRAW,
     _layer_message,
@@ -42,10 +41,12 @@ from tests.test_null_group_warning import (
     FIT_NONE,
     FIT_TIED,
     _fit_message,
+    _infinite_warning,
     _panel_fit_message,
     _render_capturing,
     _log_message,
     _slot_message,
+    _statistic_infinite_cut_warning,
     _whole_fit_message,
 )
 
@@ -1084,11 +1085,11 @@ def test_a_plain_mark_skips_an_infinity_on_a_linear_axis_without_a_word():
     assert _outcome(_static(chart(frame))) == _outcome(_static(chart(_null_twin(frame))))
 
 
-def test_an_infinity_on_a_log_scale_keeps_the_explicit_domain_warning():
+def test_an_infinity_on_a_log_scale_is_called_infinite():
     frame = pl.DataFrame({"v": [1.0, 2.0, 3.0, INF], "w": [1.0, 2.0, 3.0, 4.0]})
     chart = C(frame).mark_point().encode(x=fm.X("v", scale=fm.LogScale()), y="w")
     _, shown = _render_capturing(chart.to_svg)
-    assert shown == [_domain_warning("x", "v", 1)]
+    assert shown == [_infinite_warning("x", "v", 1)]
 
 
 _LOG_DOORS: dict[str, Callable[[pl.DataFrame, fm.LogScale], Any]] = {
@@ -1129,13 +1130,13 @@ def test_a_statistic_on_a_log_axis_over_an_infinity_equals_its_null_twin(
 @pytest.mark.parametrize("value", [INF, -INF], ids=["pos-inf", "neg-inf"])
 def test_an_ecdf_on_a_log_axis_over_an_infinity_equals_its_null_twin(value: float):
     """The ECDF keeps the infinite row as a step of its own, which the log axis reports (a
-    ``-inf`` as off-side, a ``+inf`` as crossing the domain); the chart is the null twin's."""
+    ``-inf`` as off-side, a ``+inf`` as reaching infinity); the chart is the null twin's."""
     frame = _frame([*_FINITE[:8], value])
     chart = lambda d: fm.displot(d, x="v", kind="ecdf", log_scale=True)  # noqa: E731
     got, twin = _outcome(_static(chart(frame))), _outcome(_static(chart(_null_twin(frame))))
     _guard_against_a_refusal(twin, "displot ecdf")
     axis_report = (
-        [_statistic_cut_warning("displot", "x", "v", 1)]
+        [_statistic_infinite_cut_warning("displot", "x", "v", 1)]
         if value == INF
         else [_log_message("x", "v", 1)]
     )

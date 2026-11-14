@@ -372,7 +372,10 @@ pub(crate) fn dispatch_mark_groups(mark: &Mark, ctx: &DrawCtx) -> SeriesPartitio
 /// `title=None` writes it), whose sentence then names no field. `cut` is
 /// `true` only for a vertex-unit statistic layer's marks the builder still
 /// draws with some vertices removed; `false` for a mark the builder skips
-/// entirely and for every primitive layer.
+/// entirely and for every primitive layer. `infinite` is `true` when the
+/// units counted are infinite values a `Log` scale admits but cannot place
+/// (no finite domain holds them), reported apart from the finite values an
+/// explicit domain cuts, since a different remedy fixes each.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DomainLeftOut {
     pub(crate) channel: String,
@@ -381,6 +384,7 @@ pub(crate) struct DomainLeftOut {
     pub(crate) categorical: bool,
     pub(crate) entry: Option<String>,
     pub(crate) cut: bool,
+    pub(crate) infinite: bool,
 }
 
 impl DomainLeftOut {
@@ -389,33 +393,36 @@ impl DomainLeftOut {
     /// sum; `None` for every other warning.
     pub(crate) fn from_warning(warning: &super::RenderWarning) -> Option<Self> {
         match warning {
-            super::RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut } => Some(Self {
+            super::RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut, infinite } => Some(Self {
                 channel: channel.clone(),
                 field: field.clone(),
                 rows: *rows,
                 categorical: *categorical,
                 entry: entry.clone(),
                 cut: *cut,
+                infinite: *infinite,
             }),
             _ => None,
         }
     }
 
-    /// Whether `other` reports the same channel, field, voice and outcome,
-    /// so the two tallies sum into one warning.
+    /// Whether `other` reports the same channel, field, voice, outcome and
+    /// reason (a finite cut or an infinity), so the two tallies sum into one
+    /// warning.
     pub(crate) fn same_report(&self, other: &Self) -> bool {
         self.channel == other.channel
             && self.field == other.field
             && self.categorical == other.categorical
             && self.entry == other.entry
             && self.cut == other.cut
+            && self.infinite == other.infinite
     }
 }
 
 impl From<DomainLeftOut> for super::RenderWarning {
     fn from(left_out: DomainLeftOut) -> Self {
-        let DomainLeftOut { channel, field, rows, categorical, entry, cut } = left_out;
-        super::RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut }
+        let DomainLeftOut { channel, field, rows, categorical, entry, cut, infinite } = left_out;
+        super::RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut, infinite }
     }
 }
 
@@ -425,6 +432,48 @@ impl From<DomainLeftOut> for super::RenderWarning {
 /// when `prepare::reads_statistic_output` holds for it.
 pub(crate) struct StatisticVoice {
     pub(crate) entry: String,
+}
+
+/// The rows [`placement_left_out_rows`] finds left out, split by why: a
+/// finite (or categorical) value the explicit domain cannot hold, or an
+/// infinite value a `Log` scale admits but cannot place. A row left out on
+/// one column by a finite value and on another by an infinity is finite (the
+/// widened domain is what the caller changes first).
+#[derive(Default)]
+struct LeftOutRows {
+    finite: std::collections::BTreeSet<usize>,
+    infinite: std::collections::BTreeSet<usize>,
+}
+
+/// Why a row is left out, from the values of its columns that the scale
+/// cannot place: `Some(false)` when any is finite, `Some(true)` when every
+/// one is infinite, `None` when none is left out.
+fn left_out_by_infinity(unplaced: impl IntoIterator<Item = f64>) -> Option<bool> {
+    unplaced.into_iter().fold(None, |reason, x| Some(x.is_infinite() && reason != Some(false)))
+}
+
+/// One statistic axis's left-out rows merged over its primary and secondary
+/// placements: every row left out, and the subset left out only for
+/// infinities (a row finite on any placement is finite).
+fn merge_axis_rows(members: &[&LeftOutRows]) -> (std::collections::BTreeSet<usize>, std::collections::BTreeSet<usize>) {
+    let finite: std::collections::BTreeSet<usize> = members.iter().flat_map(|rows| rows.finite.iter().copied()).collect();
+    let infinite: std::collections::BTreeSet<usize> =
+        members.iter().flat_map(|rows| rows.infinite.iter().copied()).filter(|i| !finite.contains(i)).collect();
+    let all = finite.union(&infinite).copied().collect();
+    (all, infinite)
+}
+
+/// The reasons a vertex-unit mark (`group`'s rows) is left out on an axis
+/// whose left-out rows are `rows` (`infinite_rows` of them for an infinity):
+/// `(finite, infinite)`. A mark with rows of both kinds is reported under
+/// both, each with the remedy that fixes it.
+fn group_left_out_reasons(
+    group: &[usize],
+    rows: &std::collections::BTreeSet<usize>,
+    infinite_rows: &std::collections::BTreeSet<usize>,
+) -> (bool, bool) {
+    let hit = || group.iter().filter(|i| rows.contains(i));
+    (hit().any(|i| !infinite_rows.contains(i)), hit().any(|i| infinite_rows.contains(i)))
 }
 
 /// Which of `ctx.batch`'s rows an explicit domain leaves out for a single
@@ -451,7 +500,7 @@ pub(crate) struct StatisticVoice {
 /// (`prepare::validate_layer_columns`), so an `UnknownColumn` here can only
 /// mean the census and the builder disagree about a column — the drift
 /// class a raster's own `ImagePath` resolver closes for `mark_image`.
-fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
+fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<LeftOutRows, RenderError> {
     let scale = channel_scale(ctx, placement.channel);
     match placement.read {
         PlacementRead::Category => {
@@ -464,13 +513,14 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
                 }
             }
             let n = columns.iter().map(Vec::len).max().unwrap_or(0);
-            Ok((0..n)
+            let finite = (0..n)
                 .filter(|&i| {
                     columns.iter().any(|col| {
                         col.get(i).and_then(|o| o.as_deref()).is_some_and(|v| scale.to_pixel_str(v).is_none())
                     })
                 })
-                .collect())
+                .collect();
+            Ok(LeftOutRows { finite, infinite: Default::default() })
         }
         PlacementRead::Strict | PlacementRead::ClipAware => {
             let clip_aware = placement.read == PlacementRead::ClipAware;
@@ -483,17 +533,20 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::
                 }
             }
             let n = columns.iter().map(Vec::len).max().unwrap_or(0);
-            Ok((0..n)
-                .filter(|&i| {
-                    columns.iter().any(|col| {
-                        col.get(i).copied().flatten().is_some_and(|x| {
-                            scale.admits_for_pixel(x)
-                                && !matches!(scale, ScaleKind::Log(s) if !s.on_side(x))
-                                && (if clip_aware { ctx.to_pixel(scale, x) } else { scale.to_pixel_f64(x) }).is_none()
-                        })
-                    })
-                })
-                .collect())
+            let mut out = LeftOutRows::default();
+            for i in 0..n {
+                let unplaced = columns.iter().filter_map(|col| col.get(i).copied().flatten()).filter(|&x| {
+                    scale.admits_for_pixel(x)
+                        && !matches!(scale, ScaleKind::Log(s) if !s.on_side(x))
+                        && (if clip_aware { ctx.to_pixel(scale, x) } else { scale.to_pixel_f64(x) }).is_none()
+                });
+                match left_out_by_infinity(unplaced) {
+                    Some(false) => out.finite.insert(i),
+                    Some(true) => out.infinite.insert(i),
+                    None => false,
+                };
+            }
+            Ok(out)
         }
     }
 }
@@ -587,8 +640,8 @@ pub(crate) struct DomainCensus {
 /// decline to place, mirroring the drop the real builder makes rather than
 /// causing a new one, since both read the same per-builder path fact.
 ///
-/// `statistic` is `None` for a primitive layer: one [`DomainLeftOut`] per
-/// placement, `field` the placement channel's own encoding binding (the
+/// `statistic` is `None` for a primitive layer: up to two [`DomainLeftOut`]s
+/// per placement (its finite rows, then its infinite rows), `field` the placement channel's own encoding binding (the
 /// field the caller wrote — for a raster image this is the user's `x`/`y`,
 /// never the extent column `Placement::columns` actually reads), `cut`
 /// always `false` (the primitive row text has only one sentence). `Some`
@@ -613,10 +666,12 @@ pub(crate) struct DomainCensus {
 /// builder cannot place, counts against the group's survivors too. The one
 /// outcome is reported on each axis that left out one of the group's rows;
 /// a group with no left-out row on any axis (one the builder drops only
-/// for its values) is not the domain's loss and is not reported. Each axis
-/// reports up to two [`DomainLeftOut`]s, one per outcome. A statistic layer
-/// with no vertex frame (a histogram's bar, say) keeps the plain per-axis
-/// left-out row count, `cut: false`.
+/// for its values) is not the domain's loss and is not reported. A mark with
+/// left-out rows of both reasons (a finite cut and an infinity) is counted
+/// under each. Each axis reports up to four [`DomainLeftOut`]s, one per
+/// outcome and reason. A statistic layer with no vertex frame (a histogram's
+/// bar, say) keeps the plain per-axis left-out row counts, `cut: false`, one
+/// per reason.
 pub(crate) fn domain_left_out_counts(
     ctx: &DrawCtx,
     statistic: Option<&StatisticVoice>,
@@ -635,18 +690,21 @@ pub(crate) fn domain_left_out_counts(
     let Some(voice) = statistic else {
         let mut out = Vec::new();
         for (placement, rows) in &found {
-            if rows.is_empty() {
-                continue;
-            }
             let Some(enc) = field_for(placement.channel.as_str()) else { continue };
-            out.push(DomainLeftOut {
-                channel: placement.channel.as_str().to_string(),
-                field: Some(enc.field.clone()),
-                rows: rows.len(),
-                categorical: matches!(placement.read, PlacementRead::Category),
-                entry: None,
-                cut: false,
-            });
+            for (infinite, count) in [(false, rows.finite.len()), (true, rows.infinite.len())] {
+                if count == 0 {
+                    continue;
+                }
+                out.push(DomainLeftOut {
+                    channel: placement.channel.as_str().to_string(),
+                    field: Some(enc.field.clone()),
+                    rows: count,
+                    categorical: matches!(placement.read, PlacementRead::Category),
+                    entry: None,
+                    cut: false,
+                    infinite,
+                });
+            }
         }
         return Ok(DomainCensus { left_out: out, runs_not_drawn: BTreeSet::new() });
     };
@@ -658,12 +716,15 @@ pub(crate) fn domain_left_out_counts(
         field: Option<String>,
         categorical: bool,
         rows: BTreeSet<usize>,
+        /// The members of `rows` some placement left out for an infinity and
+        /// none left out for a finite value.
+        infinite_rows: BTreeSet<usize>,
     }
     let mut axes = Vec::new();
     for (axis, secondary) in [(PositionalChannel::X, PositionalChannel::X2), (PositionalChannel::Y, PositionalChannel::Y2)] {
         let members: Vec<_> = found.iter().filter(|(p, _)| p.channel == axis || p.channel == secondary).collect();
         let Some((first, _)) = members.first() else { continue };
-        let rows: BTreeSet<usize> = members.iter().flat_map(|(_, rows)| rows.iter().copied()).collect();
+        let (rows, infinite_rows) = merge_axis_rows(&members.iter().map(|(_, rows)| rows).collect::<Vec<_>>());
         if rows.is_empty() {
             continue;
         }
@@ -673,26 +734,37 @@ pub(crate) fn domain_left_out_counts(
             field: crate::layout::axis::resolve_axis_title(enc.title.as_deref(), Some(enc.field.clone())),
             categorical: matches!(first.read, PlacementRead::Category),
             rows,
+            infinite_rows,
         });
     }
     if axes.is_empty() {
         return Ok(DomainCensus { left_out: Vec::new(), runs_not_drawn: BTreeSet::new() });
     }
-    let report = |axis: &AxisLeftOut, rows: usize, cut: bool| DomainLeftOut {
+    let report = |axis: &AxisLeftOut, rows: usize, cut: bool, infinite: bool| DomainLeftOut {
         channel: axis.axis.as_str().to_string(),
         field: axis.field.clone(),
         rows,
         categorical: axis.categorical,
         entry: Some(voice.entry.clone()),
         cut,
+        infinite,
     };
 
     let Some(frame) = dispatch_vertex_frame(&ctx.spec.mark, ctx) else {
-        let left_out = axes.iter().map(|axis| report(axis, axis.rows.len(), false)).collect();
+        let mut left_out = Vec::new();
+        for axis in &axes {
+            let infinite = axis.infinite_rows.len();
+            for (is_infinite, count) in [(false, axis.rows.len() - infinite), (true, infinite)] {
+                if count > 0 {
+                    left_out.push(report(axis, count, false, is_infinite));
+                }
+            }
+        }
         return Ok(DomainCensus { left_out, runs_not_drawn: BTreeSet::new() });
     };
-    // Per axis, `(not drawn, drawn cut)` marks.
-    let mut tallies = vec![(0usize, 0usize); axes.len()];
+    // Per axis, `[finite, infinite]` marks, each `(not drawn, drawn cut)`; a
+    // mark with rows of both reasons is in both.
+    let mut tallies = vec![[(0usize, 0usize); 2]; axes.len()];
     // The rows of every group hit and not drawn at all, over every axis —
     // `runs_not_drawn`, read once per group rather than per axis since a
     // group's rows are the same regardless of which axis it hit.
@@ -707,20 +779,29 @@ pub(crate) fn domain_left_out_counts(
             runs_not_drawn.extend(group.iter().copied());
         }
         for k in hit {
-            if drawn {
-                tallies[k].1 += 1;
-            } else {
-                tallies[k].0 += 1;
+            let (finite, infinite) = group_left_out_reasons(group, &axes[k].rows, &axes[k].infinite_rows);
+            for (reason, present) in [(0, finite), (1, infinite)] {
+                if !present {
+                    continue;
+                }
+                let slot = &mut tallies[k][reason];
+                if drawn {
+                    slot.1 += 1;
+                } else {
+                    slot.0 += 1;
+                }
             }
         }
     }
     let mut left_out = Vec::new();
-    for (axis, (not_drawn, cut)) in axes.iter().zip(tallies) {
-        if not_drawn > 0 {
-            left_out.push(report(axis, not_drawn, false));
-        }
-        if cut > 0 {
-            left_out.push(report(axis, cut, true));
+    for (axis, by_reason) in axes.iter().zip(tallies) {
+        for (is_infinite, (not_drawn, cut)) in [(false, by_reason[0]), (true, by_reason[1])] {
+            if not_drawn > 0 {
+                left_out.push(report(axis, not_drawn, false, is_infinite));
+            }
+            if cut > 0 {
+                left_out.push(report(axis, cut, true, is_infinite));
+            }
         }
     }
     Ok(DomainCensus { left_out, runs_not_drawn })
@@ -2849,6 +2930,47 @@ pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn set(rows: &[usize]) -> BTreeSet<usize> {
+        rows.iter().copied().collect()
+    }
+
+    /// A row left out for a finite value on any column is finite, whichever
+    /// column holds the infinity and in whichever order they come.
+    #[test]
+    fn a_row_left_out_for_a_finite_value_and_an_infinity_is_finite() {
+        assert_eq!(left_out_by_infinity([f64::INFINITY, 5000.0]), Some(false));
+        assert_eq!(left_out_by_infinity([5000.0, f64::INFINITY]), Some(false));
+        assert_eq!(left_out_by_infinity([f64::INFINITY, 5000.0, f64::INFINITY]), Some(false));
+        assert_eq!(left_out_by_infinity([f64::INFINITY]), Some(true));
+        assert_eq!(left_out_by_infinity([f64::INFINITY, f64::NEG_INFINITY]), Some(true));
+        assert_eq!(left_out_by_infinity([5000.0]), Some(false));
+        assert_eq!(left_out_by_infinity([]), None);
+    }
+
+    /// A row finite on the primary placement and infinite on the secondary
+    /// is a finite row of the axis; a row infinite on both stays infinite.
+    #[test]
+    fn an_axis_row_finite_on_one_placement_and_infinite_on_another_is_finite() {
+        let primary = LeftOutRows { finite: set(&[0]), infinite: set(&[1, 2]) };
+        let secondary = LeftOutRows { finite: set(&[1]), infinite: set(&[0, 2, 3]) };
+        let (rows, infinite) = merge_axis_rows(&[&primary, &secondary]);
+        assert_eq!(rows, set(&[0, 1, 2, 3]));
+        assert_eq!(infinite, set(&[2, 3]));
+    }
+
+    /// A vertex-unit mark is counted under each reason among its left-out
+    /// rows, and under none when none of its rows is left out.
+    #[test]
+    fn a_mark_with_finite_and_infinite_left_out_rows_has_both_reasons() {
+        let rows = set(&[4, 5, 6]);
+        let infinite_rows = set(&[6]);
+        assert_eq!(group_left_out_reasons(&[0, 1, 4, 6], &rows, &infinite_rows), (true, true));
+        assert_eq!(group_left_out_reasons(&[0, 4, 5], &rows, &infinite_rows), (true, false));
+        assert_eq!(group_left_out_reasons(&[0, 6], &rows, &infinite_rows), (false, true));
+        assert_eq!(group_left_out_reasons(&[0, 1], &rows, &infinite_rows), (false, false));
+    }
 
     // --- Phase 7 baseline tests (updated to 3-arg signature; None overrides = same result) ---
 

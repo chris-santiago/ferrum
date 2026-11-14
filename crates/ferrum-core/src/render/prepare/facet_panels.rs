@@ -212,8 +212,10 @@ fn value_counts(rows: &FacetRows<'_>, fields: &[&str]) -> Result<HashMap<Vec<Str
 enum SortReads<'s> {
     /// Not data-aware: the sorter reads no rows.
     Nothing,
-    /// A shorthand, reading the rendered `x` or `y` field of each layer.
-    Channel { y: bool },
+    /// A shorthand, reading the rendered `x` or `y` field of each layer
+    /// (`y`, the drawn slot) and naming the channel the caller wrote
+    /// (`authored_y`; the two differ under a flipped coordinate system).
+    Channel { y: bool, authored_y: bool },
     /// A sort object reading `field`, or only counting rows.
     Field { field: &'s str, counts_only: bool },
 }
@@ -222,7 +224,10 @@ fn sort_reads(sort: Option<&serde_json::Value>, coord_flipped: bool) -> SortRead
     match sort {
         Some(serde_json::Value::String(s)) if matches!(s.as_str(), "x" | "-x" | "y" | "-y") => {
             let authored = s.trim_start_matches('-');
-            SortReads::Channel { y: super::user_facing_channel(authored, coord_flipped) == "y" }
+            SortReads::Channel {
+                y: super::user_facing_channel(authored, coord_flipped) == "y",
+                authored_y: authored == "y",
+            }
         }
         Some(serde_json::Value::Object(obj)) => match obj.get("field").and_then(|field| field.as_str()) {
             Some(field) => SortReads::Field {
@@ -267,7 +272,7 @@ fn sort_panels(
     }));
     if read_anywhere && !unsortable.is_empty() {
         let source = match reads {
-            SortReads::Channel { y } => format!("{} value", if y { "y" } else { "x" }),
+            SortReads::Channel { authored_y, .. } => format!("{} value", if authored_y { "y" } else { "x" }),
             SortReads::Field { field, .. } => format!("'{field}' value"),
             SortReads::Nothing => String::new(),
         };
@@ -321,8 +326,8 @@ fn sort_batch(
             // `SortOp::Count` off the fallback: counting the fallback's rows
             // would count groups, not observations.
             let wanted = match reads {
-                SortReads::Channel { y: true } => source.y_field,
-                SortReads::Channel { y: false } => source.x_field,
+                SortReads::Channel { y: true, .. } => source.y_field,
+                SortReads::Channel { y: false, .. } => source.x_field,
                 SortReads::Field { field: sort_field, counts_only: false } => Some(*sort_field),
                 SortReads::Field { counts_only: true, .. } | SortReads::Nothing => None,
             };
@@ -337,7 +342,7 @@ fn sort_batch(
             };
             let column = |name: Option<&str>| name.and_then(|name| crate::render::arrow_cast::col_as_f64(chosen, name).ok());
             let (x, y, field_values) = match reads {
-                SortReads::Channel { y } => {
+                SortReads::Channel { y, .. } => {
                     let read = if *y { column(source.y_field) } else { column(source.x_field) };
                     match read {
                         Some(read) if *y => (None, Some(read), None),
@@ -745,6 +750,37 @@ mod tests {
             r#"facet sort left the values ["b"] unsorted: their rows in the layer that draws them carry no y value, so they sort as values with no rows; the other panels are sorted"#,
             "the warning names the values left unsorted and says the rest are sorted, never that every panel fell back"
         );
+    }
+
+    /// Under a flipped coordinate system the shorthand reads the other drawn
+    /// slot, but the warning names the channel the caller wrote: `"x"` and
+    /// `"-x"` read the drawn `y` field and still say "x value".
+    #[test]
+    fn a_flipped_shorthand_sort_names_the_channel_the_caller_wrote() {
+        for token in ["x", "-x"] {
+            let partitions = wrap_keys(&["a", "b"]);
+            let points = rows(&["a"], None, &[3.0]);
+            let unsortable = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("f", DataType::Utf8, true)])),
+                vec![Arc::new(StringArray::from(vec!["b"])) as ArrayRef],
+            )
+            .unwrap();
+            let facet_rows = FacetRows {
+                layers: vec![
+                    layer(&points),
+                    FacetLayerRows { drawn: &unsortable, sort: SortRows { batch: &unsortable, fallback: None, x_field: None, y_field: None } },
+                ],
+                partitions: &partitions,
+                coord_flipped: true,
+            };
+            let mut warnings = Vec::new();
+            facet_groups(&facet_rows, &spec(false, Some(serde_json::json!(token)), None), &mut warnings).unwrap();
+            assert_eq!(
+                warnings,
+                [RenderWarning::FacetSortPartial { unsorted: vec!["b".into()], source: "x value".into() }],
+                "sort={token:?} under a flip"
+            );
+        }
     }
 
     /// A grid's cells are the row × column product of the drawn values, in

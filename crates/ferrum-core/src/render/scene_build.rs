@@ -807,7 +807,7 @@ pub fn build_scene(
     // One `TextInkPastFrame` per channel, now that every panel and every
     // secondary y slot has noted its own overrun rows.
     text_overrun_ledger.flush(prep.names_unflipped, warnings);
-    // One `DomainRowsLeftOut` per channel, field, voice and outcome, once
+    // One `DomainRowsLeftOut` per channel, field, voice, outcome and reason, once
     // every layer in every panel has noted its own left-out rows.
     domain_left_out_ledger.flush(warnings);
     // Resolve every layer's pending all-short panels, now that every panel
@@ -3748,8 +3748,8 @@ impl TextOverrunLedger {
 /// (`draw::domain_left_out_counts`, its channel already un-flipped to the
 /// one the layer's own caller wrote) and flushed once after the panel loop,
 /// beside [`TextOverrunLedger::flush`]: at most one
-/// [`RenderWarning::DomainRowsLeftOut`] per channel, field, voice and
-/// outcome, never one per layer or panel. A composite sums its leaves'
+/// [`RenderWarning::DomainRowsLeftOut`] per channel, field, voice, outcome
+/// and reason (finite cut or infinity), never one per layer or panel. A composite sums its leaves'
 /// warnings through the same ledger (`note_warning`).
 ///
 /// Unlike [`TextOverrunLedger`], there is no shared-vs-own split: a layer's
@@ -3766,7 +3766,7 @@ pub(super) struct DomainLeftOutLedger {
 
 impl DomainLeftOutLedger {
     /// Fold one census tally into the running sum of the entry reporting
-    /// the same channel, field, voice and outcome
+    /// the same channel, field, voice, outcome and reason
     /// ([`draw::DomainLeftOut::same_report`]), in first-seen order (so
     /// `flush`'s output order is stable across runs of the same chart).
     /// `channel` is already the caller's own written channel, so two

@@ -675,8 +675,8 @@ def test_a_wrong_type_column_refuses_as_it_already_did():
 )
 def test_an_infinity_on_a_log_axis_is_left_to_its_own_report(value: float, label: str):
     """On a log y, group ``c``'s own report differs by value: a negative
-    value is reported by the log side's own warning, a value outside the
-    scale's explicit domain by the domain warning, and only a true NaN (no
+    value is reported by the log side's own warning, an infinity by the
+    infinity warning, and only a true NaN (no
     axis report of its own) falls to the census."""
     df = pl.DataFrame(
         {"x": [1.0, 2.0, 3.0, 4.0], "y": [1.0, 2.0, value, value], "g": ["a", "a", "c", "c"]}
@@ -686,10 +686,7 @@ def test_an_infinity_on_a_log_axis_is_left_to_its_own_report(value: float, label
     if label == "-inf":
         assert messages == [_log_message("y", "y", 2)]
     elif label == "inf":
-        assert messages == [
-            "y scale: 2 row(s) of 'y' fall outside the scale's explicit domain, so they are not "
-            "drawn; widen the domain, or pass clamp=True to draw them at the axis edge"
-        ]
+        assert messages == [_infinite_warning("y", "y", 2)]
     else:
         assert messages == [
             "mark_point: every row of g=c has a null or non-finite y, so it draws nothing"
@@ -2547,6 +2544,78 @@ def test_an_explicit_colour_domain_orders_the_dodge_slots_but_adds_none():
     a_then_b = heights(["a", "b"])
     assert a_then_b[0] != a_then_b[1]
     assert heights(["b", "a"]) == a_then_b[::-1]
+
+
+_INFINITE_REMEDY = "filter them, or pass clamp=True to draw them at the axis edge"
+
+
+def _infinite_warning(channel: str, field: str, rows: int) -> str:
+    """The sentence for ``rows`` rows of ``field`` that are infinite on a log ``channel`` scale."""
+    return (
+        f"{channel} scale: {rows} row(s) of '{field}' are infinite, which a LogScale cannot "
+        f"place, so they are not drawn; {_INFINITE_REMEDY}"
+    )
+
+
+def _of_field(field: str | None) -> str:
+    """The `` of 'field'`` clause of a statistic sentence, left out under a suppressed title."""
+    return "" if field is None else f" of '{field}'"
+
+
+def _statistic_infinite_warning(entry: str, channel: str, field: str | None, marks: int) -> str:
+    """The sentence for ``marks`` statistic marks of ``field`` at infinity that a log scale does
+    not draw (``field`` is ``None`` under a suppressed title)."""
+    return (
+        f"{entry}: {channel} scale: {marks} mark(s){_of_field(field)} are infinite, which a "
+        f"LogScale cannot place, so they are not drawn; {_INFINITE_REMEDY}"
+    )
+
+
+def _statistic_infinite_cut_warning(entry: str, channel: str, field: str | None, marks: int) -> str:
+    """The sentence for ``marks`` statistic marks that reach infinity, whose part inside a log
+    scale's domain is drawn (``field`` is ``None`` under a suppressed title)."""
+    return (
+        f"{entry}: {channel} scale: {marks} mark(s){_of_field(field)} reach infinity, which a "
+        f"LogScale cannot place, so only their part inside the domain is drawn; {_INFINITE_REMEDY}"
+    )
+
+
+def _log_positive_side_message(axis: str, field: str, rows: int) -> str:
+    """The text that reports ``rows`` rows of ``field`` a mirrored (negative-domain) log scale on
+    ``axis`` cannot place, because they are zero or positive."""
+    return (
+        f"{axis} scale: {rows} row(s) of '{field}' are zero or positive, which a LogScale cannot "
+        "place, so they are not drawn; filter them, or use fm.SymlogScale() for data that "
+        "reaches zero"
+    )
+
+
+def _log_zero_or_negative_refusal(axis: str, field: str, rows: int, example: str | None) -> str:
+    """The refusal of a column with zeros beside negatives on a log scale with no domain;
+    ``example`` is the negative-domain call it suggests, or ``None`` when it suggests only
+    ``fm.SymlogScale()``."""
+    head = (
+        f"{axis} scale: {rows} row(s) of '{field}' are zero or negative, and a LogScale with no "
+        "domain maps only positive values; use fm.SymlogScale()"
+    )
+    return (
+        head if example is None else f"{head}, or pass an explicit negative domain, e.g. {example}"
+    )
+
+
+#: The reason ``Smooth`` gives for an ``lm`` fit it cannot compute where the other fits give a
+#: statistical reason.
+FIT_LM_UNCOMPUTED = "the lm fit could not be computed for this data"
+
+
+def _facet_sort_partial_message(values: list[str], source: str) -> str:
+    """The warning for facet values whose rows lack what a data-aware facet sort reads; ``source``
+    is ``"y value"`` for a shorthand and ``"'field' value"`` for a sort object."""
+    listed = ", ".join(f'"{value}"' for value in values)
+    return (
+        f"facet sort left the values [{listed}] unsorted: their rows in the layer that draws "
+        f"them carry no {source}, so they sort as values with no rows; the other panels are sorted"
+    )
 
 
 def _log_message(axis: str, field: str, rows: int) -> str:

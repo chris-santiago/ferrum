@@ -32,6 +32,7 @@ from tests.test_null_group_warning import (
     _faceted_slot_frame,
     _hue_group_frame,
     _log_message,
+    _log_positive_side_message,
     _render_capturing,
     _slot_frame,
     _slot_message,
@@ -274,10 +275,7 @@ def _independent(scale: Any, *, horizontal: bool) -> fm.Chart:
 
 
 def _log_off_positive_side(axis: str, rows: int) -> str:
-    return (
-        f"{axis} scale: {rows} row(s) of 'w' are zero or positive, which a LogScale cannot place, "
-        "so they are not drawn; filter them, or use fm.SymlogScale() for data that reaches zero"
-    )
+    return _log_positive_side_message(axis, "w", rows)
 
 
 _NEGATIVE_LOG = fm.LogScale(domain=[-5, -1])

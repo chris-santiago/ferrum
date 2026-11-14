@@ -24,7 +24,6 @@ import polars as pl
 import pytest
 
 import ferrum as fm
-from tests.test_domain_rows_left_out import _domain_warning
 from tests.test_log_axis_statistics import _no_value_on_side_refusal
 from tests.test_null_group_warning import (
     FIT_DIVERGED,
@@ -37,6 +36,7 @@ from tests.test_null_group_warning import (
     _all_keys_null_fallback_message,
     _facet_key_dropped_message,
     _fit_message,
+    _infinite_warning,
     _layer_message,
     _list_message,
     _log_message,
@@ -107,8 +107,8 @@ class Outcome:
 
     ``reason`` is the fit's reason when it cannot be computed (only on the methods the shape
     lists in ``degrades``); ``census`` the channel the scatter names as unplaced; ``log_rows`` the
-    rows the log axis cannot place; ``domain_rows`` the rows a log axis's explicit domain cuts (an
-    infinite value); ``drawn`` the scatter circles of ``q``; ``axis_emptied`` whether the log axis
+    rows the log axis cannot place; ``infinite_rows`` the infinite rows it cannot place either;
+    ``drawn`` the scatter circles of ``q``; ``axis_emptied`` whether the log axis
     leaves ``q`` no on-side value, so no fit is drawn for it; ``not_lm`` the methods whose reason
     differs from the shared one (``Smooth`` words a zero variance its own way).
     """
@@ -116,7 +116,7 @@ class Outcome:
     reason: str | None = None
     census: str | None = None
     log_rows: int = 0
-    domain_rows: int = 0
+    infinite_rows: int = 0
     drawn: int = 0
     axis_emptied: bool = False
     not_lm: bool = False
@@ -146,7 +146,7 @@ _SHAPES: dict[str, Shape] = {
         [_INF] * 4,
         _BINARY,
         Outcome(FIT_FEW_POINTS, census="x"),
-        Outcome(FIT_FEW_POINTS, domain_rows=4),
+        Outcome(FIT_FEW_POINTS, infinite_rows=4),
     ),
     "null_y": Shape(
         [1.0, 2.0, 3.0, 4.0],
@@ -279,8 +279,8 @@ def _expected(method: str, shape: Shape, outcome: Outcome, *, scope: str) -> lis
         )
     if outcome.log_rows:
         said.append(_log_message("x", "x", outcome.log_rows))
-    if outcome.domain_rows:
-        said.append(_domain_warning("x", "x", outcome.domain_rows))
+    if outcome.infinite_rows:
+        said.append(_infinite_warning("x", "x", outcome.infinite_rows))
     return said
 
 
@@ -357,6 +357,12 @@ def test_a_whole_call_the_fit_cannot_use_is_named_once_and_drawn_empty(name, met
     assert _circles(svg) == outcome.drawn
 
 
+#: The negative domain the refusal suggests for each off-side shape: the data's own extent when it
+#: spans one, and the decade around the value when every ``x`` is the same (a domain with equal
+#: endpoints is refused, so the remedy must not be one).
+_REMEDY_DOMAIN = {"off_side_varied": (-4.0, -1.0), "off_side_repeated": (-10.0, -1.0)}
+
+
 @pytest.mark.parametrize("method", [*_FITS, "lm"])
 @pytest.mark.parametrize("name", ["off_side_varied", "off_side_repeated"])
 def test_a_whole_frame_a_log_axis_empties_is_refused_by_the_axis(name, method):
@@ -368,7 +374,8 @@ def test_a_whole_frame_a_log_axis_empties_is_refused_by_the_axis(name, method):
     frame = _q_rows(_panel_frame(shape.x, shape.y))
     with pytest.raises(ValueError) as refused:
         _regplot(frame, method, logx=True).to_svg()
-    expected = _no_value_on_side_refusal("x", "x", len(shape.x), min(shape.x), max(shape.x))
+    lo, hi = _REMEDY_DOMAIN[name]
+    expected = _no_value_on_side_refusal("x", "x", len(shape.x), lo, hi)
     assert str(refused.value) == expected
 
 
@@ -633,8 +640,8 @@ def _door_expected(
     axis: list[str] = []
     if outcome.log_rows:
         axis.append(_log_message("x", "x", outcome.log_rows))
-    if outcome.domain_rows:
-        axis.append(_domain_warning("x", "x", outcome.domain_rows))
+    if outcome.infinite_rows:
+        axis.append(_infinite_warning("x", "x", outcome.infinite_rows))
     if scope == "whole" and door.census_first:
         return census + fit + axis
     return fit + census + axis

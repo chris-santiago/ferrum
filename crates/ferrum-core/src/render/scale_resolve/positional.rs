@@ -1258,6 +1258,7 @@ pub(in crate::render) fn resolve_log_extent(
                 side,
                 tally.zero(),
                 tally.opposite(),
+                base,
             );
             return Err(RenderError::LogScaleNoValueOnSide { channel: channel.to_string(), reason, coord_flipped });
         }

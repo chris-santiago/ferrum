@@ -2250,6 +2250,38 @@ pub(crate) fn excluded_channel_is_positional(channel: &str) -> bool {
     matches!(channel, "x" | "y" | "x2" | "y2")
 }
 
+/// The `(min, max)` a log remedy suggests for the opposite-signed values
+/// `extent` spans. A spread extent is suggested as it stands. A constant one
+/// (`min == max`, which the domain validator refuses as `[v, v]`) becomes the
+/// decade around the value, signed like it: `step^floor(log |v|)` to
+/// `step^ceil(log |v|)`, or `step^(e - 1)` to `step^(e + 1)` when `|v|` is
+/// the exact power `step^e`, so the value sits inside rather than on an edge.
+/// `step` is the larger of `base` and `1 / base`, so a base between 0 and 1
+/// (which `LogScale` accepts) gets the same decade its reciprocal does.
+/// Where a bound overflows or underflows (`f64` extremes) it is replaced by
+/// the value itself, so both endpoints stay finite, nonzero and distinct (the
+/// two bounds cannot fail together: they are consecutive powers of `step`).
+fn log_remedy_domain(extent: (f64, f64), base: f64) -> (f64, f64) {
+    let (min, max) = extent;
+    if min != max || !min.is_finite() || min == 0.0 || !(base.is_finite() && base > 0.0 && base != 1.0) {
+        return extent;
+    }
+    let step = base.max(base.recip());
+    let magnitude = min.abs();
+    let exponent = crate::scale::log::LogScaleData::snap_exp(magnitude.ln() / step.ln());
+    let (lo_exponent, hi_exponent) = if exponent.floor() == exponent.ceil() {
+        (exponent - 1.0, exponent + 1.0)
+    } else {
+        (exponent.floor(), exponent.ceil())
+    };
+    let bound = |exponent: f64| {
+        let power = step.powf(exponent);
+        if power.is_finite() && power > 0.0 { power } else { magnitude }
+    };
+    let (lo, hi) = (bound(lo_exponent), bound(hi_exponent));
+    if min < 0.0 { (-hi, -lo) } else { (lo, hi) }
+}
+
 /// [`RenderError::LogScaleNoValueOnSide`]'s `reason`: built once, at the one
 /// place every `Log` channel's resolution discovers its on-side extent is
 /// empty, so x/y and every numeric auxiliary channel refuse with the same
@@ -2265,6 +2297,8 @@ pub(crate) fn excluded_channel_is_positional(channel: &str) -> bool {
 /// alternative-scale remedy a column touching zero needs — the one piece of
 /// this text that differs between the two channel classes; every other word
 /// is shared.
+/// `base` is the axis's log base, for the decade a constant column's domain
+/// is built around ([`log_remedy_domain`]).
 /// `field` is `None` only for a demanded statistic's drawn column (an
 /// internal name like `bin_start`) whose caller explicitly suppressed the
 /// channel's title (`title=""`) — see
@@ -2278,8 +2312,10 @@ pub(crate) fn log_no_value_on_side_reason(
     side: crate::scale::log::LogSide,
     has_zero: bool,
     opposite_extent: Option<(f64, f64)>,
+    base: f64,
 ) -> String {
     use crate::scale::log::LogSide;
+    let opposite_extent = opposite_extent.map(|extent| log_remedy_domain(extent, base));
     let maps_word = match side {
         LogSide::Positive => "positive",
         LogSide::Negative => "negative",
@@ -2460,7 +2496,13 @@ pub enum RenderWarning {
     /// (empty or blank, as `title=None` writes it): it shows no name, so
     /// its sentence drops the `of '<field>'` clause and keeps the rest.
     ///
-    /// Summed per `(channel, field, categorical, entry, cut)` across every
+    /// `infinite` is `true` when the units are infinite values a `Log` scale
+    /// admits but no domain can hold, so the sentence names the infinity and
+    /// the remedies that change it (`clamp=True`, or filtering), not a
+    /// domain to widen; finite values an explicit domain cuts are reported
+    /// apart, with the domain remedy.
+    ///
+    /// Summed per `(channel, field, categorical, entry, cut, infinite)` across every
     /// layer and panel by `scene_build`'s `DomainLeftOutLedger`, flushed
     /// once after the panel loop (one warning per distinct key, not one per
     /// layer or panel), and summed again across composite leaves by
@@ -2483,6 +2525,8 @@ pub enum RenderWarning {
         categorical: bool,
         entry: Option<String>,
         cut: bool,
+        #[serde(default)]
+        infinite: bool,
     },
     ColorPaletteOverflowed { categories: u32 },
     ShapePaletteOverflowed { categories: u32 },
@@ -3162,13 +3206,25 @@ impl std::fmt::Display for RenderWarning {
                     )
                 }
             }
-            RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut } => {
+            RenderWarning::DomainRowsLeftOut { channel, field, rows, categorical, entry, cut, infinite } => {
                 if let Some(entry) = entry {
                     write!(f, "{entry}: ")?;
                 }
                 let unit = if entry.is_some() { "mark(s)" } else { "row(s)" };
                 let named = field.as_ref().map(|field| format!(" of '{field}'")).unwrap_or_default();
                 match (*categorical, *cut) {
+                    _ if *infinite && *cut => write!(
+                        f,
+                        "{channel} scale: {rows} {unit}{named} reach infinity, which a LogScale \
+                         cannot place, so only their part inside the domain is drawn; filter them, \
+                         or pass clamp=True to draw them at the axis edge"
+                    ),
+                    _ if *infinite => write!(
+                        f,
+                        "{channel} scale: {rows} {unit}{named} are infinite, which a LogScale \
+                         cannot place, so they are not drawn; filter them, or pass clamp=True to \
+                         draw them at the axis edge"
+                    ),
                     (true, false) => write!(
                         f,
                         "{channel} scale: {rows} {unit}{named} name a category the scale's \
@@ -3603,6 +3659,75 @@ pub(crate) fn legend_swatches(scene: &ferrum_scene::SceneGraph) -> Vec<(&'static
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A constant opposite-signed column is suggested as the base-decade
+    /// around the value, a spread one as it stands.
+    #[test]
+    fn a_log_remedy_domain_is_a_decade_around_a_constant_value() {
+        assert_eq!(log_remedy_domain((-3.0, -3.0), 10.0), (-10.0, -1.0));
+        assert_eq!(log_remedy_domain((-10.0, -10.0), 10.0), (-100.0, -1.0));
+        assert_eq!(log_remedy_domain((-3.0, -3.0), 2.0), (-4.0, -2.0));
+        assert_eq!(log_remedy_domain((-1000.0, -1000.0), 10.0), (-10000.0, -100.0));
+        assert_eq!(log_remedy_domain((3.0, 3.0), 10.0), (1.0, 10.0));
+        assert_eq!(log_remedy_domain((-30.0, -3.0), 10.0), (-30.0, -3.0), "a spread extent is unchanged");
+        assert_eq!(log_remedy_domain((-1e-5, -1e-5), 10.0), (-1e-4, -1e-6), "an exact power prints exact endpoints");
+        assert_eq!(log_remedy_domain((-3.0, -3.0), 0.5), (-4.0, -2.0), "a base below one takes the decade of its reciprocal");
+        assert_eq!(log_remedy_domain((-3.0, -3.0), 0.1), (-10.0, -1.0));
+    }
+
+    /// At the float extremes the decade overflows or underflows; both
+    /// endpoints stay finite, nonzero, distinct, and hold the value.
+    #[test]
+    fn a_log_remedy_domain_is_finite_nonzero_and_distinct_at_the_float_extremes() {
+        for value in [-1.7e308, -f64::MAX, -5e-324, -f64::MIN_POSITIVE, 1.7e308, 5e-324] {
+            for base in [10.0, 2.0, 0.5, 1e300] {
+                let (min, max) = log_remedy_domain((value, value), base);
+                assert!(min.is_finite() && max.is_finite(), "{value} base {base}: {min}, {max}");
+                assert!(min != 0.0 && max != 0.0 && min < max, "{value} base {base}: {min}, {max}");
+                assert!(min <= value && value <= max, "{value} base {base}: {min}, {max}");
+                assert_eq!(min.signum(), value.signum());
+                assert_eq!(max.signum(), value.signum());
+            }
+        }
+    }
+
+    /// An infinity on a log axis is called infinite on both voices, with the
+    /// remedies that change it; a finite cut keeps the domain sentence.
+    #[test]
+    fn an_infinite_domain_left_out_row_is_called_infinite() {
+        let warning = |entry: Option<&str>, cut: bool, infinite: bool| RenderWarning::DomainRowsLeftOut {
+            channel: "x".into(),
+            field: Some("v".into()),
+            rows: 2,
+            categorical: false,
+            entry: entry.map(str::to_string),
+            cut,
+            infinite,
+        };
+        let remedy = "filter them, or pass clamp=True to draw them at the axis edge";
+        assert_eq!(
+            warning(None, false, true).to_string(),
+            format!("x scale: 2 row(s) of 'v' are infinite, which a LogScale cannot place, so they are not drawn; {remedy}")
+        );
+        assert_eq!(
+            warning(Some("mark_bar"), false, true).to_string(),
+            format!("mark_bar: x scale: 2 mark(s) of 'v' are infinite, which a LogScale cannot place, so they are not drawn; {remedy}")
+        );
+        assert_eq!(
+            warning(Some("displot"), true, true).to_string(),
+            format!("displot: x scale: 2 mark(s) of 'v' reach infinity, which a LogScale cannot place, so only their part inside the domain is drawn; {remedy}")
+        );
+        assert!(warning(None, false, false).to_string().contains("fall outside the scale's explicit domain"));
+    }
+
+    #[test]
+    fn a_constant_column_remedy_text_names_the_decade() {
+        use crate::scale::log::LogSide;
+        let all = log_no_value_on_side_reason("x", Some("x"), 4, LogSide::Positive, false, Some((-3.0, -3.0)), 10.0);
+        assert!(all.ends_with("e.g. fm.LogScale(domain=[-10, -1]), to draw a mirrored log scale"), "{all}");
+        let zero = log_no_value_on_side_reason("x", Some("x"), 2, LogSide::Positive, true, Some((-3.0, -3.0)), 10.0);
+        assert!(zero.ends_with("or pass an explicit negative domain, e.g. fm.LogScale(domain=[-10, -1])"), "{zero}");
+    }
 
     #[test]
     fn render_config_default_values() {

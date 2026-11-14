@@ -6,7 +6,10 @@ domain, a data-space ``Jitter``, a facet and every composition route (``+``,
 ``fm.hconcat``). ``clamp=True``, no explicit domain, and a stacked bar whose
 implicit base sits outside the domain all draw every row with no warning.
 A ``LogScale``'s own off-side warning and this one never double-count the
-same row, and a null/NaN/inf positional value is not counted by either.
+same row, and a null or NaN positional value is not counted by either. A ``+inf``
+on a log scale is counted under its own sentence (it is infinite, which no
+domain can hold), apart from the finite rows a domain cuts, on every door and
+both output kinds; ``clamp=True`` draws it and warns nothing.
 """
 
 from __future__ import annotations
@@ -22,7 +25,12 @@ import pytest
 import ferrum as fm
 from ferrum import Chart
 from ferrum.coord import CoordCartesian, CoordFlip
-from tests.test_null_group_warning import _log_message
+from tests.test_null_group_warning import (
+    _infinite_warning,
+    _log_message,
+    _statistic_infinite_cut_warning,
+    _statistic_infinite_warning,
+)
 
 
 def _warnings_of(render: Callable[[], Any]) -> tuple[list[str], Any]:
@@ -1058,3 +1066,323 @@ def test_null_nan_and_inf_positional_values_are_not_counted():
     msgs, scene = _warnings_of(lambda: _scene(chart))
     assert msgs == []
     assert _drawn_node_count(scene) == 2
+
+
+# ---------------------------------------------------------------------------
+# An infinite value on a log scale is reported as infinite, not as outside a domain
+# ---------------------------------------------------------------------------
+
+_INF = float("inf")
+#: Five rows, two of them ``+inf`` in ``v``: the rows every infinite-value door below plots.
+_INF_V = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "v": [1.0, 2.0, _INF, 4.0, _INF]})
+
+_INF_DOORS: dict[str, Callable[[fm.LogScale], Chart]] = {
+    "point": lambda sc: Chart(_INF_V).mark_point().encode(x="x", y=fm.Y("v", scale=sc)),
+    "line": lambda sc: Chart(_INF_V).mark_line().encode(x="x", y=fm.Y("v", scale=sc)),
+    "bar": lambda sc: Chart(_INF_V).mark_bar().encode(x="x", y=fm.Y("v", scale=sc)),
+    "area": lambda sc: Chart(_INF_V).mark_area().encode(x="x", y=fm.Y("v", scale=sc)),
+}
+
+#: Every output kind a chart renders through: the static svg and the interactive scene.
+_KINDS: dict[str, Callable[[Any], Any]] = {
+    "static": lambda chart: chart.to_svg(),
+    "interactive": _scene,
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+@pytest.mark.parametrize("door", sorted(_INF_DOORS))
+def test_an_infinite_value_on_a_log_scale_is_called_infinite_with_no_domain_written(door, kind):
+    """Two ``+inf`` rows on a ``LogScale()`` nobody gave a domain to: the sentence says they are
+    infinite and offers the remedy that draws them (``clamp=True``), never a domain to widen."""
+    chart = _INF_DOORS[door](fm.LogScale())
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_infinite_warning("y", "v", 2)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+@pytest.mark.parametrize("door", sorted(_INF_DOORS))
+def test_an_infinite_value_on_a_log_scale_with_a_written_domain_is_still_called_infinite(
+    door, kind
+):
+    """No finite domain holds an infinity, so ``widen the domain`` would be a remedy that does
+    nothing: the explicit domain changes neither the count nor the sentence."""
+    chart = _INF_DOORS[door](fm.LogScale(domain=[1, 1000]))
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_infinite_warning("y", "v", 2)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_an_infinite_value_under_coord_flip_names_the_channel_the_caller_wrote(kind):
+    """The caller put the log scale on ``x``; under ``CoordFlip`` it draws vertically, and the
+    sentence still says ``x``."""
+    chart = (
+        Chart(_INF_V)
+        .mark_point()
+        .encode(x=fm.X("v", scale=fm.LogScale()), y="x")
+        .coord(CoordFlip())
+    )
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_infinite_warning("x", "v", 2)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+@pytest.mark.parametrize("door", sorted(_INF_DOORS))
+def test_an_infinite_value_on_a_flipped_log_y_names_the_callers_y(door, kind):
+    """``mark_line`` and ``mark_bar`` (and the point and area beside them) with a log ``y`` under
+    ``CoordFlip``: the log axis draws horizontally, the sentence names the caller's ``y``."""
+    chart = _INF_DOORS[door](fm.LogScale()).coord(CoordFlip())
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_infinite_warning("y", "v", 2)]
+
+
+@pytest.mark.parametrize("dtype", [pl.Float32, pl.Float64], ids=["float32", "float64"])
+def test_an_infinite_value_of_either_float_width_is_called_infinite(dtype):
+    frame = _INF_V.with_columns(pl.col("v").cast(dtype))
+    chart = Chart(frame).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale()))
+    msgs, scene = _warnings_of(lambda: _scene(chart))
+    assert msgs == [_infinite_warning("y", "v", 2)]
+    assert _drawn_node_count(scene) == 3
+
+
+def test_null_and_nan_beside_an_infinity_on_a_log_scale_are_silent_and_only_the_infinity_counts():
+    """A null and a NaN are no rows to this warning: only the two ``+inf`` rows are counted."""
+    frame = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "v": [1.0, None, float("nan"), _INF, _INF, 3.0]}
+    )
+    chart = Chart(frame).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale()))
+    msgs, scene = _warnings_of(lambda: _scene(chart))
+    assert msgs == [_infinite_warning("y", "v", 2)]
+    assert _drawn_node_count(scene) == 2
+
+
+def test_an_explicit_domain_cutting_finite_rows_keeps_the_explicit_domain_text():
+    """``5000`` lies outside ``[1, 1000]``; no infinity is present, so the sentence is the one a
+    domain cut has always had."""
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "v": [1.0, 5000.0, 10.0]})
+    chart = Chart(df).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale(domain=[1, 1000])))
+    msgs, _ = _warnings_of(chart.to_svg)
+    assert msgs == [_domain_warning("y", "v", 1)]
+
+
+_MIXED_ROWS = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "v": [1.0, 2.0, 5000.0, _INF, _INF]})
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_finite_rows_cut_by_a_domain_and_infinite_rows_are_two_warnings_counted_apart(kind):
+    """``5000`` is a finite row the domain cuts, and two ``+inf`` rows no domain could hold: the
+    finite cut is reported first, under its own sentence and count, then the infinite rows."""
+    chart = (
+        Chart(_MIXED_ROWS)
+        .mark_point()
+        .encode(x="x", y=fm.Y("v", scale=fm.LogScale(domain=[1, 1000])))
+    )
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_domain_warning("y", "v", 1), _infinite_warning("y", "v", 2)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_an_off_side_row_a_finite_cut_and_infinite_rows_are_three_warnings_counted_apart(kind):
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0], "v": [1.0, -_INF, 5000.0, _INF, -3.0]})
+    chart = Chart(df).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale(domain=[1, 1000])))
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [
+        _log_message("y", "v", 2),
+        _domain_warning("y", "v", 1),
+        _infinite_warning("y", "v", 1),
+    ]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_a_negative_infinity_on_a_positive_log_axis_keeps_the_zero_or_negative_text(kind):
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "v": [1.0, 2.0, -_INF]})
+    chart = Chart(df).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale()))
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_log_message("y", "v", 1)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_a_negative_and_a_positive_infinity_are_reported_each_under_its_own_sentence(kind):
+    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "v": [1.0, -_INF, _INF, _INF]})
+    chart = Chart(df).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale()))
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_log_message("y", "v", 1), _infinite_warning("y", "v", 2)]
+
+
+@pytest.mark.parametrize("domain", [None, [1, 1000]], ids=["no-domain", "written-domain"])
+def test_a_clamped_log_scale_draws_an_infinity_at_the_edge_and_says_nothing(domain):
+    """The remedy the infinite sentence names: with ``clamp=True`` every row draws."""
+    chart = _INF_DOORS["point"](fm.LogScale(domain=domain, clamp=True))
+    msgs, scene = _warnings_of(lambda: _scene(chart))
+    assert msgs == []
+    assert _drawn_node_count(scene) == 5
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_an_infinity_on_a_linear_axis_is_skipped_silently(kind):
+    chart = Chart(_INF_V).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LinearScale()))
+    msgs, output = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == []
+    drawn = output.count("<circle") if kind == "static" else _drawn_node_count(output)
+    assert drawn == 3
+
+
+@pytest.mark.parametrize("channel", ["color", "size"])
+def test_an_infinity_on_a_log_color_or_size_scale_is_mapped_silently(channel):
+    encode = {channel: getattr(fm, channel.capitalize())("v", scale=fm.LogScale())}
+    chart = Chart(_INF_V).mark_point().encode(x="x", y="x", **encode)
+    msgs, scene = _warnings_of(lambda: _scene(chart))
+    assert msgs == []
+    assert _drawn_node_count(scene) == 5
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_an_infinity_in_a_facet_panel_counts_into_one_infinite_warning(kind):
+    df = pl.DataFrame(
+        {"x": [1.0, 2.0, 3.0, 4.0], "v": [1.0, _INF, 1.0, _INF], "panel": ["a", "a", "b", "b"]}
+    )
+    chart = Chart(df).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale()), facet="panel")
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_infinite_warning("y", "v", 2)]
+
+
+def test_infinite_rows_in_two_leaves_of_every_composite_door_sum_into_one_warning():
+    flat = Chart(_INF_V).mark_point().encode(x="x", y=fm.Y("v", scale=fm.LogScale()))
+    plus = flat + flat
+    layered = flat.layer(
+        fm.Layer(mark="point", encoding={"x": "x", "y": fm.Y("v", scale=fm.LogScale())})
+    )
+    lc = fm.LayerChart(flat, flat)
+    hc = fm.hconcat(flat, flat)
+    expected = [_infinite_warning("y", "v", 4)]
+    for route, render in [
+        ("plus", plus.to_svg),
+        ("plus_interactive", lambda: _scene(plus)),
+        ("chart_layer", layered.to_svg),
+        ("chart_layer_interactive", lambda: _scene(layered)),
+        ("layerchart_static", lc.to_svg),
+        ("layerchart_interactive", lambda: _scene(lc)),
+        ("hconcat", hc.to_svg),
+        ("hconcat_interactive", lambda: _scene(hc)),
+    ]:
+        msgs, _ = _warnings_of(render)
+        assert msgs == expected, f"{route} warned {msgs!r}, expected {expected!r}"
+
+
+_OVERFLOW = pl.DataFrame({"g": ["a", "a", "b", "b"], "v": [1e308, 1e308, 2.0, 3.0]})
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+@pytest.mark.parametrize("mark", ["bar", "point"])
+def test_a_statistic_mark_the_aggregate_pushes_to_infinity_is_called_infinite_in_the_entry_voice(
+    mark, kind
+):
+    """``sum`` of two ``1e308`` values overflows to ``+inf``: the aggregate mark sits at infinity
+    on the log axis and is not drawn, named by the mark that draws it."""
+    chart = getattr(Chart(_OVERFLOW), f"mark_{mark}")().encode(
+        x="g", y=fm.Y("v", aggregate="sum", scale=fm.LogScale())
+    )
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_statistic_infinite_warning(f"mark_{mark}", "y", "sum_v", 1)]
+
+
+@pytest.mark.parametrize("title", [None, "", "  "], ids=["none", "empty", "blank"])
+def test_a_statistic_infinite_sentence_drops_the_field_clause_under_a_suppressed_title(title):
+    """A suppressed title leaves no name for the statistic's field, as the explicit-domain
+    statistic sentences already do; the row voice keeps naming the column."""
+    bar = (
+        Chart(_OVERFLOW)
+        .mark_bar()
+        .encode(x="g", y=fm.Y("v", aggregate="sum", title=title, scale=fm.LogScale()))
+    )
+    msgs, _ = _warnings_of(bar.to_svg)
+    assert msgs == [_statistic_infinite_warning("mark_bar", "y", None, 1)]
+    ecdf = fm.displot(
+        pl.DataFrame({"v": [1.0, 2.0, 3.0, _INF]}),
+        x=fm.X("v", title=title, scale=fm.LogScale()),
+        kind="ecdf",
+    )
+    msgs, _ = _warnings_of(ecdf.to_svg)
+    assert msgs == [_statistic_infinite_cut_warning("displot", "x", None, 1)]
+    point = Chart(_INF_V).mark_point().encode(x="x", y=fm.Y("v", title=title, scale=fm.LogScale()))
+    msgs, _ = _warnings_of(point.to_svg)
+    assert msgs == [_infinite_warning("y", "v", 2)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_a_transformed_row_the_aggregate_pushes_to_infinity_is_called_infinite_as_a_row(kind):
+    aggregate = fm.transform_aggregate({"field": "v", "fn": "sum", "as": "m"}, groupby=["g"])
+    for mark in ("bar", "point"):
+        chart = getattr(Chart(_OVERFLOW).transform(aggregate), f"mark_{mark}")().encode(
+            x="g", y=fm.Y("m", scale=fm.LogScale())
+        )
+        msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+        assert msgs == [_infinite_warning("y", "m", 1)], mark
+
+
+def test_statistic_marks_a_domain_cuts_and_an_overflow_pushes_to_infinity_are_counted_apart():
+    """Group ``a`` sums to ``+inf`` and group ``b`` to ``5000``, past ``[1, 1000]``: two marks,
+    one cut by the domain and one infinite, each under its own sentence."""
+    frame = pl.DataFrame({"g": ["a", "a", "b", "b"], "v": [1e308, 1e308, 2500.0, 2500.0]})
+    chart = (
+        Chart(frame)
+        .mark_bar()
+        .encode(x="g", y=fm.Y("v", aggregate="sum", scale=fm.LogScale(domain=[1, 1000])))
+    )
+    msgs, _ = _warnings_of(chart.to_svg)
+    assert msgs == [
+        _statistic_domain_warning("mark_bar", "y", "sum_v", 1),
+        _statistic_infinite_warning("mark_bar", "y", "sum_v", 1),
+    ]
+
+
+# One ECDF step line reaches a finite value past the domain and an infinity: the vertex-unit mark
+# is cut at both ends.
+_ECDF_DOMAIN = fm.LogScale(domain=[1, 1000])
+_ECDF_ROWS = {
+    "finite": [2.0, 3.0, 5.0, 8.0, 5000.0],
+    "infinite": [2.0, 3.0, 5.0, 8.0, _INF],
+    "mixed": [1.0, 2.0, 3.0, 4.0, 5.0, 5000.0, _INF],
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_an_ecdf_reaching_a_finite_value_past_the_domain_keeps_the_explicit_domain_cut_text(kind):
+    chart = fm.displot(
+        pl.DataFrame({"v": _ECDF_ROWS["finite"]}), x=fm.X("v", scale=_ECDF_DOMAIN), kind="ecdf"
+    )
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_statistic_cut_warning("displot", "x", "v", 1)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_an_ecdf_reaching_only_an_infinity_is_called_infinite(kind):
+    chart = fm.displot(
+        pl.DataFrame({"v": _ECDF_ROWS["infinite"]}), x=fm.X("v", scale=_ECDF_DOMAIN), kind="ecdf"
+    )
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [_statistic_infinite_cut_warning("displot", "x", "v", 1)]
+
+
+@pytest.mark.parametrize("kind", sorted(_KINDS))
+def test_an_ecdf_reaching_a_finite_value_past_the_domain_and_an_infinity_names_both(kind):
+    """One step line cut by a finite value past the domain and by an infinity: the infinity must
+    not be left unnamed (widening the domain would not place it), so two warnings, counted apart,
+    finite first."""
+    chart = fm.displot(
+        pl.DataFrame({"v": _ECDF_ROWS["mixed"]}), x=fm.X("v", scale=_ECDF_DOMAIN), kind="ecdf"
+    )
+    msgs, _ = _warnings_of(lambda: _KINDS[kind](chart))
+    assert msgs == [
+        _statistic_cut_warning("displot", "x", "v", 1),
+        _statistic_infinite_cut_warning("displot", "x", "v", 1),
+    ]
+
+
+def test_a_statistic_over_an_infinite_row_says_nothing_about_the_axis():
+    """A histogram's and a density's own rows never keep the infinity: it is no usable value."""
+    df = pl.DataFrame({"v": [1.0, 2.0, 3.0, 4.0, 5.0, _INF]})
+    for mark in ("histogram", "density"):
+        chart = getattr(Chart(df), f"mark_{mark}")().encode(x=fm.X("v", scale=fm.LogScale()))
+        msgs, _ = _warnings_of(chart.to_svg)
+        assert msgs == [], mark

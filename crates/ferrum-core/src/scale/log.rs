@@ -158,7 +158,7 @@ impl LogScaleData {
 
     /// Snap a raw exponent to the nearest integer when within floating-point epsilon.
     /// Prevents `ln(1000)/ln(10) = 2.9999999999999996` from flooring to 2 instead of 3.
-    fn snap_exp(raw: f64) -> f64 {
+    pub(crate) fn snap_exp(raw: f64) -> f64 {
         let rounded = raw.round();
         if (raw - rounded).abs() < 1e-10 {
             rounded

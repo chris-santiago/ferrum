@@ -57,12 +57,14 @@ from tests._svg_rects import (
     svg_elements,
 )
 
-from tests.test_domain_rows_left_out import _domain_warning, _statistic_domain_warning
+from tests.test_domain_rows_left_out import _statistic_domain_warning
 from tests.test_null_group_warning import (
     FIT_FEW,
     FIT_FEW_PAIRS,
     FIT_FEW_POINTS,
+    FIT_LM_UNCOMPUTED,
     _fit_message,
+    _infinite_warning,
     _log_message,
     _null_key_dropped_message,
     _panel_fit_message,
@@ -71,6 +73,7 @@ from tests.test_null_group_warning import (
     _render_capturing,
     _slot_frame,
     _slot_message,
+    _statistic_infinite_warning,
     _whole_fit_message,
 )
 
@@ -1267,7 +1270,8 @@ _NO_VALUE_ON_SIDE_REMEDY = (
 
 def _no_value_on_side_refusal(axis: str, field: str, rows: int, lo: float, hi: float) -> str:
     """The axis's refusal of ``rows`` rows of ``field`` that are all negative: the remedy's example
-    domain is the data's own extent, ``[lo, hi]``."""
+    domain is ``[lo, hi]``, the data's own extent when it spans one and the decade around the value
+    when every value is the same."""
     return (
         f"{axis} scale: every value of '{field}' ({rows} rows) is negative, and a LogScale with "
         f"no domain maps only positive values; pass an explicit negative domain, e.g. "
@@ -4230,11 +4234,7 @@ def test_all_tied_x_on_a_log_x_degrades_like_any_other_sparse_fit():
             .to_svg()
         )
     )
-    assert msgs == [
-        "Smooth: could not fit the data (the lm fit could not be computed "
-        "for this data); it degraded to an empty/flat output instead of "
-        "failing the whole chart"
-    ], msgs
+    assert msgs == [_whole_fit_message("Smooth", FIT_LM_UNCOMPUTED)], msgs
     assert "<svg" in svg
 
 
@@ -4531,14 +4531,14 @@ _STATISTIC_DOORS: dict[str, _StatisticDoor] = {
 }
 _STATISTIC_DOOR_CASES = [pytest.param(door, id=name) for name, door in _STATISTIC_DOORS.items()]
 #: What an infinite ``v`` beside off-side values adds to the log warning, by door. An infinity is
-#: placed by no log axis, and the axis reports the row itself under its own domain warning, a
+#: placed by no log axis, and the axis reports the row itself under its own infinity warning, a
 #: separate event from the level the axis empties, wherever the door keeps that row as a mark: the
 #: ECDF's step and the fit doors' scatter points. A statistic's own rows never keep it.
-_INFINITE_ROW_DOMAIN_WARNING = {
-    "displot ecdf": _statistic_domain_warning("displot", "x", "v", 1),
-    "lmplot robust": _domain_warning("x", "v", 1),
-    "lmplot logistic": _domain_warning("x", "v", 1),
-    "lmplot glm": _domain_warning("x", "v", 1),
+_INFINITE_ROW_WARNING = {
+    "displot ecdf": _statistic_infinite_warning("displot", "x", "v", 1),
+    "lmplot robust": _infinite_warning("x", "v", 1),
+    "lmplot logistic": _infinite_warning("x", "v", 1),
+    "lmplot glm": _infinite_warning("x", "v", 1),
 }
 
 
@@ -4600,10 +4600,10 @@ def test_a_level_of_an_infinity_beside_off_side_values_is_reported_by_the_log_wa
     """The same level with an infinity for its unusable value: the log warning counts the two
     off-side rows and nothing names the level a second time. Where the door keeps the infinite
     row as a mark of its own (the ECDF's step, the fit doors' scatter), the axis also reports that
-    row, once, under its domain warning."""
+    row, once, under its infinity warning."""
     door = _STATISTIC_DOORS[name]
     svg, messages = _render_capturing(door.build(_level_frame([math.inf, -1.0, 0.0])).to_svg)
-    extra = _INFINITE_ROW_DOMAIN_WARNING.get(name)
+    extra = _INFINITE_ROW_WARNING.get(name)
     assert messages == [_log_message("x", "v", 2)] + ([] if extra is None else [extra])
     assert ">c<" in svg
 
@@ -4698,10 +4698,10 @@ def test_a_facet_panel_wholly_off_the_log_side_is_drawn_empty_and_reported_by_th
     and its strip label and draws nothing, and the log warning's count of the off-side rows is the
     only message: not a null census sentence for the panel, and not its statistic's own
     "could not fit the data". An ECDF keeps an infinite row as a step of its own, which the axis
-    reports under its domain warning beside the log warning."""
+    reports under its infinity warning beside the log warning."""
     svg, messages = _render_capturing(_faceted(kind, _facet_frame(q_values)).to_svg)
     infinite = any(value is not None and math.isinf(value) for value in q_values)
-    extra = [_INFINITE_ROW_DOMAIN_WARNING["displot ecdf"]] if infinite and kind == "ecdf" else []
+    extra = [_INFINITE_ROW_WARNING["displot ecdf"]] if infinite and kind == "ecdf" else []
     assert messages == [_log_message("x", "v", rows)] + extra
     assert _drawn_panels(svg) == (["p", "q"], 2)
 
