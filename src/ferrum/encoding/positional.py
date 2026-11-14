@@ -134,9 +134,9 @@ class Y(ChannelBase):
       text or Boolean column; ``mean``, ``median``, ``min`` and ``max`` fill the
       series' own statistic over ``frame``. A series is the rows that share the
       values of the channels the mark splits by: a colour the colour scale draws as
-      categories (a text column, or an integer column an area colours) or as bins (a
-      continuous colour splits nothing) and, on the marks that draw them, ``shape``,
-      ``stroke_dash`` and ``detail``. A row null on one of those belongs to no
+      categories (a text column, or an integer column an area colours) or as bins and,
+      on the marks that draw them, ``shape``, ``stroke_dash`` and ``detail``. A colour
+      drawn continuously splits nothing. A row null on one of those belongs to no
       series: it is neither filled nor drawn, and no key is completed for it. Each
       layer completes its own series, so an ``impute`` written on one layer is never
       read by a sibling. A render refuses an impute written on both ``x`` and
