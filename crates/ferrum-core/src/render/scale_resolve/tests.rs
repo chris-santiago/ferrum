@@ -388,7 +388,7 @@ fn a_size_domain_param_reaches_the_drawn_and_the_provisional_size_scale() {
 fn shape_scale_picks_from_8_shape_palette_in_order() {
     let batch = make_batch_q_q_n_n_q();
     let outputs: std::collections::HashMap<String, RecordBatch> = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&make_spec_with_shape().encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.shapes.len(), 3);
@@ -442,7 +442,7 @@ fn shape_absent_sort_preserves_first_appearance_order() {
     .unwrap();
     let spec = make_spec_with_shape_sort(None);
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     // First-appearance order: cat=0, bird=1, dog=2
@@ -475,7 +475,7 @@ fn shape_sort_ascending_reorders_domain_alphabetically() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("ascending")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["bird", "cat", "dog"]);
@@ -507,7 +507,7 @@ fn shape_sort_descending_reorders_domain_reverse_alphabetically() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("descending")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["dog", "cat", "bird"]);
@@ -546,7 +546,7 @@ fn shape_sort_data_aware_minus_y_orders_by_y_aggregate_descending() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!("-y")));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected for valid -y sort: {warns:?}");
     // bird has the lowest y-sum (20) → must be last in the descending domain
@@ -578,7 +578,7 @@ fn shape_sort_explicit_array_overrides_first_appearance_order() {
     .unwrap();
     let spec = make_spec_with_shape_sort(Some(serde_json::json!(["dog", "bird", "cat"])));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["dog", "bird", "cat"]);
@@ -614,7 +614,7 @@ fn shape_sort_missing_field_emits_warning_not_panic() {
     let sort_obj = serde_json::json!({"field": "nonexistent_column", "op": "mean", "order": "descending"});
     let spec = make_spec_with_shape_sort(Some(sort_obj));
     let outputs = std::collections::HashMap::new();
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), /* facet_shared */ false, /* coord_flipped */ false, &[], true).unwrap();
     let scale = scale.unwrap();
     // Must emit a SortSpecIgnored warning
     assert!(!warns.is_empty(), "expected SortSpecIgnored warning for missing field");
@@ -704,12 +704,12 @@ fn shape_scale_explicit_domain_reassigns_glyph_assignment() {
     let batch = species_batch();
     let outputs = std::collections::HashMap::new();
     let baseline_spec = make_spec_with_shape_scale(None);
-    let (baseline, _) = build_shape_scale(&baseline_spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (baseline, _) = build_shape_scale(&baseline_spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let baseline = baseline.unwrap();
     assert_eq!(baseline.domain, vec!["cat", "bird", "dog"], "sanity: first-appearance order");
 
     let spec = make_spec_with_shape_scale(Some(ordinal_scale(Some(vec!["dog", "bird", "cat"]), None)));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(scale.domain, vec!["dog", "bird", "cat"], "declared domain wins over first-appearance order");
@@ -717,6 +717,144 @@ fn shape_scale_explicit_domain_reassigns_glyph_assignment() {
     assert_eq!(scale.lookup("dog"), Some(ShapeKind::Circle));
     assert_eq!(scale.lookup("cat"), Some(ShapeKind::Cross));
     assert_ne!(scale.lookup("cat"), baseline.lookup("cat"), "glyph assignment must change");
+}
+
+/// A batch holding `x`, `y` and a column `name` of each dtype no category
+/// reader takes that a caller can bind to `shape` or `stroke_dash`: a naive and
+/// a zoned `Timestamp` and a `Decimal128`.
+fn columns_with_no_categories(name: &str) -> Vec<(&'static str, RecordBatch)> {
+    use arrow::array::{Array, ArrayRef, Decimal128Array, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let columns: Vec<(&'static str, ArrayRef)> = vec![
+        ("Timestamp", Arc::new(TimestampMillisecondArray::from(vec![1_000_i64, 2_000]))),
+        ("Timestamp(Europe/Paris)", Arc::new(TimestampMillisecondArray::from(vec![1_000_i64, 2_000]).with_timezone("Europe/Paris"))),
+        ("Decimal128", Arc::new(Decimal128Array::from(vec![100_i128, 200]).with_precision_and_scale(10, 2).unwrap())),
+    ];
+    columns
+        .into_iter()
+        .map(|(label, col)| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", ArrowDataType::Float64, false),
+                Field::new("y", ArrowDataType::Float64, false),
+                Field::new(name, col.data_type().clone(), false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![Arc::new(Float64Array::from(vec![1.0, 2.0])), Arc::new(Float64Array::from(vec![1.0, 2.0])), col],
+            )
+            .unwrap();
+            (label, batch)
+        })
+        .collect()
+}
+
+/// A categorical `shape` scale over a column with no categories refuses even
+/// under an explicit `scale.domain`, which supersedes the enumeration that
+/// would refuse it: the legend would otherwise list glyphs every mark
+/// contradicts. Binds `shape` alone, so only the shape path of the gate can
+/// fail it.
+#[test]
+fn shape_scale_with_an_explicit_domain_refuses_a_column_it_cannot_key() {
+    let outputs = std::collections::HashMap::new();
+    let spec = make_spec_with_shape_scale(Some(ordinal_scale(Some(vec!["a", "b"]), None)));
+    for (label, batch) in columns_with_no_categories("species") {
+        let err = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap_err();
+        let dtype = batch.column_by_name("species").unwrap().data_type().clone();
+        assert_eq!(
+            err,
+            crate::render::RenderError::UnsupportedDtype {
+                field: "species".into(),
+                dtype: format!("{dtype:?} (cannot enumerate distinct values)"),
+                context: None,
+            },
+            "{label}"
+        );
+    }
+}
+
+/// The `stroke_dash` twin of the shape test: a nominal dash over a column with
+/// no categories refuses under an explicit domain. Binds `stroke_dash` alone.
+#[test]
+fn stroke_dash_scale_with_an_explicit_domain_refuses_a_column_it_cannot_key() {
+    let outputs = std::collections::HashMap::new();
+    let mut spec = make_spec_with_stroke_dash_scale(Some(ordinal_scale(Some(vec!["a", "b"]), None)));
+    spec.encoding.stroke_dash.as_mut().unwrap().type_ = Some(crate::spec::encoding::DataType::Nominal);
+    for (label, batch) in columns_with_no_categories("level") {
+        let err = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap_err();
+        let dtype = batch.column_by_name("level").unwrap().data_type().clone();
+        assert_eq!(
+            err,
+            crate::render::RenderError::UnsupportedDtype {
+                field: "level".into(),
+                dtype: format!("{dtype:?} (cannot enumerate distinct values)"),
+                context: None,
+            },
+            "{label}"
+        );
+    }
+}
+
+/// The gate runs where the establishing mark draws the channel: an explicit
+/// domain over a column with no categories refuses on a `shape` on a point and
+/// a `stroke_dash` on a line, and resolves on a mark that ignores the channel
+/// (a `shape` on a line, a `stroke_dash` on an area), as it did before.
+#[test]
+fn an_explicit_domain_is_gated_only_where_the_mark_draws_the_channel() {
+    use crate::spec::mark::Mark;
+    let theme = crate::layout::ThemeInputs::default();
+    let resolve = |spec: &ChartSpec, batch: &RecordBatch| resolve_scales(spec, batch, (0.0, 100.0), (0.0, 100.0), &theme).map(|_| ());
+    let refusal = |batch: &RecordBatch, field: &str| crate::render::RenderError::UnsupportedDtype {
+        field: field.into(),
+        dtype: format!("{:?} (cannot enumerate distinct values)", batch.column_by_name(field).unwrap().data_type()),
+        context: None,
+    };
+    for (label, batch) in columns_with_no_categories("species") {
+        let mut spec = make_spec_with_shape_scale(Some(ordinal_scale(Some(vec!["a", "b"]), None)));
+        assert_eq!(resolve(&spec, &batch).unwrap_err(), refusal(&batch, "species"), "{label}: shape on a point refuses");
+        spec.mark = Mark::Line;
+        assert!(resolve(&spec, &batch).is_ok(), "{label}: shape on a line is ignored");
+    }
+    for (label, batch) in columns_with_no_categories("level") {
+        let mut spec = make_spec_with_stroke_dash_scale(Some(ordinal_scale(Some(vec!["a", "b"]), None)));
+        spec.encoding.stroke_dash.as_mut().unwrap().type_ = Some(crate::spec::encoding::DataType::Nominal);
+        spec.mark = Mark::Line;
+        assert_eq!(resolve(&spec, &batch).unwrap_err(), refusal(&batch, "level"), "{label}: stroke_dash on a line refuses");
+        spec.mark = Mark::Area;
+        assert!(resolve(&spec, &batch).is_ok(), "{label}: stroke_dash on an area is ignored");
+    }
+}
+
+/// The gate admits what enumeration admits: an integer `shape` or nominal
+/// `stroke_dash` column under an explicit domain still resolves, with the
+/// domain as declared.
+#[test]
+fn an_explicit_domain_still_keys_an_integer_shape_or_dash_column() {
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
+    let outputs = std::collections::HashMap::new();
+    let int_batch = |name: &str| {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", ArrowDataType::Float64, false),
+            Field::new("y", ArrowDataType::Float64, false),
+            Field::new(name, ArrowDataType::Int64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                Arc::new(Int64Array::from(vec![1_i64, 2])),
+            ],
+        )
+        .unwrap()
+    };
+    let shape_spec = make_spec_with_shape_scale(Some(ordinal_scale(Some(vec!["2", "1"]), None)));
+    let (shape, _) = build_shape_scale(&shape_spec.encoding, &int_batch("species"), &outputs, &Default::default(), false, false, &[], true).unwrap();
+    assert_eq!(shape.unwrap().domain, vec!["2", "1"]);
+    let mut dash_spec = make_spec_with_stroke_dash_scale(Some(ordinal_scale(Some(vec!["2", "1"]), None)));
+    dash_spec.encoding.stroke_dash.as_mut().unwrap().type_ = Some(crate::spec::encoding::DataType::Nominal);
+    let (dash, _) = build_stroke_dash_scale(&dash_spec.encoding, &int_batch("level"), &outputs, &Default::default(), false, false, &[], true).unwrap();
+    assert_eq!(dash.unwrap().domain, vec!["2", "1"]);
 }
 
 /// #123 D1: an explicit `scale.range` of shape names assigns glyphs by name
@@ -730,7 +868,7 @@ fn shape_scale_explicit_range_selects_the_named_glyphs() {
         Some(vec!["cat", "bird", "dog"]),
         Some(vec!["square", "cross", "diamond"]),
     )));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
     assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
@@ -752,7 +890,7 @@ fn shape_scale_unknown_range_entry_refuses() {
         Some(vec!["cat", "bird", "dog"]),
         Some(vec!["square", "hexagon", "diamond"]),
     )));
-    let err = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap_err();
+    let err = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap_err();
     assert_eq!(
         err,
         crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "hexagon".to_string() },
@@ -774,7 +912,7 @@ fn shape_scale_non_string_range_entry_refuses_rather_than_silently_dropping() {
     }))
     .expect("ordinal scale spec must deserialize");
     let spec = make_spec_with_shape_scale(Some(scale));
-    let err = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap_err();
+    let err = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap_err();
     assert_eq!(
         err,
         crate::render::RenderError::ShapeRangeEntryUnrecognized { entry: "4".to_string() },
@@ -810,7 +948,7 @@ fn shape_scale_range_shorter_than_domain_cycles() {
         Some(vec!["cat", "bird", "dog", "fox"]),
         Some(vec!["square", "cross"]),
     )));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
     assert_eq!(scale.lookup("cat"), Some(ShapeKind::Square));
@@ -831,7 +969,7 @@ fn shape_scale_range_with_no_declared_domain_uses_data_order() {
         None,
         Some(vec!["diamond", "cross", "square"]),
     )));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no palette-overflow warning for an explicit range: {warns:?}");
     assert_eq!(scale.domain, vec!["cat", "bird", "dog"], "domain falls back to data first-appearance order");
@@ -866,7 +1004,7 @@ fn shape_scale_explicit_domain_composes_with_sort() {
     let scale = ordinal_scale(Some(vec!["dog", "bird", "cat"]), None);
     let mut spec = make_spec_with_shape_scale(Some(scale));
     spec.encoding.shape.as_mut().unwrap().sort = Some(serde_json::json!(["dog"]));
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(
@@ -886,7 +1024,7 @@ fn shape_scale_absent_is_byte_identical_to_pre_123() {
     let batch = species_batch();
     let outputs = std::collections::HashMap::new();
     let spec = make_spec_with_shape_scale(None);
-    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_shape_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["cat", "bird", "dog"]);
@@ -901,13 +1039,13 @@ fn stroke_dash_scale_explicit_domain_reassigns_pattern_assignment() {
     let outputs = std::collections::HashMap::new();
     let baseline_spec = make_spec_with_stroke_dash_scale(None);
     let (baseline, _) =
-        build_stroke_dash_scale(&baseline_spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+        build_stroke_dash_scale(&baseline_spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let baseline = baseline.unwrap();
     assert_eq!(baseline.domain, vec!["low", "mid", "high"], "sanity: first-appearance order");
 
     let spec =
         make_spec_with_stroke_dash_scale(Some(ordinal_scale(Some(vec!["mid", "low", "high"]), None)));
-    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(scale.domain, vec!["mid", "low", "high"], "declared domain wins over first-appearance order");
@@ -929,7 +1067,7 @@ fn stroke_dash_scale_explicit_range_refuses() {
     let batch = appearance_batch();
     let outputs = std::collections::HashMap::new();
     let spec = make_spec_with_stroke_dash_scale(Some(ordinal_scale(None, Some(vec!["a", "b"]))));
-    let err = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap_err();
+    let err = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap_err();
     assert_eq!(
         err,
         crate::render::RenderError::StrokeDashRangeUnsupported {
@@ -946,7 +1084,7 @@ fn stroke_dash_scale_absent_is_byte_identical_to_pre_123() {
     let batch = appearance_batch();
     let outputs = std::collections::HashMap::new();
     let spec = make_spec_with_stroke_dash_scale(None);
-    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty());
     assert_eq!(scale.domain, vec!["low", "mid", "high"]);
@@ -967,7 +1105,7 @@ fn stroke_dash_scale_explicit_domain_composes_with_sort() {
     let scale = ordinal_scale(Some(vec!["mid", "low", "high"]), None);
     let mut spec = make_spec_with_stroke_dash_scale(Some(scale));
     spec.encoding.stroke_dash.as_mut().unwrap().sort = Some(serde_json::json!(["high"]));
-    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[]).unwrap();
+    let (scale, warns) = build_stroke_dash_scale(&spec.encoding, &batch, &outputs, &Default::default(), false, false, &[], true).unwrap();
     let scale = scale.unwrap();
     assert!(warns.is_empty(), "no warnings expected: {warns:?}");
     assert_eq!(

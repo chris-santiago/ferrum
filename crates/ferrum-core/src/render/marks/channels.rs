@@ -37,7 +37,8 @@
 //! helper existed to make no longer has a caller.
 
 use crate::render::color::Color;
-use crate::render::draw::{binned_color_rows, binned_color_scale, col_as_f64, col_as_ordinal_category_str, color_field, DrawCtx};
+use crate::render::arrow_cast::col_as_identity_key_str;
+use crate::render::draw::{binned_color_rows, binned_color_scale, col_as_f64, color_field, DrawCtx};
 use ferrum_scene::numeric_index_dash;
 use crate::render::scale_resolve::{dtype_reads_categorical, ColorInput, ColorScale, ResolvedScales, ScaleKind, StrokeDashScale};
 use crate::render::RenderError;
@@ -54,7 +55,7 @@ use crate::spec::encoding::Encoding;
 /// type error, and would have turned a future third [`ColorInput`] variant into
 /// a silent "no color" rather than a non-exhaustive match.
 pub(crate) enum ColorColumns {
-    /// Category keys (`col_as_ordinal_category_str`), looked up via
+    /// Category keys (`col_as_identity_key_str`), looked up via
     /// [`ColorScale::lookup`].
     Category(Vec<Option<String>>),
     /// Numeric values (`col_as_f64`), sampled via [`ColorScale::lookup_f64`].
@@ -83,15 +84,16 @@ pub(crate) type ColorColumnPair = (Option<Vec<Option<String>>>, Option<Vec<Optio
 /// caller can sample via `lookup_f64` without an `f64 → String → f64`
 /// round-trip.
 ///
-/// The categorical read is [`col_as_ordinal_category_str`], never `col_as_str`
+/// The categorical read is [`col_as_identity_key_str`], never `col_as_str`
 /// (NF-A3, spec §4.4 — completed 2026-09-02). `col_as_str` returns `Err` for
 /// every non-`Utf8` dtype, and the `.ok()` here swallows it, so an
 /// `Int*`/`Float*`/`Bool` categorical color column used to yield `None` for
 /// every row: each mark then fell back to the palette's first color while the
 /// legend — built from the dtype-wide `distinct_values_in_order` — enumerated
-/// every category. `col_as_ordinal_category_str` is a strict superset
-/// (identical on `Utf8`, same `Err` on `Timestamp`) and stringifies exactly the
-/// way `distinct_values_in_order` builds the domain, so the per-row key always
+/// every category. `col_as_identity_key_str` is a strict superset (identical
+/// on every dtype the category reader takes, and it also keys a `Timestamp`
+/// by its epoch value, as the series partitions do) and stringifies exactly
+/// the way `distinct_values_in_order` builds the domain, so the per-row key
 /// matches a domain entry. Utf8 columns are byte-identical.
 ///
 /// Returns the [`ColorColumnPair`] the eight consuming builders destructure
@@ -127,7 +129,7 @@ fn color_columns(ctx: &DrawCtx) -> Result<ColorColumns, RenderError> {
     let input = ctx.scales.color.as_ref().map(ColorScale::input);
     Ok(match (input, field) {
         (Some(ColorInput::Category) | None, Some(f)) => {
-            ColorColumns::Category(col_as_ordinal_category_str(ctx.batch, f)?)
+            ColorColumns::Category(col_as_identity_key_str(ctx.batch, f)?)
         }
         (Some(ColorInput::Numeric), Some(f))
             if ctx.batch.column_by_name(f).is_some_and(|col| dtype_reads_categorical(col.data_type())) =>
@@ -151,10 +153,11 @@ fn color_columns(ctx: &DrawCtx) -> Result<ColorColumns, RenderError> {
 /// [`ColorScale::input`] here is the same one `resolve_fill_color` performs,
 /// and the `Category`/`Numeric` treatment matches it row for row.
 ///
-/// - [`ColorInput::Category`] → the [`col_as_ordinal_category_str`] column,
+/// - [`ColorInput::Category`] → the [`col_as_identity_key_str`] column,
 ///   resolved via [`ColorScale::lookup`]. `Int*`/`Float*`/`Bool` category
 ///   columns resolve to their real colors instead of collapsing to the theme
-///   stroke; `Utf8` is byte-identical (NF-A3, spec §4.4).
+///   stroke, and a `Timestamp` column keys by its epoch value; `Utf8` is
+///   byte-identical (NF-A3, spec §4.4).
 /// - [`ColorInput::Numeric`] → the [`col_as_f64`] column, finite-filtered,
 ///   resolved via [`ColorScale::lookup_f64`]. Two things ride on reading the
 ///   numeric column here rather than stringifying and leaning on `lookup`'s
@@ -187,24 +190,17 @@ fn color_columns(ctx: &DrawCtx) -> Result<ColorColumns, RenderError> {
 /// caller to propagate with `?`, never discarded into a silently theme-colored
 /// render (spec §4.4; `rule.rs`'s module doc states this invariant and
 /// `rule_color_values` used to violate it). After the `ColorInput` dispatch the
-/// only surface that still reaches is a category-keyed scale over a column
-/// `col_as_ordinal_category_str` refuses, and **scale resolution now refuses
-/// that column first, for every mark alike**: `build_color_scale`'s categorical
-/// branch gates on
+/// only surface that reaches it is a category-keyed scale over a column
+/// `col_as_identity_key_str` refuses (a `Decimal`, `Time` or nested column).
+/// Scale resolution refuses a nominal such column first, for every mark alike
+/// (`build_color_scale`'s categorical branch gates on
 /// [`ensure_category_keyable`](crate::render::arrow_cast::ensure_category_keyable)
-/// before it resolves a domain from any source. It did not always — an explicit
-/// `scale.domain` (and a composite shared domain) skips
-/// `distinct_values_in_order` entirely, so a `Timestamp` column declared
-/// `type="nominal"` with an explicit `domain`+`range` used to resolve a
-/// well-formed `Categorical` scale that this reader then refused on `rule`/
-/// `segment` while `point`/`bar` swallowed the same error and painted every
-/// element one color under a four-swatch legend. So this branch's refusal is a
-/// backstop, not a policy: `color_dtype_parity::
-/// nominal_timestamp_color_is_refused_at_scale_resolution_for_every_mark` pins
-/// that the refusal happens at scale resolution (it asserts the resolver's
-/// wording), including for the explicit-`domain`+`range` shape, so a widening of
-/// the gate that does not widen this reader fails there rather than
-/// reintroducing the per-mark divergence.
+/// before it resolves a domain from any source), so this refusal is the
+/// per-mark backstop for a column that scale did not see. A `Timestamp` column
+/// is not in that class: it keys by its epoch value, so a later layer's date
+/// color under another layer's categorical scale draws on `rule`, `tick` and
+/// `segment` as its integer twin does (its keys match no domain entry, so
+/// those rows keep the constant stroke).
 pub(crate) fn row_colors_from_scale(
     ctx: &DrawCtx,
 ) -> Result<Option<Vec<Option<Color>>>, RenderError> {
@@ -232,7 +228,7 @@ pub(crate) fn row_colors_from_scale(
 /// Mirrors [`color_column_loader`]'s categorical/numeric split, gated on
 /// [`ResolvedScales::stroke_dash`] instead of the color scale's
 /// [`ColorInput`]: a *categorical* field (scale resolved) loads the
-/// ordinal-category string column, so [`resolve_row_stroke_dash`] can look
+/// identity-key string column, so [`resolve_row_stroke_dash`] can look
 /// each row up in the [`StrokeDashScale`]; a *numeric* field (no scale
 /// resolved — see that struct's "no third case" doc) loads the `f64` column,
 /// unchanged from the pre-T12 palette-index read. At most one of the two is
@@ -247,7 +243,7 @@ pub(crate) fn stroke_dash_column_loader(ctx: &DrawCtx) -> DashColumns {
     let field = ctx.spec.encoding.stroke_dash.as_ref().map(|e| e.field.as_str());
     let is_categorical = ctx.scales.stroke_dash.is_some();
     let categorical = match (is_categorical, field) {
-        (true, Some(f)) => col_as_ordinal_category_str(ctx.batch, f).ok(),
+        (true, Some(f)) => col_as_identity_key_str(ctx.batch, f).ok(),
         _ => None,
     };
     let numeric = match (is_categorical, field) {
@@ -341,7 +337,7 @@ pub(crate) fn polar_channel_resolver<'a>(
 ///
 /// The partitioning algorithm is shared verbatim across all three builders;
 /// only the *color-values loading* differs by caller and stays in each one.
-/// All three (area, line, ribbon) load color via `col_as_ordinal_category_str`
+/// All three (area, line, ribbon) load color via `col_as_identity_key_str`
 /// so Int*/Float*/Bool color columns split into groups matching the legend
 /// domain, not just Utf8 (NF-A3: `col_as_str` returns `Err` for any other
 /// dtype, which used to collapse non-Utf8 color columns into one group on
@@ -508,8 +504,43 @@ pub(crate) fn grouping_series_values(ctx: &DrawCtx) -> Vec<(String, Vec<Option<S
         .group
         .series
         .iter()
-        .filter_map(|field| col_as_ordinal_category_str(ctx.batch, field).ok().map(|values| (field.clone(), values)))
+        .filter_map(|field| col_as_identity_key_str(ctx.batch, field).ok().map(|values| (field.clone(), values)))
         .collect()
+}
+
+/// Refuse a `detail` column no key reader takes, instead of letting its
+/// unreadable read merge every row into one series with no warning.
+///
+/// The partitions read their keys with [`col_as_identity_key_str`] and take
+/// `.ok()`, so a column that reader refuses (a `Decimal`, `Time`, binary or
+/// nested column) would read as "no key". `detail` has no scale, so its column
+/// is checked here, where the mark splits by it: `line`, `area`, `ribbon` and
+/// `polygon`. A `stroke_dash` or `shape` column is checked where its scale is
+/// built (the categorical-scale gate and the layered union's enumeration), as
+/// colour's is, so no mark re-checks it. The refusal is the reader's
+/// `UnsupportedDtype` re-voiced with the remedy, as the facet refusal is, and
+/// the caller prefixes it with the layer and mark like every other mark
+/// refusal. A column the batch does not carry is not refused: that is the
+/// ordinary layered shape, and it keeps reading as "no key".
+pub(crate) fn refuse_unreadable_detail(ctx: &DrawCtx) -> Result<(), RenderError> {
+    use crate::spec::mark::Mark;
+    if !matches!(ctx.spec.mark, Mark::Line | Mark::Area | Mark::Ribbon | Mark::Polygon) {
+        return Ok(());
+    }
+    let Some(field) = ctx.mark_style.group.detail.as_deref() else {
+        return Ok(());
+    };
+    match (col_as_identity_key_str(ctx.batch, field), ctx.batch.column_by_name(field)) {
+        (Err(RenderError::UnsupportedDtype { context: None, .. }), Some(col)) => Err(RenderError::UnsupportedDtype {
+            field: field.to_string(),
+            dtype: format!(
+                "{:?} (it cannot key a series; convert '{field}' to strings to split the mark by it)",
+                col.data_type()
+            ),
+            context: None,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// A per-row mark's own partition (`point`, `bar`, `tick`, `rule`,
@@ -543,7 +574,7 @@ pub(crate) fn per_row_mark_groups(ctx: &DrawCtx) -> SeriesPartition {
     let color_input = ctx.scales.color.as_ref().map(ColorScale::input);
     let category_values = cf.filter(|_| binned.is_none()).and_then(|f| {
         match color_input {
-            Some(ColorInput::Category) | None => col_as_ordinal_category_str(ctx.batch, f).ok(),
+            Some(ColorInput::Category) | None => col_as_identity_key_str(ctx.batch, f).ok(),
             Some(ColorInput::Numeric) => None,
         }
     });
@@ -561,7 +592,7 @@ pub(crate) fn per_row_mark_groups(ctx: &DrawCtx) -> SeriesPartition {
         .is_some()
         .then(|| spec.encoding.shape.as_ref().map(|e| e.field.as_str()))
         .flatten();
-    let shape_values = shape_field.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+    let shape_values = shape_field.and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
 
     let mut partition = build_color_detail_groups(
         cf.zip(color_values),
@@ -613,6 +644,84 @@ impl BinnedColorSeries {
     pub(crate) fn order(&self, groups: &mut [(Option<String>, Vec<usize>)]) {
         groups.sort_by_key(|(_, rows)| rows.first().and_then(|&row| self.bins[row]).unwrap_or(usize::MAX));
     }
+}
+
+/// Which channel [`temporal_key_partition`] binds the `Timestamp` key column to.
+#[cfg(test)]
+pub(crate) enum TemporalKeyChannel {
+    Detail,
+    Color,
+}
+
+/// A series mark's own partition of four rows whose key column `k` is a
+/// `Timestamp` holding two instants (rows 0 and 1, then rows 2 and 3), bound
+/// to `key`. A color key carries a hand-built categorical scale over the two
+/// instants' epoch strings (the scale resolver refuses a temporal key it is
+/// asked to enumerate, so this is the one way a builder's own read sees it).
+/// Shared by `line`, `area` and `ribbon`, whose `series_groups` take the same
+/// context, so each pins its own key reads with one fixture.
+#[cfg(test)]
+pub(crate) fn temporal_key_partition(
+    mark: crate::spec::mark::Mark,
+    key: TemporalKeyChannel,
+    partition: fn(&DrawCtx) -> SeriesPartition,
+) -> SeriesPartition {
+    use crate::layout::{PanelLayout, Rect, ThemeInputs};
+    use crate::render::draw::resolve_mark_style;
+    use crate::render::scale_resolve::resolve_scales;
+    use crate::spec::encoding::EncodingSpec;
+    use crate::spec::mark_style::MarkKwargsSpec;
+    use crate::spec::chart::ChartSpec;
+    use arrow::array::{Float64Array, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    let field = |name: &str| Some(EncodingSpec { field: name.into(), type_: None, ..Default::default() });
+    let spec = ChartSpec {
+        mark: mark.clone(),
+        encoding: Encoding {
+            x: field("x"),
+            y: field("y"),
+            y2: matches!(mark, crate::spec::mark::Mark::Ribbon).then(|| field("y2")).flatten(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("y2", DataType::Float64, false),
+        Field::new("k", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+    ]));
+    let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+        Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+        Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+        Arc::new(Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])),
+        Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])),
+    ]).unwrap();
+    let theme = ThemeInputs::default();
+    let panel = PanelLayout {
+        plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+        facet_key: None, row: 0, col: 0,
+        strip_title: None, row_strip_title: None, row_facet_key: None,
+    };
+    let (mut scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+    let mut draw_spec = spec.clone();
+    let overrides = match key {
+        TemporalKeyChannel::Detail => MarkKwargsSpec { detail: Some("k".into()), ..Default::default() },
+        TemporalKeyChannel::Color => {
+            draw_spec.encoding.color = field("k");
+            scales.color = Some(ColorScale::Categorical {
+                domain: vec!["1000".into(), "2000".into()],
+                palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
+            });
+            MarkKwargsSpec::default()
+        }
+    };
+    let mark_style = resolve_mark_style(Some(&overrides), &theme, &mark).unwrap();
+    let ctx = DrawCtx { spec: &draw_spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+    partition(&ctx)
 }
 
 #[cfg(test)]
@@ -967,5 +1076,420 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         let dash: Vec<Option<String>> = vec![sv("solid"), sv("dashed")];
         let fields = super::build_color_detail_groups(Some(("c", &cv)), Some(("d", &dv)), [("dash", &dash)], true, 2).fields;
         assert_eq!(fields, vec!["c".to_string(), "d".to_string(), "dash".to_string()]);
+    }
+
+    // ── a temporal key is an identity key on every partition read ───────────
+
+    /// Four rows of two instants (rows 0 and 1, then 2 and 3) in a `Timestamp`
+    /// column `k`, beside `x` and `y`.
+    fn timestamp_key_batch() -> arrow::record_batch::RecordBatch {
+        use arrow::array::TimestampMillisecondArray;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("k", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])),
+        ]).unwrap()
+    }
+
+    fn rows_of(partition: &SeriesPartition) -> Vec<Vec<usize>> {
+        partition.groups.iter().map(|(_, rows)| rows.clone()).collect()
+    }
+
+    /// A statistic's grouping series over a `Timestamp` column reads the
+    /// column's epoch strings, so the series splits where two instants differ.
+    #[test]
+    fn grouping_series_values_read_a_timestamp_column() {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let spec = color_spec();
+        let batch = timestamp_key_batch();
+        let scales = scales_with_color(None);
+        let mut mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        mark_style.group.series = vec!["k".to_string()];
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let values = grouping_series_values(&ctx);
+        assert_eq!(values, vec![("k".to_string(), vec![sv("1000"), sv("1000"), sv("2000"), sv("2000")])]);
+    }
+
+    /// A per-row mark's `color` read splits on a `Timestamp` column under a
+    /// categorical scale.
+    #[test]
+    fn per_row_groups_split_on_a_timestamp_color() {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mut spec = color_spec();
+        spec.encoding.color = enc_field("k");
+        let batch = timestamp_key_batch();
+        let scales = scales_with_color(Some(ColorScale::Categorical {
+            domain: vec!["1000".into(), "2000".into()],
+            palette: Cow::Owned(vec![]),
+        }));
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let partition = per_row_mark_groups(&ctx);
+        assert_eq!(rows_of(&partition), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(partition.fields, vec!["k".to_string()]);
+    }
+
+    /// A per-row mark's `shape` read splits on a `Timestamp` column under a
+    /// shape scale.
+    #[test]
+    fn per_row_groups_split_on_a_timestamp_shape() {
+        use crate::render::scale_resolve::ShapeScale;
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mut spec = color_spec();
+        spec.encoding.color = None;
+        spec.encoding.shape = enc_field("k");
+        let batch = timestamp_key_batch();
+        let mut scales = scales_with_color(None);
+        scales.shape = Some(ShapeScale { domain: vec!["1000".into(), "2000".into()], shapes: vec![] });
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let partition = per_row_mark_groups(&ctx);
+        assert_eq!(rows_of(&partition), vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(partition.fields, vec!["k".to_string()]);
+    }
+
+    /// A categorical `stroke_dash` read splits on a `Timestamp` column under a
+    /// dash scale.
+    #[test]
+    fn stroke_dash_loader_reads_a_timestamp_column() {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mut spec = color_spec();
+        spec.encoding.color = None;
+        spec.encoding.stroke_dash = enc_field("k");
+        let batch = timestamp_key_batch();
+        let mut scales = scales_with_color(None);
+        scales.stroke_dash = Some(StrokeDashScale { domain: vec!["1000".into(), "2000".into()], patterns: vec![vec![], vec![4.0, 4.0]] });
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(
+            stroke_dash_column_loader(&ctx).categorical,
+            Some(vec![sv("1000"), sv("1000"), sv("2000"), sv("2000")]),
+        );
+    }
+
+    /// Four rows with `x`, `y`, `x2` and `y2`, and a colour key `k` of two
+    /// values (rows 0 and 1, then 2 and 3) as the given array.
+    fn colored_batch(k: Arc<dyn arrow::array::Array>) -> arrow::record_batch::RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("x2", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("k", k.data_type().clone(), false),
+        ]));
+        arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0, 5.0])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0, 5.0])),
+            k,
+        ]).unwrap()
+    }
+
+    /// The scene nodes `mark` draws over `batch` with `color='k'` under a
+    /// categorical scale resolved elsewhere (a sibling layer's), through the
+    /// one build dispatch every mark's refusal travels.
+    fn build_under_sibling_scale(mark: Mark, batch: &arrow::record_batch::RecordBatch) -> Result<String, RenderError> {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mut encoding = Encoding { x: enc_field("x"), color: enc_field("k"), ..Default::default() };
+        if matches!(mark, Mark::Point | Mark::Bar | Mark::Rect) {
+            encoding.y = enc_field("y");
+        }
+        if matches!(mark, Mark::Rect) {
+            encoding.x2 = enc_field("x2");
+            encoding.y2 = enc_field("y2");
+        }
+        if matches!(mark, Mark::Segment) {
+            encoding.y = enc_field("y");
+            encoding.x2 = enc_field("x2");
+            encoding.y2 = enc_field("y2");
+        }
+        let spec = ChartSpec { mark: mark.clone(), encoding, ..Default::default() };
+        let scales = scales_with_color(Some(ColorScale::Categorical {
+            domain: vec!["1000".into(), "2000".into()],
+            palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
+        }));
+        let mark_style = resolve_mark_style(None, &theme, &mark).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch, mark_style: &mark_style };
+        let built = crate::render::draw::dispatch_mark_build(&mark, &ctx)?;
+        assert!(!built.nodes.is_empty(), "the mark must draw");
+        Ok(format!("{:?}", built.nodes))
+    }
+
+    /// A date colour under another layer's categorical scale draws on `rule`,
+    /// `tick` and `segment` exactly as the same instants as integers do,
+    /// where the per-row colour read refused the column.
+    #[test]
+    fn a_timestamp_color_draws_on_rule_tick_and_segment_as_its_integer_twin_does() {
+        use arrow::array::{Int64Array, TimestampMillisecondArray};
+        for mark in [Mark::Rule, Mark::Tick, Mark::Segment] {
+            let date = colored_batch(Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])));
+            let twin = colored_batch(Arc::new(Int64Array::from(vec![1_000i64, 1_000, 2_000, 2_000])));
+            let drawn = build_under_sibling_scale(mark.clone(), &date);
+            let expected = build_under_sibling_scale(mark.clone(), &twin);
+            assert!(expected.is_ok(), "{mark:?}: the integer twin draws: {expected:?}");
+            assert_eq!(drawn.map_err(|e| e.to_string()), expected.map_err(|e| e.to_string()), "{mark:?}");
+        }
+    }
+
+    // ── refuse_unreadable_detail ────────────────────────────────────────────
+
+    /// `run` over a context for `mark` whose batch holds a column `d` of the
+    /// given array, bound as `detail` where the mark takes one.
+    fn run_with_detail<T>(mark: Mark, d: Arc<dyn arrow::array::Array>, run: impl Fn(&DrawCtx) -> T) -> T {
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("d", d.data_type().clone(), false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0])),
+            d,
+        ]).unwrap();
+        let spec = ChartSpec {
+            mark: mark.clone(),
+            encoding: Encoding { x: enc_field("x"), y: enc_field("y"), ..Default::default() },
+            ..Default::default()
+        };
+        let scales = scales_with_color(None);
+        let detail = matches!(mark, Mark::Line | Mark::Area | Mark::Ribbon | Mark::Polygon).then(|| "d".to_string());
+        let overrides = MarkKwargsSpec { detail, ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &mark).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        run(&ctx)
+    }
+
+    fn decimal_column() -> Arc<dyn arrow::array::Array> {
+        Arc::new(arrow::array::Decimal128Array::from(vec![100_i128, 200]).with_precision_and_scale(10, 2).unwrap())
+    }
+
+    fn time_column() -> Arc<dyn arrow::array::Array> {
+        Arc::new(arrow::array::Time64NanosecondArray::from(vec![1_i64, 2]))
+    }
+
+    /// A `detail` no key reader takes is refused with the reader's
+    /// `UnsupportedDtype` re-voiced with the remedy, on the four marks that
+    /// split by it.
+    #[test]
+    fn an_unreadable_detail_is_refused_on_the_marks_that_split_by_it() {
+        let cases: [(Arc<dyn arrow::array::Array>, &str); 2] = [
+            (decimal_column(), "Decimal128(10, 2)"),
+            (time_column(), "Time64(Nanosecond)"),
+        ];
+        for mark in [Mark::Line, Mark::Area, Mark::Ribbon, Mark::Polygon] {
+            for (column, dtype) in &cases {
+                let refused = run_with_detail(mark.clone(), column.clone(), |ctx| refuse_unreadable_detail(ctx));
+                assert_eq!(
+                    refused,
+                    Err(RenderError::UnsupportedDtype {
+                        field: "d".into(),
+                        dtype: format!("{dtype} (it cannot key a series; convert 'd' to strings to split the mark by it)"),
+                        context: None,
+                    }),
+                    "{mark:?} {dtype}"
+                );
+            }
+        }
+    }
+
+    /// A readable `detail` (a temporal or text column) is never refused.
+    #[test]
+    fn a_readable_detail_is_not_refused() {
+        use arrow::array::TimestampMillisecondArray;
+        for mark in [Mark::Line, Mark::Area, Mark::Ribbon, Mark::Polygon] {
+            let date: Arc<dyn arrow::array::Array> = Arc::new(TimestampMillisecondArray::from(vec![1_000_i64, 2_000]));
+            let text: Arc<dyn arrow::array::Array> = Arc::new(StringArray::from(vec!["a", "b"]));
+            assert_eq!(run_with_detail(mark.clone(), date, |ctx| refuse_unreadable_detail(ctx)), Ok(()), "{mark:?}");
+            assert_eq!(run_with_detail(mark, text, |ctx| refuse_unreadable_detail(ctx)), Ok(()));
+        }
+    }
+
+    /// What a series mark names as not drawn when its `detail` is a
+    /// `Timestamp` and one instant's run is too short: a first instant with
+    /// three rows and a second (2024-01-02) with `short_rows`.
+    fn dropped_under_a_temporal_detail(mark: Mark, short_rows: usize) -> Vec<String> {
+        use arrow::array::TimestampMillisecondArray;
+        use crate::spec::mark_style::MarkKwargsSpec;
+        let n = 3 + short_rows;
+        let day_one = 1_704_067_200_000_i64;
+        let day_two = 1_704_153_600_000_i64;
+        let keys: Vec<i64> = (0..n).map(|i| if i < 3 { day_one } else { day_two }).collect();
+        let xs: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("y2", DataType::Float64, false),
+            Field::new("k", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(xs.clone())),
+            Arc::new(Float64Array::from(xs.iter().map(|x| x * 2.0 + (*x % 2.0)).collect::<Vec<_>>())),
+            Arc::new(Float64Array::from(xs.iter().map(|x| x * 2.0 + 5.0).collect::<Vec<_>>())),
+            Arc::new(TimestampMillisecondArray::from(keys)),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let spec = ChartSpec {
+            mark: mark.clone(),
+            encoding: Encoding {
+                x: enc_field("x"),
+                y: enc_field("y"),
+                y2: matches!(mark, Mark::Ribbon).then(|| enc_field("y2")).flatten(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut scales, _) = crate::render::scale_resolve::resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        scales.color = None;
+        let overrides = MarkKwargsSpec { detail: Some("k".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &mark).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let built = crate::render::draw::dispatch_mark_build(&mark, &ctx).unwrap();
+        assert_eq!(built.nodes.len(), 1, "{mark:?}: the three-row instant draws");
+        built.dropped_series.expect("the short run is named").names().into_iter().map(String::from).collect()
+    }
+
+    /// A short series or ring under a temporal `detail` is named by its
+    /// instant as an ISO date-time, in the caller's terms.
+    #[test]
+    fn a_short_run_under_a_temporal_detail_is_named_by_its_instant() {
+        for mark in [Mark::Line, Mark::Area, Mark::Ribbon] {
+            assert_eq!(dropped_under_a_temporal_detail(mark.clone(), 1), vec!["k=2024-01-02T00:00:00 (one point)"], "{mark:?}");
+        }
+        assert_eq!(dropped_under_a_temporal_detail(Mark::Polygon, 2), vec!["k=2024-01-02T00:00:00 (two vertices)"]);
+    }
+
+    /// The dispatch refuses an unreadable `detail` on the four marks that split
+    /// by it, with the re-voiced error, and not on a mark that ignores `detail`.
+    /// With the call removed, each of the four draws a merged series and returns
+    /// `Ok`.
+    #[test]
+    fn the_build_dispatch_refuses_an_unreadable_detail_on_every_mark_that_splits_by_it() {
+        let dispatch = |mark: Mark| {
+            let m = mark.clone();
+            run_with_detail(mark, decimal_column(), move |ctx| {
+                crate::render::draw::dispatch_mark_build(&m, ctx).map(|_| ())
+            })
+        };
+        for mark in [Mark::Line, Mark::Area, Mark::Ribbon, Mark::Polygon] {
+            assert_eq!(
+                dispatch(mark.clone()),
+                Err(RenderError::UnsupportedDtype {
+                    field: "d".into(),
+                    dtype: "Decimal128(10, 2) (it cannot key a series; convert 'd' to strings to split the mark by it)".into(),
+                    context: None,
+                }),
+                "{mark:?}"
+            );
+        }
+        for mark in [Mark::Point, Mark::Bar, Mark::Rule, Mark::Tick, Mark::Rect, Mark::Text] {
+            assert!(!matches!(dispatch(mark.clone()), Err(RenderError::UnsupportedDtype { .. })), "{mark:?} ignores detail");
+        }
+    }
+
+    /// A `detail` column the batch does not carry reads as "no key": the reader
+    /// errors, the guard does not refuse.
+    #[test]
+    fn a_missing_detail_column_is_not_refused() {
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let batch = timestamp_key_batch();
+        let mut spec = color_spec();
+        spec.mark = Mark::Line;
+        let scales = scales_with_color(None);
+        let overrides = crate::spec::mark_style::MarkKwargsSpec { detail: Some("absent".into()), ..Default::default() };
+        let mark_style = resolve_mark_style(Some(&overrides), &theme, &Mark::Line).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(refuse_unreadable_detail(&ctx), Ok(()));
+        assert!(col_as_identity_key_str(ctx.batch, "absent").is_err());
+    }
+
+    /// The per-row colour read every other mark shares keys a date colour by
+    /// its epoch value under a categorical scale a sibling layer establishes:
+    /// each key maps through the scale, as the same instants as integers do,
+    /// where the unreadable column left every row in the first key's paint.
+    #[test]
+    fn a_timestamp_color_maps_each_key_through_the_scale_on_point_bar_and_rect() {
+        use arrow::array::{Int64Array, TimestampMillisecondArray};
+        for mark in [Mark::Point, Mark::Bar, Mark::Rect] {
+            let date = colored_batch(Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])));
+            let twin = colored_batch(Arc::new(Int64Array::from(vec![1_000i64, 1_000, 2_000, 2_000])));
+            let drawn = build_under_sibling_scale(mark.clone(), &date).map_err(|e| e.to_string());
+            let expected = build_under_sibling_scale(mark.clone(), &twin).map_err(|e| e.to_string());
+            assert!(expected.is_ok(), "{mark:?}: the integer twin draws: {expected:?}");
+            assert_eq!(drawn, expected, "{mark:?}");
+        }
+    }
+
+    /// `arc` and every consumer of `color_column_loader` read the same
+    /// per-row keys: a `Timestamp` column under a categorical scale loads as
+    /// its epoch strings.
+    #[test]
+    fn the_color_loader_keys_a_timestamp_column_by_its_epoch_value() {
+        use arrow::array::TimestampMillisecondArray;
+        let batch = colored_batch(Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])));
+        let theme = ThemeInputs::default();
+        let panel = PanelLayout {
+            plot_area: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            facet_key: None, row: 0, col: 0,
+            strip_title: None, row_strip_title: None, row_facet_key: None,
+        };
+        let mut spec = color_spec();
+        spec.encoding.color = enc_field("k");
+        let scales = scales_with_color(Some(ColorScale::Categorical {
+            domain: vec!["1000".into(), "2000".into()],
+            palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
+        }));
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let (categories, numeric) = color_column_loader(&ctx);
+        assert_eq!(categories, Some(vec![sv("1000"), sv("1000"), sv("2000"), sv("2000")]));
+        assert!(numeric.is_none());
     }
 }

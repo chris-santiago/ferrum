@@ -2084,11 +2084,25 @@ fn resolve_auxiliary_scales<'r>(
 ) -> Result<AuxiliaryScales, AuxScaleRefusal> {
     let mut encoding = spec.encoding.clone();
     let mut channel_reads: HashMap<&'static str, Vec<domain::AuxRead<'r>>> = HashMap::new();
+    // Channels an unlayered spec binds that its mark does not draw: the
+    // categorical `shape` and `stroke_dash` builders run on whatever the
+    // encoding binds, so they are told whether the establishing mark draws the
+    // channel (the one rule `establishing_binding` asks for an unlayered chart).
+    let mut undrawn: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    let chart_only = crate::render::prepare::LayerPrepared::from_chart_only(spec);
     for channel in crate::spec::encoding::AUXILIARY_SCALE_CHANNELS {
         match reads(channel) {
             Some(drawn) if drawn.is_empty() => *channel.binding_mut(&mut encoding) = None,
-            drawn => {
-                channel_reads.insert(channel.name, drawn.unwrap_or_default());
+            Some(drawn) => {
+                channel_reads.insert(channel.name, drawn);
+            }
+            None => {
+                if matches!(channel.name, "shape" | "stroke_dash")
+                    && chart_only.draw_facts().draws(channel.drawn_as()).is_err()
+                {
+                    undrawn.insert(channel.name);
+                }
+                channel_reads.insert(channel.name, Vec::new());
             }
         }
     }
@@ -2115,7 +2129,7 @@ fn resolve_auxiliary_scales<'r>(
     let (size, size_warns) = build_size_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, composite.size, reads("size"))
         .map_err(refused("size"))?;
     warnings.extend(size_warns);
-    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, transform_lineages, aux_shared, coord_flipped, reads("shape"))
+    let (shape, shape_warns) = build_shape_scale(&spec.encoding, primary_batch, transform_outputs, transform_lineages, aux_shared, coord_flipped, reads("shape"), !undrawn.contains("shape"))
         .map_err(refused("shape"))?;
     warnings.extend(shape_warns);
     // The three opacity-family channels share one builder (spec §4.3); this
@@ -2130,7 +2144,7 @@ fn resolve_auxiliary_scales<'r>(
     let opacity = opacity_scale(OpacityChannel::Opacity)?;
     let fill_opacity = opacity_scale(OpacityChannel::Fill)?;
     let stroke_opacity = opacity_scale(OpacityChannel::Stroke)?;
-    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, transform_lineages, aux_shared, coord_flipped, reads("stroke_dash"))
+    let (stroke_dash, dash_warns) = build_stroke_dash_scale(&spec.encoding, primary_batch, transform_outputs, transform_lineages, aux_shared, coord_flipped, reads("stroke_dash"), !undrawn.contains("stroke_dash"))
         .map_err(refused("stroke_dash"))?;
     warnings.extend(dash_warns);
     let (stroke_width, width_warns) = build_stroke_width_scale(&spec.encoding, primary_batch, transform_outputs, aux_shared, theme, reads("stroke_width"))

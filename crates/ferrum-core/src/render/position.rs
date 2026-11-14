@@ -862,13 +862,15 @@ pub(crate) fn apply_position(
 ///    warning, return `None`. A typo'd or missing named grouping channel is a
 ///    user error and is surfaced, not silently dropped.
 /// 3. **Target present and categorizable** (Utf8 / Int* / UInt* / Float* /
-///    Boolean) → `Some(per-row category strings)` via
-///    [`col_as_ordinal_category_str`]. Null rows map to `""` to preserve the
+///    Boolean / Timestamp) → `Some(per-row category strings)` via
+///    [`col_as_identity_key_str`]: the one identity key every grouping
+///    partition reads, so a date or datetime by-column groups as its integer
+///    and text twins do. Null rows map to `""` to preserve the
 ///    pre-RSUP-05 grouping key (arrow `StringArray::value` returned `""` for
 ///    nulls), keeping existing string-column goldens byte-identical.
-/// 4. **Target present but un-categorizable** (timestamp / duration →
-///    `col_as_ordinal_category_str` returns `Err`) → push a warning, return
-///    `None`.
+/// 4. **Target present but un-categorizable** (a decimal, time, binary or
+///    nested column: `col_as_identity_key_str` returns `Err`) → push a
+///    warning, return `None`.
 ///
 /// Cases 2 and 4 are the same failure class — a named grouping channel that
 /// cannot yield categories — and are handled uniformly: warn and no-op the
@@ -898,7 +900,7 @@ fn resolve_group_channel(
     }
 
     // Cases 3 & 4: present — categorize, or warn-and-skip if un-categorizable.
-    match crate::render::arrow_cast::col_as_ordinal_category_str(batch, &by_col_name) {
+    match crate::render::arrow_cast::col_as_identity_key_str(batch, &by_col_name) {
         Ok(cats) => {
             // Map None (null rows) → "" to replicate the pre-RSUP-05 grouping
             // key (arrow StringArray::value(i) on a null returned ""), so
@@ -2367,7 +2369,7 @@ mod tests {
     use crate::render::scale_resolve::ColorScale;
     use crate::spec::encoding::{Encoding, EncodingSpec};
     use crate::spec::position::{JitterAxis, PositionAdjust, StackAnchor, StackOffset, StackValueAxis};
-    use arrow::array::{Float64Array, StringArray};
+    use arrow::array::{Decimal128Array, Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
 
@@ -5086,7 +5088,7 @@ mod tests {
     //
     // Pre-RSUP-05, a non-Utf8 `by` column hard-errored ("must be Utf8") and a
     // missing/absent `by` column silently no-op'd. Now: int/float/bool dodge
-    // resolves through `col_as_ordinal_category_str`; missing or
+    // resolves through `col_as_identity_key_str`; missing or
     // un-categorizable grouping channels warn-and-skip; only "no grouping
     // channel at all" is a silent no-op.
     // -----------------------------------------------------------------------
@@ -5201,17 +5203,12 @@ mod tests {
     }
 
     #[test]
-    fn dodge_timestamp_by_column_warns_and_noops() {
-        // A timestamp `by` column was a hard Err; now it warns and no-ops
+    fn dodge_decimal_by_column_warns_and_noops() {
+        // A decimal `by` column cannot key a group: it warns and no-ops
         // (consistent with the absent-column case).
-        use arrow::array::TimestampMillisecondArray;
         let b = dodge_batch_with_group(
-            Field::new(
-                "g",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Arc::new(TimestampMillisecondArray::from(vec![0_i64, 1, 0, 1])),
+            Field::new("g", DataType::Decimal128(10, 2), false),
+            Arc::new(Decimal128Array::from(vec![0_i128, 1, 0, 1]).with_precision_and_scale(10, 2).unwrap()),
         );
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
@@ -5233,6 +5230,57 @@ mod tests {
             }
             other => panic!("wrong warning variant: {other:?}"),
         }
+    }
+
+    /// A `Timestamp` `by` column groups exactly as the same instants as
+    /// integers do, for a dodge, with no warning.
+    #[test]
+    fn dodge_timestamp_by_column_groups_as_its_integer_twin_does() {
+        use arrow::array::{Int64Array, TimestampMillisecondArray};
+        let run = |g_field: Field, g_col: ArrayRef| {
+            let b = dodge_batch_with_group(g_field, g_col);
+            let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
+            let mut warnings = Vec::new();
+            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut warnings).unwrap();
+            let xs: Vec<f64> = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap().iter().flatten().collect();
+            (xs, warnings.len())
+        };
+        let (dated, dated_warnings) = run(
+            Field::new("g", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000_i64, 2_000, 1_000, 2_000])),
+        );
+        let (twin, twin_warnings) = run(Field::new("g", DataType::Int64, false), Arc::new(Int64Array::from(vec![1_000_i64, 2_000, 1_000, 2_000])));
+        assert_eq!((dated_warnings, twin_warnings), (0, 0));
+        assert_eq!(dated, twin);
+        assert_ne!(dated, vec![1.0, 1.0, 2.0, 2.0], "the two instants must take their own slots");
+    }
+
+    /// A `Timestamp` `by` column stacks exactly as the same instants as
+    /// integers do, with no warning.
+    #[test]
+    fn stack_timestamp_by_column_groups_as_its_integer_twin_does() {
+        use arrow::array::{Int64Array, TimestampMillisecondArray};
+        let run = |g_field: Field, g_col: ArrayRef| {
+            let b = stack_batch_with_group(g_field, g_col);
+            let pos = PositionAdjust::Stack {
+                by: Some("g".into()),
+                offset: StackOffset::Zero,
+                anchor: StackAnchor::Top,
+                value_axis: None,
+            };
+            let mut warnings = Vec::new();
+            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut warnings).unwrap();
+            let ys: Vec<f64> = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap().iter().flatten().collect();
+            (ys, warnings.len())
+        };
+        let (dated, dated_warnings) = run(
+            Field::new("g", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000_i64, 2_000, 1_000, 2_000])),
+        );
+        let (twin, twin_warnings) = run(Field::new("g", DataType::Int64, false), Arc::new(Int64Array::from(vec![1_000_i64, 2_000, 1_000, 2_000])));
+        assert_eq!((dated_warnings, twin_warnings), (0, 0));
+        assert_eq!(dated, twin);
+        assert_ne!(dated, vec![10.0, 20.0, 30.0, 40.0], "the two instants must stack");
     }
 
     #[test]
@@ -5972,17 +6020,12 @@ mod tests {
     }
 
     #[test]
-    fn stack_timestamp_by_column_warns_and_noops() {
-        // A timestamp `by` column was a silent no-op; now it warns
+    fn stack_decimal_by_column_warns_and_noops() {
+        // A decimal `by` column cannot key a group: it warns
         // (un-categorizable) and clones — no crash.
-        use arrow::array::TimestampMillisecondArray;
         let b = stack_batch_with_group(
-            Field::new(
-                "g",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Arc::new(TimestampMillisecondArray::from(vec![0_i64, 1, 0, 1])),
+            Field::new("g", DataType::Decimal128(10, 2), false),
+            Arc::new(Decimal128Array::from(vec![0_i128, 1, 0, 1]).with_precision_and_scale(10, 2).unwrap()),
         );
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
@@ -6270,18 +6313,13 @@ mod tests {
     }
 
     #[test]
-    fn bughunt_stack_zero_row_timestamp_by_warns_once_no_panic() {
-        // 0-row batch with an un-categorizable (timestamp) `by`: the resolver
+    fn bughunt_stack_zero_row_decimal_by_warns_once_no_panic() {
+        // 0-row batch with an un-categorizable (decimal) `by`: the resolver
         // must still warn exactly once (the dtype check precedes row access),
         // and must not panic on the empty column.
-        use arrow::array::TimestampMillisecondArray;
         let b = empty_xyg(
-            Field::new(
-                "g",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Arc::new(TimestampMillisecondArray::from(Vec::<i64>::new())),
+            Field::new("g", DataType::Decimal128(10, 2), false),
+            Arc::new(Decimal128Array::from(Vec::<i128>::new()).with_precision_and_scale(10, 2).unwrap()),
         );
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
@@ -6671,14 +6709,10 @@ mod tests {
         let rs = resolve_group_channel(&bb, Some("g"), &with_color, "stack", &mut Vec::new());
         assert_eq!(rd, rs);
 
-        // Case 4: un-categorizable timestamp → None + one warning each.
+        // Case 4: un-categorizable decimal → None + one warning each.
         let bt = stack_batch_with_group(
-            Field::new(
-                "g",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
-            Arc::new(TimestampMillisecondArray::from(vec![0_i64, 1, 0, 1])),
+            Field::new("g", DataType::Decimal128(10, 2), false),
+            Arc::new(Decimal128Array::from(vec![0_i128, 1, 0, 1]).with_precision_and_scale(10, 2).unwrap()),
         );
         let mut wd = Vec::new();
         let mut ws = Vec::new();

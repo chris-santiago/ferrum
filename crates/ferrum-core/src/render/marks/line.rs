@@ -49,6 +49,7 @@
 //! layer's `size` conditional never reaches the line.
 
 use crate::render::color::with_opacity;
+use crate::render::arrow_cast::col_as_identity_key_str;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries, SeriesPartition};
@@ -141,7 +142,7 @@ pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
     let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
     let cf = color_field(ctx, spec);
-    // col_as_ordinal_category_str (not col_as_str), gated on the resolved
+    // col_as_identity_key_str (not col_as_str), gated on the resolved
     // color scale being category-keyed (Categorical) or absent — mirrors
     // channels.rs::color_column_loader's `ColorInput::Category | None` gate.
     // Unlike `area` (which always force-resolves ColorScale::Categorical,
@@ -164,13 +165,13 @@ pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
     let color_input = ctx.scales.color.as_ref().map(|s| s.input());
     let category_values = cf.filter(|_| binned.is_none()).and_then(|f| {
         match color_input {
-            Some(ColorInput::Category) | None => col_as_ordinal_category_str(ctx.batch, f).ok(),
+            Some(ColorInput::Category) | None => col_as_identity_key_str(ctx.batch, f).ok(),
             Some(ColorInput::Numeric) => None,
         }
     });
     let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
     let detail_values = ctx.mark_style.group.detail.as_deref()
-        .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+        .and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
 
     // A categorical `stroke_dash` field extends the series partition key
     // (color, detail) -> (color, detail, stroke_dash-field), spec §4.3, so
@@ -3352,13 +3353,12 @@ mod tests {
     }
 
     /// A `stroke_dash` field under a resolved [`crate::render::scale_resolve::StrokeDashScale`]
-    /// whose column [`col_as_ordinal_category_str`] refuses (a `Timestamp`,
-    /// which the Python scale resolver already rejects before any builder
-    /// runs) splits nothing: the zip in `series_groups` reads no
-    /// categorical values for it, so the partition is color alone. A
-    /// `Utf8` `d` column under the same kind of scale does split.
+    /// whose column no key reader takes (a binary column) splits nothing: the
+    /// zip in `series_groups` reads no categorical values for it, so the
+    /// partition is color alone. A `Utf8` or a `Timestamp` `d` column under
+    /// the same kind of scale does split.
     #[test]
-    fn a_stroke_dash_field_the_category_reader_refuses_does_not_split_the_series() {
+    fn a_stroke_dash_field_no_key_reader_takes_does_not_split_the_series() {
         use crate::render::scale_resolve::StrokeDashScale;
         use arrow::array::TimestampMillisecondArray;
 
@@ -3370,20 +3370,20 @@ mod tests {
         // binding (the Python resolver refuses a Timestamp `stroke_dash`
         // column outright, so this scale is never reached that way), then
         // attach a dash scale by hand — a ctx `series_groups` could only see
-        // if the draw site itself skipped the category-reader refusal.
+        // if the draw site itself skipped the scale resolver's refusal.
         let mut resolve_spec = line_spec();
         resolve_spec.encoding.color = Some(EncodingSpec { field: "g".into(), type_: None, ..Default::default() });
         let schema = Arc::new(Schema::new(vec![
             Field::new("x", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
             Field::new("g", DataType::Utf8, false),
-            Field::new("d", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+            Field::new("d", DataType::Binary, false),
         ]));
         let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
             Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
             Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
             Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
-            Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])),
+            Arc::new(arrow::array::BinaryArray::from_vec(vec![b"p" as &[u8], b"p", b"q", b"q"])),
         ]).unwrap();
         let (mut scales, _) = resolve_scales(&resolve_spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         assert!(scales.stroke_dash.is_none(), "the resolver must not have built a dash scale over the unreadable column");
@@ -3413,6 +3413,25 @@ mod tests {
         let utf8_ctx = DrawCtx { spec: &draw_spec, panel: &panel, theme: &theme, scales: &utf8_scales, batch: &utf8_batch, mark_style: &mark_style };
         let utf8_partition = super::series_groups(&utf8_ctx);
         assert_eq!(utf8_partition.fields, vec!["g".to_string(), "d".to_string()]);
+
+        // A `Timestamp` `d` column is an identity key: it splits as `Utf8` does.
+        let ts_schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("g", DataType::Utf8, false),
+            Field::new("d", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        let ts_batch = arrow::record_batch::RecordBatch::try_new(ts_schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.0, 1.0])),
+            Arc::new(StringArray::from(vec!["a", "a", "b", "b"])),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])),
+        ]).unwrap();
+        let (mut ts_scales, _) = resolve_scales(&resolve_spec, &ts_batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        ts_scales.stroke_dash = Some(StrokeDashScale { domain: vec!["x".into(), "y".into()], patterns: vec![vec![], vec![4.0, 4.0]] });
+        let ts_ctx = DrawCtx { spec: &draw_spec, panel: &panel, theme: &theme, scales: &ts_scales, batch: &ts_batch, mark_style: &mark_style };
+        let ts_partition = super::series_groups(&ts_ctx);
+        assert_eq!(ts_partition.fields, vec!["g".to_string(), "d".to_string()]);
     }
 
     /// A caller may bind one column to two splitting inputs at once — here
@@ -3447,5 +3466,28 @@ mod tests {
             vec!["g=b (one point)"],
             "a field bound to both color and stroke_dash must be named once, not 'g=b, g=b'",
         );
+    }
+
+    /// A `Timestamp` `detail` splits the series, one per instant, as the same
+    /// values as text do.
+    #[test]
+    fn a_timestamp_detail_splits_the_series() {
+        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        let partition = temporal_key_partition(Mark::Line, TemporalKeyChannel::Detail, super::series_groups);
+        let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
+        assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(partition.fields, vec!["k".to_string()]);
+    }
+
+    /// A `Timestamp` `color` under a categorical scale splits the series, one
+    /// per instant, each keyed by its epoch string.
+    #[test]
+    fn a_timestamp_color_splits_the_series() {
+        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        let partition = temporal_key_partition(Mark::Line, TemporalKeyChannel::Color, super::series_groups);
+        let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
+        let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
+        assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(keys, vec![Some("1000".to_string()), Some("2000".to_string())]);
     }
 }

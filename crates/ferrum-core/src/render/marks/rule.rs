@@ -1834,20 +1834,20 @@ mod tests {
 
     // ── NF-A3: the per-row color read obeys this module's own error contract ─
 
-    /// A `Timestamp` color column raises the typed `UnsupportedDtype` the
+    /// A `Decimal128` color column raises the typed `UnsupportedDtype` the
     /// reader constructs, propagated with `?`.
     ///
     /// RED (verified in place): `rule_color_values` read the color column
     /// through `col_as_str` and discarded the error with `.ok()?` — eleven
     /// lines below `positional_pixels`, which honors the opposite invariant
     /// this module's doc states. The rule then rendered in the theme stroke
-    /// with no diagnostic. `Timestamp` is the one dtype
-    /// `col_as_ordinal_category_str` still refuses (it has no category
-    /// stringification that agrees with the ordinal domain), so it is the
-    /// shape that discriminates "propagates" from "discards" after the swap.
+    /// with no diagnostic. A decimal column is a dtype
+    /// `col_as_identity_key_str` refuses (it has no category stringification
+    /// that agrees with the ordinal domain), so it is the shape that
+    /// discriminates "propagates" from "discards" after the swap.
     #[test]
     fn rule_propagates_the_color_reads_typed_error() {
-        use arrow::array::TimestampMillisecondArray;
+        use arrow::array::Decimal128Array;
         use crate::spec::encoding::DataType as SpecType;
 
         let mut spec = rule_spec(Some(("a", Some(SpecType::Quantitative))), None, None, None);
@@ -1857,22 +1857,18 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Float64, false),
             Field::new("y", DataType::Float64, false),
-            Field::new(
-                "when",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                false,
-            ),
+            Field::new("when", DataType::Decimal128(10, 2), false),
         ]));
         let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
             Arc::new(Float64Array::from(vec![1.0, 2.0])),
             Arc::new(Float64Array::from(vec![3.0, 4.0])),
-            Arc::new(TimestampMillisecondArray::from(vec![0_i64, 86_400_000])),
+            Arc::new(Decimal128Array::from(vec![0_i128, 100]).with_precision_and_scale(10, 2).unwrap()),
         ]).unwrap();
 
         let theme = ThemeInputs::default();
         let panel = make_panel();
         // Scale resolution needs a numeric y and must not itself refuse the
-        // temporal color column, so resolve against an x/y-only spec; `build`
+        // decimal color column, so resolve against an x/y-only spec; `build`
         // runs on the real spec, which is what this test exercises.
         let scale_spec = rule_spec(
             Some(("a", Some(SpecType::Quantitative))),

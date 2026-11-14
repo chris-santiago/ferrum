@@ -17,8 +17,9 @@ use std::hash::Hash;
 use arrow::array::{Array, Float64Array, Int64Array, UInt32Array};
 
 use crate::render::color::{with_opacity, ContinuousScheme, NamedContinuous};
+use crate::render::arrow_cast::col_as_identity_key_str;
 use crate::render::draw::{
-    col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx,
+    col_as_f64, col_as_str, color_field, x_field, y_field, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::curve::{SeriesNoun, ShortRuns};
@@ -75,15 +76,16 @@ fn group_first_appearance<K: Eq + Hash>(n: usize, key_at: impl Fn(usize) -> Opti
 /// value, in the order each value first appears — the same rule every
 /// series mark's `detail` partition uses, for every dtype alike. Integer
 /// and float columns keep typed keys (`i64`, a `Float64`'s `to_bits` as
-/// `i64`) for a cheap hash; every other dtype [`col_as_ordinal_category_str`]
-/// can read groups the same way, by its string key. A single group of
+/// `i64`) for a cheap hash; every other dtype [`col_as_identity_key_str`]
+/// can read (a date or datetime included, by its epoch value) groups the same
+/// way, by its string key. A single group of
 /// every row when `detail` is unset. Empty (no groups at all) when a bound
-/// `detail` names a column this batch does not carry, or a dtype even the
-/// category reader cannot place (nested or binary columns, as `line`'s
-/// `detail` also leaves ungrouped) — `build` draws nothing for that same
-/// reason, so there is nothing for a statistic layer's census to attribute
-/// to a domain exclusion either. Null-detail rows are left out of every
-/// ring.
+/// `detail` names a column this batch does not carry: `build` draws nothing
+/// for that same reason, so there is nothing for a statistic layer's census
+/// to attribute to a domain exclusion either. A dtype no key reader takes
+/// (a decimal, time, binary or nested column) never reaches this partition:
+/// `channels::refuse_unreadable_partition_keys` refuses it before the build.
+/// Null-detail rows are left out of every ring.
 /// Read by [`vertex_frame`] too, so the census's vertex-unit count and the
 /// real render can never group a statistic layer's rows differently.
 pub(crate) fn detail_groups(ctx: &DrawCtx) -> Vec<Vec<usize>> {
@@ -104,11 +106,10 @@ pub(crate) fn detail_groups(ctx: &DrawCtx) -> Vec<Vec<usize>> {
     // Every other dtype a bare `fm.Layer(mark="polygon")` might bind
     // `detail` to (text, a narrower int, a bool): one ring per distinct
     // value, first-appearance order, the same rule as the typed branches
-    // above. Left unhandled only by a dtype this category reader cannot
-    // place (nested or binary), which keeps one ring — a fallback, not a
-    // silent misdraw, since every production polygon id is one of the
-    // three typed branches.
-    if let Ok(categories) = col_as_ordinal_category_str(ctx.batch, field) {
+    // above. A dtype this identity reader cannot place is refused before
+    // the build, so the one-ring fallback below is only the shape a
+    // partition census reads ahead of that refusal.
+    if let Ok(categories) = col_as_identity_key_str(ctx.batch, field) {
         return group_first_appearance(categories.len(), |i| categories[i].clone());
     }
     vec![(0..n_rows).collect()]
@@ -236,14 +237,14 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     let color_is_quantitative = color_is_quantitative(ctx);
 
     // NF-A3 (spec §4.4, sweep completed 2026-09-02): the category read is
-    // `col_as_ordinal_category_str`, never `col_as_str`. `col_as_str` errors on
+    // `col_as_identity_key_str`, never `col_as_str`. `col_as_str` errors on
     // every non-`Utf8` dtype, and this branch is reached for every dtype that
     // is not `Float64` — so an `Int*`/`Bool`/`Float32` color column used to
     // yield `None` here and paint every polygon the constant mark fill while
     // the legend enumerated its categories. Identical on `Utf8`.
     let color_str_values: Option<Vec<Option<String>>> =
         if !color_is_quantitative {
-            cf.and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok())
+            cf.and_then(|f| col_as_identity_key_str(ctx.batch, f).ok())
         } else {
             None
         };
@@ -1449,5 +1450,73 @@ mod tests {
         assert!(group.is_empty(), "a group is not");
         let (ring, group) = names(Arc::new(arrow::array::StringArray::from(vec!["u"])), DataType::Utf8);
         assert_eq!((ring, group), (vec!["c".to_string()], vec!["c".to_string()]));
+    }
+
+    /// A bare polygon layer whose ring id is a date or datetime draws one ring
+    /// per instant, as the same values as integers do.
+    #[test]
+    fn a_timestamp_ring_id_draws_one_ring_per_instant() {
+        use arrow::array::TimestampMillisecondArray;
+        let spec = polygon_spec(Some("ring"), None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("ring", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.5,    2.0, 3.0, 2.5,    9.0])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0,    0.0, 0.0, 1.0,    9.0])),
+            Arc::new(TimestampMillisecondArray::from(vec![
+                Some(1_000i64), Some(1_000), Some(1_000), Some(2_000), Some(2_000), Some(2_000), None,
+            ])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        assert_eq!(super::detail_groups(&ctx), vec![vec![0, 1, 2], vec![3, 4, 5]], "the null-ring row belongs to no ring");
+        let result = super::build(&ctx);
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 2);
+    }
+
+    /// A `Timestamp` `color` under a categorical scale paints each ring by its
+    /// instant's epoch string, as the same values as text do.
+    #[test]
+    fn a_timestamp_color_paints_each_ring_by_its_instant() {
+        use crate::render::color::Color;
+        use crate::render::scale_resolve::ColorScale;
+        use arrow::array::TimestampMillisecondArray;
+        use std::borrow::Cow;
+        let spec = polygon_spec(Some("ring"), Some("k"));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
+            Field::new("ring", DataType::UInt32, false),
+            Field::new("k", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+            Arc::new(Float64Array::from(vec![0.0, 1.0, 0.5,    2.0, 3.0, 2.5])),
+            Arc::new(Float64Array::from(vec![0.0, 0.0, 1.0,    0.0, 0.0, 1.0])),
+            Arc::new(UInt32Array::from(vec![0u32, 0, 0,        1, 1, 1])),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 1_000, 2_000, 2_000, 2_000])),
+        ]).unwrap();
+        let theme = ThemeInputs::default();
+        let panel = rect_panel();
+        let mut no_color = spec.clone();
+        no_color.encoding.color = None;
+        let (mut scales, _) = resolve_scales(&no_color, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        scales.color = Some(ColorScale::Categorical {
+            domain: vec!["1000".into(), "2000".into()],
+            palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
+        });
+        let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+        let fills: Vec<Option<(u8, u8, u8)>> = result.nodes.iter().filter_map(|n| match n {
+            ferrum_scene::SceneNode::Polygon { style, .. } => Some(style.fill.map(|c| (c.r, c.g, c.b))),
+            _ => None,
+        }).collect();
+        assert_eq!(fills, vec![Some((200, 0, 0)), Some((0, 0, 200))]);
     }
 }

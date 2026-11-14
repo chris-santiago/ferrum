@@ -365,6 +365,14 @@ fn numeric_aux_scale_kind(
 /// range-gated carve-out to mirror. `sort=`, when present, still applies on
 /// top of either source.
 ///
+/// `establishing_draws` is whether the establishing mark draws the channel.
+/// The establishing column is gated on its dtype before the domain source is
+/// chosen ([`ensure_category_keyable`](crate::render::arrow_cast::ensure_category_keyable)):
+/// a declared domain skips the enumeration that refuses a column with no
+/// categories (a date, datetime, duration, decimal, time, binary or nested
+/// column), so the gate refuses it with the same words, as the categorical
+/// colour scale does.
+///
 /// `layer_reads` are a layered spec's admitted reads of the channel
 /// ([`AuxRead`]): the data-derived domain is then every drawing layer's
 /// categories in layer order ([`aux_category_union`]), and a data-aware
@@ -383,7 +391,27 @@ fn sorted_categorical_domain(
     facet_shared: bool,
     coord_flipped: bool,
     layer_reads: &[AuxRead<'_>],
+    establishing_draws: bool,
 ) -> Result<(Vec<String>, Vec<crate::render::RenderWarning>), RenderError> {
+    // The establishing column must have categories whatever the domain's
+    // source: a declared `scale.domain` supersedes the enumeration that would
+    // otherwise refuse a column nothing can key, so without this gate a date or
+    // decimal `shape`/`stroke_dash` under an explicit domain resolved a scale
+    // whose legend its marks contradict (every mark in the default glyph or
+    // dash). Colour is gated the same way (`color.rs`'s categorical branch), and
+    // the refusal is the one `distinct_values_in_order` gives. A column the
+    // batch does not carry is not gated: the paths below handle it as before.
+    //
+    // The gate runs only where the establishing mark draws the channel
+    // (`establishing_draws`): a channel the mark ignores keeps its handling
+    // (the "has no effect" notice and a chart that draws as without it).
+    let establishing = match layer_reads.first() {
+        Some(lead) => lead.locate(batch, transform_outputs).map(|located| (lead.field(), located.col)),
+        None => batch.column_by_name(field).map(|col| (field, col.as_ref())),
+    };
+    if let (true, Some((name, col))) = (establishing_draws, establishing) {
+        crate::render::arrow_cast::ensure_category_keyable(name, col.data_type())?;
+    }
     // A layered spec's every read draws its field, so the union is `None`
     // only for an unlayered spec, which reads its one batch.
     let (layer_categories, domain_batch, lead) = match aux_category_union(layer_reads, batch, transform_outputs, facet_shared)? {
@@ -600,7 +628,12 @@ pub fn build_size_scale(
 /// `layer_reads` are a layered spec's reads of `shape` ([`AuxRead`]): the
 /// domain is then every drawing layer's categories in layer order. A shape
 /// scale reads every column as categories, so no layer's column conflicts
-/// with it and every read is admitted. Empty for an unlayered spec.
+/// with it and every read is admitted. A column with no categories (a date,
+/// datetime, duration, decimal, time, binary or nested column) refuses with
+/// `cannot enumerate distinct values` whether it establishes the scale,
+/// carries an explicit `domain`, or is a later layer's. Empty for an unlayered
+/// spec.
+#[allow(clippy::too_many_arguments)]
 pub fn build_shape_scale(
     encoding: &crate::spec::encoding::Encoding,
     batch: &RecordBatch,
@@ -612,6 +645,7 @@ pub fn build_shape_scale(
     // user wrote (#95). `false` for every unflipped chart → byte-identical.
     coord_flipped: bool,
     layer_reads: &[AuxRead<'_>],
+    establishing_draws: bool,
 ) -> Result<(Option<ShapeScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(shape_enc) = &encoding.shape else {
         return Ok((None, Vec::new()));
@@ -639,6 +673,7 @@ pub fn build_shape_scale(
         facet_shared,
         coord_flipped,
         layer_reads,
+        establishing_draws,
     )?;
 
     // #123 D1: an explicit ordinal range assigns glyphs by the named shapes
@@ -826,8 +861,14 @@ pub fn build_opacity_channel_scale(
 /// between the categorical scale and the index palette; a later layer whose
 /// column reads the other way is left out, with one `LayerScaleExcluded`
 /// first among the warnings ([`admitted_aux_reads`]), and a categorical
-/// domain is every admitted layer's categories in layer order. Empty for an
+/// domain is every admitted layer's categories in layer order. A categorical
+/// dash whose column has no categories (a date, datetime, duration, decimal,
+/// time, binary or nested column typed nominal or ordinal) refuses with
+/// `cannot enumerate distinct values` whether it establishes the scale or
+/// carries an explicit `domain` ([`sorted_categorical_domain`]'s gate), when
+/// the establishing mark draws the channel (`establishing_draws`). Empty for an
 /// unlayered spec, which reads `batch`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_stroke_dash_scale(
     encoding: &Encoding,
     batch: &RecordBatch,
@@ -838,6 +879,7 @@ pub fn build_stroke_dash_scale(
     // rendered channel question, same answer (#95).
     coord_flipped: bool,
     layer_reads: &[AuxRead<'_>],
+    establishing_draws: bool,
 ) -> Result<(Option<StrokeDashScale>, Vec<crate::render::RenderWarning>), RenderError> {
     let Some(dash_enc) = &encoding.stroke_dash else {
         return Ok((None, Vec::new()));
@@ -884,6 +926,7 @@ pub fn build_stroke_dash_scale(
         facet_shared,
         coord_flipped,
         &layer_reads,
+        establishing_draws,
     )?;
     warnings.extend(sort_warnings);
 

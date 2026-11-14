@@ -2751,6 +2751,11 @@ pub(crate) fn blend_accepted_values() -> Vec<&'static str> {
 /// and the infallible ones wrap in `Ok`, which needs no early return and leaves
 /// no unreachable arm to panic from at this `pub` boundary.
 pub fn dispatch_mark_build(mark: &Mark, ctx: &DrawCtx) -> Result<MarkBuildResult, RenderError> {
+    // One refusal for every mark, ahead of the build: a `detail` no key reader
+    // takes would otherwise read as "no key" at the partition and merge every
+    // row into one series, and the infallible builds cannot carry the error
+    // themselves.
+    super::marks::channels::refuse_unreadable_detail(ctx)?;
     match mark {
         Mark::Rule => super::marks::rule::build(ctx),
         Mark::Segment => super::marks::segment::build(ctx),

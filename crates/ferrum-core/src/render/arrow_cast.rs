@@ -817,9 +817,9 @@ fn unsupported_category_key(field: &str, dtype: &DataType) -> RenderError {
 /// [`distinct_values_in_order`] (domain build) and
 /// [`col_as_ordinal_category_str`] (per-row key) accept exactly this dtype set,
 /// so a categorical scale over a column outside it is unserviceable end to end.
-/// This exists for the one resolver branch that builds a categorical *color*
-/// domain without reading the column — an explicit `scale.domain` supersedes
-/// the data-derived domain, so the per-row reader would be the first thing to
+/// This exists for the resolver branches that build a categorical *color*,
+/// `shape` or `stroke_dash` domain without reading the column — an explicit
+/// `scale.domain` supersedes the data-derived domain, so the per-row reader would be the first thing to
 /// touch the column, and only on the marks whose builders propagate its error
 /// (rule/segment refuse; point/bar paint every element one color under a legend
 /// enumerating the declared range). Gating on the dtype there moves the refusal

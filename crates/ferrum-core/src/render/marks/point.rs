@@ -2,23 +2,28 @@
 //! Phase 7: always emits <circle> using ctx.mark_style.point.point_size.
 //! Phase 8a: honors per-row size/shape/opacity from ctx.scales when populated.
 //!
-//! # The `shape` channel reads through the ordinal-category reader (#166)
+//! # The `shape` channel reads through the identity-key reader (#166)
 //!
-//! `shape_values` reads `col_as_ordinal_category_str`, not `col_as_str`
-//! (matching `color`'s NF-A3 sweep and `point`'s own positional reads
-//! above). `col_as_str` errors on every non-`Utf8` dtype and the `.ok()`
-//! swallowed it, so an `Int*`/`Float*`/`Bool` shape column left
-//! `shape_values` `None` for every row and every point fell back to the
-//! mark-style default (or plain `Circle`) while the legend — built from the
-//! dtype-wide `distinct_values_in_order` — enumerated every category. This
-//! is a **disclosed reader-switch, not a refusal**: unlike `color`, a shape
-//! column this batch does not carry at all is not a distinct case `shape`
-//! needs to tell apart from "no shape values" (there is no cross-layer
-//! shape-inheritance carve-out to protect), so the read stays infallible —
-//! an unreadable dtype (e.g. `Timestamp`) still falls back to the mark-style
-//! default exactly as before. `Utf8` shape columns are byte-identical.
+//! `shape_values` reads `col_as_identity_key_str`, not `col_as_str`: the one
+//! reader every grouping partition keys a row with (`point`'s own positional
+//! reads stay on the ordinal-category reader, since they place on a band).
+//! `col_as_str` errors on every non-`Utf8` dtype and the `.ok()` swallowed
+//! it, so an `Int*`/`Float*`/`Bool` shape column left `shape_values` `None`
+//! for every row and every point fell back to the mark-style default (or
+//! plain `Circle`) while the legend — built from the dtype-wide
+//! `distinct_values_in_order` — enumerated every category. The identity
+//! reader also keys a `Timestamp` column by its epoch value, so a date shape
+//! under a categorical scale an explicit `domain` or a sibling layer
+//! establishes gives each instant its own glyph as its integer twin does.
+//! The read itself stays infallible: a shape column this batch does not carry
+//! is not a distinct case (there is no cross-layer shape-inheritance
+//! carve-out to protect), and a column no key reader takes (a decimal, time
+//! or nested column) is refused before the build by
+//! `channels::refuse_unreadable_partition_keys`, not merged into plain
+//! circles. `Utf8` shape columns are byte-identical.
 
 use crate::render::color::with_opacity;
+use crate::render::arrow_cast::col_as_identity_key_str;
 use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
@@ -386,7 +391,7 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
 
     let shape_values: Option<Vec<Option<String>>> = spec.encoding.shape
         .as_ref()
-        .and_then(|e| col_as_ordinal_category_str(ctx.batch, &e.field).ok());
+        .and_then(|e| col_as_identity_key_str(ctx.batch, &e.field).ok());
 
     let opacity_values: Option<Vec<Option<f64>>> = spec.encoding.opacity
         .as_ref()
@@ -1967,5 +1972,47 @@ mod tests {
                 assert_eq!(dot.diameter().to_bits(), diameter.to_bits(), "{name} fed={fed} diameter");
             }
         }
+    }
+
+    /// A `Timestamp` `shape` column reads as the identity key its text twin
+    /// does: the scale is resolved over the epoch strings, then the draw reads
+    /// the temporal column itself and still gives each instant its own glyph.
+    #[test]
+    fn point_with_timestamp_shape_column_emits_3_shape_kinds() {
+        use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+
+        let spec = spec_with_shape();
+        let columns = |species: Field, values: Arc<dyn arrow::array::Array>| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                species,
+            ]));
+            arrow::record_batch::RecordBatch::try_new(schema, vec![
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0])),
+                values,
+            ]).unwrap()
+        };
+        let text = columns(
+            Field::new("species", DataType::Utf8, false),
+            Arc::new(StringArray::from(vec!["1000", "2000", "3000"])),
+        );
+        let batch = columns(
+            Field::new("species", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 2_000, 3_000])),
+        );
+        let theme = ThemeInputs::default();
+        let panel = make_panel();
+        let (scales, _) = resolve_scales(&spec, &text, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+        let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
+        let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+        let result = super::build(&ctx);
+
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Circle { .. })).count(), 1, "circle count");
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Rect { .. })).count(), 1, "rect count");
+        assert_eq!(result.nodes.iter().filter(|n| matches!(n, SceneNode::Line { .. })).count(), 2, "line count (cross)");
     }
 }

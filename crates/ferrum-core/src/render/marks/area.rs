@@ -14,7 +14,7 @@
 //! Grouping rules (mirroring line.rs D8):
 //! - Color encoding only: one area per color category. Nominal (Utf8) and
 //!   non-nominal (Int*, Float*, Bool) color columns are both supported via
-//!   `col_as_ordinal_category_str`. Color drives the fill color legend.
+//!   `col_as_identity_key_str`. Color drives the fill color legend.
 //!   A binned color (`Color(bin=...)`) groups by bin instead: one area per
 //!   bin, low bin first, filled with that bin's step of the binned scale.
 //! - `mark_style.group.detail` only: one area per detail value, theme-default fill.
@@ -23,7 +23,8 @@
 //! - Neither: single area over all rows.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::arrow_cast::col_as_identity_key_str;
+use crate::render::draw::{col_as_f64, color_field, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, BinnedColorSeries, SeriesPartition};
 use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
@@ -196,17 +197,17 @@ pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
     let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
     let cf = color_field(ctx, spec);
-    // Use col_as_ordinal_category_str so that Int*, Float*, and Bool color columns
+    // Use col_as_identity_key_str so that Int*, Float*, and Bool color columns
     // split into groups just like Utf8 columns do. col_as_str returns Err for
     // non-Utf8 dtypes, which silently collapsed everything into one path (the bug).
     //
     // A binned color groups by bin instead: one band per bin, keyed by a value
     // its bin's color resolves from (the bin's lower edge), in bin order.
     let binned = BinnedColorSeries::of(ctx);
-    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
     let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
     let detail_values = ctx.mark_style.group.detail.as_deref()
-        .and_then(|f| col_as_ordinal_category_str(ctx.batch, f).ok());
+        .and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
 
     // area does not consume the `stroke_dash` channel (only line, rule,
     // point, bar and rect draw it); only a statistic's grouping splits further.
@@ -2414,5 +2415,28 @@ mod tests {
         assert_eq!(null_case.nodes.len(), 1);
         assert!(null_case.empty_reason.is_none(), "{:?}", null_case.empty_reason);
         assert_eq!(null_case.dropped_series.unwrap().names(), vec!["c=b (one point)"]);
+    }
+
+    /// A `Timestamp` `detail` splits the series, one per instant, as the same
+    /// values as text do.
+    #[test]
+    fn a_timestamp_detail_splits_the_series() {
+        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        let partition = temporal_key_partition(Mark::Area, TemporalKeyChannel::Detail, super::series_groups);
+        let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
+        assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(partition.fields, vec!["k".to_string()]);
+    }
+
+    /// A `Timestamp` `color` under a categorical scale splits the series, one
+    /// per instant, each keyed by its epoch string.
+    #[test]
+    fn a_timestamp_color_splits_the_series() {
+        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        let partition = temporal_key_partition(Mark::Area, TemporalKeyChannel::Color, super::series_groups);
+        let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
+        let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
+        assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
+        assert_eq!(keys, vec![Some("1000".to_string()), Some("2000".to_string())]);
     }
 }

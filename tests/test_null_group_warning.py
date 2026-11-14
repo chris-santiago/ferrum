@@ -46,7 +46,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import warnings
-from typing import Any, Callable, Literal, NamedTuple
+from typing import Any, Callable, Literal, NamedTuple, TypeVar
 
 import polars as pl
 import pytest
@@ -93,10 +93,14 @@ _TWO_GROUP_ONE_NULL = pl.DataFrame(
 )
 
 
+_Rendered = TypeVar("_Rendered")
+
+
 def _render_capturing(
-    render: Callable[[], str], *, action: Literal["always", "default"] = "always"
-) -> tuple[str, list[str]]:
-    """Render inside a warning capture: the output and every warning raised.
+    render: Callable[[], _Rendered], *, action: Literal["always", "default"] = "always"
+) -> tuple[_Rendered, list[str]]:
+    """Render inside a warning capture: what ``render`` returned (an svg, an html page or a
+    scene's nodes) and every warning raised.
 
     ``action`` is the ``warnings`` filter action. ``"always"`` keeps every copy.
     ``"default"`` is Python's own, which shows one text once per location, so
@@ -1077,6 +1081,62 @@ def _group_dtype_refusal(entry: str, role: str, column: str, dtype: str) -> str:
         f"transform failed: ValueError: {entry}: {role} column '{column}' has unsupported dtype "
         f"{dtype}; supported: {GROUPBY_SUPPORTED_DTYPES}"
     )
+
+
+def _unenumerable_refusal(column: str = "d", dtype: str = "Timestamp(Millisecond, None)") -> str:
+    """The refusal a categorical channel (colour, shape, stroke_dash) raises for a column whose
+    distinct values cannot be listed, as its scale or legend surfaces it. A temporal column reads
+    ``Timestamp(Millisecond, None)``: every date, datetime and duration reaches the engine so."""
+    return f"column '{column}' has unsupported dtype: {dtype} (cannot enumerate distinct values)"
+
+
+def _unreadable_key_refusal(
+    entry: str, column: str, dtype: str, *, prefix: str = "", layer: int | None = None
+) -> str:
+    """The refusal a mark raises when the ``detail`` column that splits its series is of a dtype
+    nothing can key, with the remedy: ``entry`` names the mark, ``layer`` the layer on a layered
+    chart, and ``prefix`` anything a composite puts before them."""
+    where = f"layer {layer}: " if layer is not None else ""
+    return (
+        f"{prefix}{where}{entry}: column '{column}' has unsupported dtype: {dtype} "
+        f"(it cannot key a series; convert '{column}' to strings to split the mark by it)"
+    )
+
+
+def _scale_excluded(channel: str, layer: int = 1, established_by: int = 0) -> str:
+    """The notice that a layer's binding on ``channel`` differs from the scale another layer
+    establishes, so it stays out of that scale and draws through it."""
+    return (
+        f"layer {layer}: its {channel} scale differs from the one layer {established_by} "
+        f"establishes the {channel} scale with, so it stays out of that scale; its marks draw "
+        "through that scale and may fall outside its legend"
+    )
+
+
+def _detail_ignored(mark: str) -> str:
+    """The notice that a ``detail`` bound on a mark that does not split by it was ignored."""
+    return (
+        f"encode(detail=...) is accepted but ignored by mark_{mark}; only mark_line, mark_area, "
+        "mark_polygon, and mark_ribbon read the detail channel for per-group splitting."
+    )
+
+
+_SHORT_UNIT_TAILS = {
+    "line": "mark_line() joins two or more points per series",
+    "area": "mark_area() spans two or more points per series",
+    "ribbon": "mark_ribbon() spans two or more points per band",
+}
+
+
+def _short_unit_message(mark: str, group: str, *, layer: int | None = None) -> str:
+    """The notice that a series (line, area, ribbon) or a ring (polygon) with too few vertices
+    was not drawn, naming the group it belonged to. A polygon names its layer."""
+    if mark == "polygon":
+        return (
+            f"layer {layer}: mark_polygon: a polygon joins three or more vertices, so it did "
+            f"not draw {group} (two vertices)"
+        )
+    return f"mark_{mark}: {_SHORT_UNIT_TAILS[mark]}, so it did not draw {group} (one point)"
 
 
 def _not_drawn(entry: str, channel: str, field: str, mark: str) -> str:
