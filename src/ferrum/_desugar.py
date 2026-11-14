@@ -2000,6 +2000,7 @@ def _resolve_pending_as(
             ),
             data_source="smooth",
             entry=entry,
+            flip_by_call=chart._pending_stat_mark.flip_by_call,
         )
         new._transforms = _with_mark_statistics(chart._transforms, transforms)
         new._layers = _prior_layers + [smooth_layer]
@@ -2007,6 +2008,7 @@ def _resolve_pending_as(
         return new
     new._mark = mark
     new._entry = entry
+    new._flip_by_call = chart._pending_stat_mark.flip_by_call
     new._transforms = _with_mark_statistics(chart._transforms, transforms)
     # Merge the result's resolved mark_kwargs with the caller's catch-all
     # style kwargs -- on `catch_all_over`'s terms, from the caller-named

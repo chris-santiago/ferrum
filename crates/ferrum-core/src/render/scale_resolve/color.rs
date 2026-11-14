@@ -10,6 +10,7 @@ use crate::spec::encoding::DataType as SpecDataType;
 
 use crate::render::color::Color;
 use crate::render::color::palette;
+use crate::render::series_keys::ColorSplit;
 use crate::render::RenderError;
 
 use super::domain::{admitted_color_reads, apply_sort_to_domain, ColorReads, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, legend_sort_context, locate_field, AuxRead, FacetExtentPolicy};
@@ -118,6 +119,48 @@ use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_ca
 /// every column reads as categories, so every layer is admitted, and a
 /// raster image's cells, which have none, are refused naming the layer that
 /// establishes the categorical scale.
+/// Whether the color scale reads the column of `c_enc` (the establishing
+/// binding) continuously: a binned color, or a quantitative or temporal column
+/// that no grouping area forces to categories. The one decision of the scale's
+/// kind, read by [`build_color_scale`] and by [`color_split`].
+fn color_reads_continuous(c_enc: &crate::spec::encoding::EncodingSpec, force_categorical: bool, dtype: &arrow::datatypes::DataType) -> bool {
+    let binned = c_enc.color_bin().is_some();
+    !force_categorical && (binned || matches!(infer_spec_type(c_enc, dtype), SpecDataType::Quantitative | SpecDataType::Temporal))
+}
+
+/// How the color scale [`build_color_scale`] builds for the establishing
+/// binding `c_enc` splits a mark into series, decided before any row is
+/// dropped or imputed: a bin-cut scale splits by bin, a continuous scale
+/// splits nothing, any other reads categories. Reads the same inputs the
+/// scale's kind is decided from (the binding, the grouping area, the
+/// establishing layer's column dtype), never row values. The split is the
+/// establishing binding's; [`ColorSplit::for_binding`] gives a layer's own.
+pub(in crate::render) fn color_split(
+    c_enc: &crate::spec::encoding::EncodingSpec,
+    grouping_area: Option<usize>,
+    layer_reads: &[AuxRead<'_>],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> ColorSplit {
+    let binned = c_enc.color_bin().is_some();
+    let continuous = |is_continuous: bool| match (is_continuous, binned) {
+        (true, true) => ColorSplit::Bins,
+        (true, false) => ColorSplit::Unsplit,
+        (false, _) => ColorSplit::Categories,
+    };
+    // A raster image's cells are numbers: they are continuous, or binned.
+    if layer_reads.first().is_some_and(AuxRead::is_raster_cells) {
+        return continuous(true);
+    }
+    let located = match layer_reads.first() {
+        Some(lead) => lead.locate(primary_batch, transform_outputs),
+        None => locate_field(&c_enc.field, primary_batch),
+    };
+    let Some(located) = located else { return ColorSplit::Unsplit };
+    let force_categorical = grouping_area.filter(|_| !binned).is_some();
+    continuous(color_reads_continuous(c_enc, force_categorical, located.col.data_type()))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn build_color_scale(
     encoding: &crate::spec::encoding::Encoding,
@@ -175,14 +218,12 @@ pub fn build_color_scale(
     }
     .ok_or_else(|| RenderError::UnknownColumn { name: c_enc.field.clone() })?;
 
-    let inferred = infer_spec_type(c_enc, located.col.data_type());
     // FA-5: When force_categorical is set (mark_area), treat any quantitative/temporal
     // color field as categorical.  Area always groups by distinct color values
     // (col_as_ordinal_category_str), so both the fills and the legend must agree on
     // a categorical palette rather than diverging: fills from a continuous ramp vs.
     // legend showing a gradient colorbar.
-    let is_continuous_color = !force_categorical
-        && (binned || matches!(inferred, SpecDataType::Quantitative | SpecDataType::Temporal));
+    let is_continuous_color = color_reads_continuous(c_enc, force_categorical, located.col.data_type());
     let mut exclusions: Vec<crate::render::RenderWarning> = Vec::new();
     let layer_reads = if force_categorical {
         // A mark that groups color reads every column as categories; a

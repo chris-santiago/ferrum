@@ -138,7 +138,6 @@ import decimal
 import math
 import numbers
 import operator
-from collections.abc import Mapping
 from typing import Any, Callable, Sequence, cast
 
 
@@ -519,11 +518,16 @@ def coerce_finite_real(label: str, value: Any, *, required: bool = False) -> int
 _KEYVALS_SEQUENCE_NAMES = ("start", "stop", "step")
 
 
+#: The impute options, in wire order: the one list the accepted names, the refusal text and the
+#: normalized result all read. The engine's registry publishes the same four after the
+#: transform's own columns.
+IMPUTE_OPTION_NAMES = ("method", "value", "keyvals", "frame")
+
+
 def coerce_impute_options(
     door: str,
     options: Any,
     *,
-    accepted: Sequence[str],
     normalize_value: Callable[[Any], Any],
     normalize_keyval: Callable[[Any], Any],
 ) -> dict[str, Any]:
@@ -531,9 +535,9 @@ def coerce_impute_options(
 
     *door* is the pre-composed public door (``"Y(impute=...)"``,
     ``"transform_impute"``) that every refusal speaks as. *options* must be a
-    ``dict`` whose keys are all in *accepted*, the option names the engine's
-    registry publishes for ``impute`` (``method``, ``value``, ``keyvals``,
-    ``frame``). An option whose value is ``None`` is unset and dropped. The
+    ``dict`` whose keys are all in :data:`IMPUTE_OPTION_NAMES` (``method``,
+    ``value``, ``keyvals``, ``frame``), the option names the engine's registry
+    publishes for ``impute``. An option whose value is ``None`` is unset and dropped. The
     result holds the options that were given, in ``method``, ``value``,
     ``keyvals``, ``frame`` order, each normalized:
 
@@ -550,18 +554,20 @@ def coerce_impute_options(
     Raises
     ------
     ValueError
-        If *options* is not a dict, names an option that is not in *accepted*,
+        If *options* is not a dict, names an option that is not in :data:`IMPUTE_OPTION_NAMES`,
         or holds an option value that is malformed. *normalize_value* and
         *normalize_keyval* raise their own refusals for a bad literal.
     """
     if not isinstance(options, dict):
         raise ValueError(
-            f"{door} must be a dict of impute options ({', '.join(accepted)}), "
+            f"{door} must be a dict of impute options ({', '.join(IMPUTE_OPTION_NAMES)}), "
             f"got {type(options).__name__} {options!r}"
         )
     for name in options:
-        if name not in accepted:
-            raise ValueError(f"{door}: unknown option {name!r}; expected {'|'.join(accepted)}")
+        if name not in IMPUTE_OPTION_NAMES:
+            raise ValueError(
+                f"{door}: unknown option {name!r}; expected {'|'.join(IMPUTE_OPTION_NAMES)}"
+            )
     out: dict[str, Any] = {}
     if options.get("method") is not None:
         validate_str(door, "method", options["method"])

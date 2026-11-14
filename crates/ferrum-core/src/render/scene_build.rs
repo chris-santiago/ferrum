@@ -94,7 +94,6 @@ fn unplaceable_layer_coord(spec: &ChartSpec) -> Option<(usize, crate::spec::mark
 
 #[allow(clippy::too_many_arguments)]
 pub fn build_scene(
-    spec: &ChartSpec,
     prep: &PreparedInputs,
     layout: &LayoutResult,
     theme: &ThemeInputs,
@@ -106,12 +105,11 @@ pub fn build_scene(
     // → byte-identical.
     leaf_scales: Option<&LeafScaleContext>,
 ) -> Result<SceneGraph, RenderError> {
-    // The layers' routes `prepare` recorded (a layer the null-key drop gave
-    // rows of its own), then the primary y owner it resolved, so the
-    // per-panel scales read the same layer rows and flags as the prepared
-    // layers and slot plan. The two touch different fields and commute.
-    let routed = prep.routed_spec(spec);
-    let spec = &*scale_resolve::with_primary_y_owner(&routed);
+    // The spec `prepare` resolved (its layers' routes written, its primary y
+    // owner normalised), so the per-panel scales read the same layer rows and
+    // flags as the prepared layers and slot plan. The normalisation is
+    // idempotent: on this spec it borrows.
+    let spec = &*scale_resolve::with_primary_y_owner(prep.spec());
     // #230-8 (REFUSE MALFORMED; extended to `Geo`). A
     // projected coordinate system (`Polar` or `Geo`) combined with any
     // `BreakAxis` structural spec is refused, before any geometry — break or
@@ -845,7 +843,7 @@ pub fn build_scene(
     }
 
     // Legend
-    build_legend_decorations(layout, spec, prep, theme, chart_config, leaf_scales, &mut legend_nodes)?;
+    build_legend_decorations(layout, prep, theme, chart_config, leaf_scales, &mut legend_nodes)?;
 
     // zindex (B5 unit 3): coarse below/above-marks ordering for the legend,
     // mirroring the axis mechanism. Per-channel `Legend(zindex=...)` wins over
@@ -934,12 +932,11 @@ pub(in crate::render) struct PanelResolveCtx<'a> {
 }
 
 /// Each layer's whole-chart batch: the chart's final batch, the named
-/// transform output a layer reads from, or the rows the null-key drop gave it.
+/// transform output a layer reads from, or the rows the null-key drop or the
+/// impute gave it.
 fn chart_layer_batches(prep: &PreparedInputs) -> Result<Vec<RecordBatch>, RenderError> {
-    prep.layers
-        .iter()
-        .enumerate()
-        .map(|(index, layer)| match layer.rows_key() {
+    (0..prep.layers.len())
+        .map(|index| match prep.rows_key(index) {
             FINAL_OUTPUT_KEY => Ok(prep.final_batch().clone()),
             key => prep
                 .transform_outputs
@@ -983,7 +980,8 @@ fn panel_layer_batches(
     prep.layers
         .iter()
         .zip(chart_layer_batches)
-        .map(|(layer, src)| match (&layer.data_source, &layer.own_rows) {
+        .enumerate()
+        .map(|(index, (layer, src))| match (&layer.data_source, prep.own_rows(index)) {
             (None, None) => Ok(panel_batch.clone()),
             _ => filter_to_panel(src, keys),
         })
@@ -1268,10 +1266,17 @@ fn resolve_panel_scales(
     // built only then; every other chart resolves over `prep.transform_outputs`
     // as before.
     let panel_outputs;
-    let outputs = if prep.layer_routes.iter().any(|(index, _)| prep.layers[*index].data_source.is_none()) {
+    let routed_chart_layers: Vec<(usize, &str)> = prep
+        .layers
+        .iter()
+        .enumerate()
+        .filter(|(_, layer)| layer.data_source.is_none())
+        .filter_map(|(index, _)| prep.own_rows(index).map(|key| (index, key)))
+        .collect();
+    let outputs = if !routed_chart_layers.is_empty() {
         let mut map = prep.transform_outputs.clone();
-        for (index, key) in prep.layer_routes.iter().filter(|(index, _)| prep.layers[*index].data_source.is_none()) {
-            map.insert(super::prepare::null_keys::panel_key(key), layer_batches[*index].clone());
+        for (index, key) in routed_chart_layers {
+            map.insert(super::prepare::routes::panel_key(key), layer_batches[index].clone());
         }
         panel_outputs = map;
         &panel_outputs
@@ -2824,7 +2829,6 @@ fn build_title(
 /// ([`LeafScaleContext::overlay_groups_channel`]) draws its legend against
 /// the group's color scale, the one every member's marks draw through.
 pub(crate) fn resolve_legend_color_scale(
-    spec: &ChartSpec,
     prep: &PreparedInputs,
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
@@ -2833,6 +2837,7 @@ pub(crate) fn resolve_legend_color_scale(
     if let Some(group) = leaf_scales.filter(|c| c.overlay_groups_channel("color")).and_then(LeafScaleContext::overlay_group) {
         return super::config_apply::configured_color_scale(group.scales_for(theme).color(), chart_config);
     }
+    let spec = prep.spec();
     let mut rendering_spec_for_legend = ChartSpec {
         encoding: prep.rendering_encoding().clone(),
         ..spec.clone()
@@ -2861,7 +2866,6 @@ pub(crate) fn resolve_legend_color_scale(
 
 fn build_legend_decorations(
     layout: &LayoutResult,
-    spec: &ChartSpec,
     prep: &PreparedInputs,
     theme: &ThemeInputs,
     chart_config: &super::chart_config::ChartConfig,
@@ -2873,7 +2877,7 @@ fn build_legend_decorations(
     if layout.legend.is_none() && layout.aux_legends.is_empty() {
         return Ok(());
     }
-    let color_scale = resolve_legend_color_scale(spec, prep, theme, chart_config, leaf_scales)?;
+    let color_scale = resolve_legend_color_scale(prep, theme, chart_config, leaf_scales)?;
     if let Some(legend) = &layout.legend {
         out.extend(marks::legend::build_legend(
             legend,
@@ -5047,7 +5051,6 @@ mod tests {
             dropped_reads: Vec::new(),
             raster_value_field: None,
             grouping_series: crate::render::prepare::SeriesGrouping::default(),
-            own_rows: None,
         }
     }
 
@@ -5731,7 +5734,6 @@ mod tests {
         .unwrap();
 
         let result = build_scene(
-            spec,
             &prep,
             &layout,
             &theme,
@@ -8519,7 +8521,6 @@ mod tests {
         .unwrap();
 
         build_scene(
-            &spec,
             &prep,
             &layout,
             &theme,
@@ -8779,7 +8780,6 @@ mod tests {
         );
 
         let scene = build_scene(
-            &spec,
             &prep,
             &layout,
             &theme,
@@ -8895,7 +8895,6 @@ mod tests {
         )
         .unwrap();
         let scene = build_scene(
-            &spec,
             &prep,
             &layout,
             &theme,
@@ -18691,8 +18690,7 @@ mod routed_layer_scale_tests {
             None,
         )
         .unwrap();
-        let routed = prep.routed_spec(spec);
-        let ctx = PanelResolveCtx { spec: &routed, prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None };
+        let ctx = PanelResolveCtx { spec: prep.spec(), prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None };
         let chart_batches = chart_layer_batches(&prep).unwrap();
         prep.facet_groups
             .iter()
@@ -18753,8 +18751,95 @@ mod routed_layer_scale_tests {
             None,
         )
         .unwrap();
-        assert!(prep.layer_routes.is_empty());
-        assert!(matches!(prep.routed_spec(&spec), std::borrow::Cow::Borrowed(_)));
+        assert!((0..2).all(|layer| prep.own_rows(layer).is_none()));
+        assert_eq!(prep.spec().layers, spec.layers, "no route is written on the spec");
+    }
+}
+
+/// A standalone faceted chart with independent y axes whose primary y owner
+/// `with_primary_y_owner` normalises: layout's independent axis inputs read
+/// the same inputs whichever spec form they are resolved over.
+#[cfg(test)]
+mod independent_axis_spec_tests {
+    use super::*;
+    use arrow::array::{Float64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// `rule(x)` plus a `SecondaryY` line of `z`, faceted by `f` with
+    /// independent y axes: no layer draws y on the shared axis, so the
+    /// secondary layer is normalised to own the primary axis.
+    fn rule_and_secondary_y() -> (ChartSpec, RecordBatch) {
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"rule","encoding":{"x":{"field":"t"}},"layers":[{"mark":"rule","encoding":{"x":{"field":"t"}}},{"mark":"line","independent_y":true,"encoding":{"x":{"field":"t"},"y":{"field":"z"}}}]}"#;
+        let mut spec: ChartSpec = serde_json::from_str(json).unwrap();
+        spec.facet = Some(crate::layout::FacetSpec {
+            field: "f".into(),
+            row: None,
+            title: None,
+            row_title: None,
+            sort: None,
+            row_sort: None,
+            repeat: Vec::new(),
+            mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+            spacing: None,
+            resolve: crate::layout::facet::FacetResolve {
+                x: crate::layout::ResolveMode::Shared,
+                y: crate::layout::ResolveMode::Independent,
+            },
+        });
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("t", DataType::Float64, true),
+                Field::new("z", DataType::Float64, true),
+                Field::new("f", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 100.0, 200.0])),
+                Arc::new(StringArray::from(vec!["F1", "F1", "F2", "F2"])),
+            ],
+        )
+        .unwrap();
+        (spec, batch)
+    }
+
+    #[test]
+    fn an_independent_panel_axis_reads_the_same_inputs_under_the_normalised_spec() {
+        let (spec, batch) = rule_and_secondary_y();
+        let theme = ThemeInputs::default();
+        let chart_config = super::super::chart_config::ChartConfig::default();
+        let prep = super::super::prepare::prepare_render_inputs(
+            &spec,
+            &batch,
+            &theme,
+            crate::layout::Viewport { width: 600.0, height: 400.0 },
+            &chart_config,
+            None,
+        )
+        .unwrap();
+        let metrics = crate::render::font::FontdueMetrics::new();
+        let inputs = |spec: &ChartSpec| {
+            independent_panel_axis_inputs(
+                &PanelResolveCtx { spec, prep: &prep, theme: &theme, chart_config: &chart_config, leaf_scales: None },
+                &prep.facet_groups,
+                &metrics,
+            )
+            .unwrap()
+        };
+        // The caller's declaration, whose primary y owner is not yet normalised,
+        // against the spec prepare owns, which is.
+        let raw = scale_resolve::with_primary_y_owner(&spec);
+        assert!(
+            matches!(raw, std::borrow::Cow::Owned(_)) && prep.spec().layers.as_ref().is_some_and(|layers| !layers[1].independent_y),
+            "the fixture is one whose primary y owner is normalised, or the comparison below is vacuous"
+        );
+        let (raw_inputs, normalised_inputs) = (inputs(&spec), inputs(prep.spec()));
+        assert_eq!(raw_inputs.len(), 2, "one input per panel");
+        assert!(
+            raw_inputs.iter().all(|panel| *panel != crate::layout::PanelAxisInputs::default()),
+            "each panel draws its own y axis, so the inputs are not the empty default: {raw_inputs:?}"
+        );
+        assert_eq!(raw_inputs, normalised_inputs);
     }
 }
 

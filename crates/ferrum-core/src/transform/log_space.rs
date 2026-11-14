@@ -26,9 +26,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 
 use crate::transform::color_bin_group::SlotSpace;
-use crate::transform::context::{describe_group_keys, describe_group_row, AllNullOutcome, TransformContext, TransformWarning};
+use crate::transform::context::{describe_group_keys, AllNullOutcome, EmptiedByAxis, TransformContext};
 use crate::transform::core::{SpaceColumn, SpaceSlot};
-use crate::transform::group_key::{group_partition_multi, NullKeyPolicy, FIT_NULL_KEYS};
+use std::collections::BTreeMap;
+
+use crate::transform::group_key::{group_partition_multi, groupby_key_at, is_groupby_supported_dtype, KeyValue, NullKeyPolicy, FIT_NULL_KEYS};
 use crate::transform::numeric_util::{coerce_to_float64, column_extent};
 use crate::transform::project::with_column;
 
@@ -284,9 +286,12 @@ fn rewrite_output(result: RecordBatch, name: &str, shape: ColumnShape, map: impl
 /// `result` with its `name` column mapped back to data units through
 /// [`LogAxisSpace::backward`] ([`rewrite_output`]): a scalar Float64 output
 /// (bin edges, a kde grid, contour vertices) or a list one (a `Kde2D` grid
-/// axis, or its `extent` positions).
-fn backward_map_output(result: RecordBatch, name: &str, shape: ColumnShape, space: &LogAxisSpace, label: &str) -> PyResult<RecordBatch> {
-    rewrite_output(result, name, shape, |_, v| Some(space.backward(v)), label)
+/// axis, or its `extent` positions). A row `blank` flags (an emptied group's
+/// row) is set to NaN in the same pass: its default output takes no position
+/// on the axis. `blank` is empty when no row is flagged.
+fn backward_map_output(result: RecordBatch, name: &str, shape: ColumnShape, space: &LogAxisSpace, blank: &[bool], label: &str) -> PyResult<RecordBatch> {
+    let map = |row: usize, v: f64| Some(if blank.get(row).copied().unwrap_or(false) { f64::NAN } else { space.backward(v) });
+    rewrite_output(result, name, shape, map, label)
 }
 
 /// Whether `values` hold no on-side value and at least one off-side one:
@@ -311,9 +316,18 @@ pub(crate) enum AxisEmptied {
     /// batch ([`NullKeyPolicy::SkipWithWholeBatchFallback`]), and whose rows
     /// hold none on some demanded slot.
     FallbackBatch,
-    /// The labels ([`describe_group_keys`]) of the step's own groups that
-    /// hold none on some demanded slot, in group order.
-    Groups(Vec<String>),
+    /// The step's own groups that hold none on some demanded slot, in group
+    /// order.
+    Groups(EmptiedGroups),
+}
+
+/// The groups of a step's own `groupby` a log axis emptied: each one's key,
+/// as the shared partitioner formed it, and its label
+/// ([`describe_group_keys`]), in group order.
+#[derive(Debug, PartialEq)]
+pub(crate) struct EmptiedGroups {
+    pub(crate) keys: Vec<Vec<KeyValue>>,
+    pub(crate) labels: Vec<String>,
 }
 
 /// What `ctx`'s log axis left empty of a call reading `slots` (each a
@@ -350,75 +364,49 @@ pub(crate) fn emptied_by_axis(
         let emptied = slots.iter().any(|(values, space)| all_off_side(values.iter(), space));
         return if emptied { AxisEmptied::FallbackBatch } else { AxisEmptied::Nothing };
     }
-    let labels: Vec<String> = partition
+    let keys: Vec<Vec<KeyValue>> = partition
         .groups
-        .iter()
+        .into_iter()
         .filter(|(_, rows)| {
             slots.iter().any(|(values, space)| all_off_side(rows.iter().map(|&row| values.is_valid(row).then(|| values.value(row))), space))
         })
-        .map(|(keys, _)| describe_group_keys(&ctx.groupby, keys))
+        .map(|(keys, _)| keys)
         .collect();
-    if labels.is_empty() {
-        AxisEmptied::Nothing
-    } else {
-        AxisEmptied::Groups(labels)
+    if keys.is_empty() {
+        return AxisEmptied::Nothing;
     }
+    let labels = keys.iter().map(|keys| describe_group_keys(&ctx.groupby, keys)).collect();
+    AxisEmptied::Groups(EmptiedGroups { keys, labels })
 }
 
 /// Which rows of `result` are the output of an emptied group, and the labels
-/// of the groups they matched: a row belongs to a group when its own label
-/// ([`describe_group_row`] under `groupby`) is one of `labels`. A group whose
-/// rows the result does not carry under its label matches nothing, so it is
-/// neither blanked nor reported.
-fn rows_of_groups(result: &RecordBatch, groupby: &[String], labels: &[String]) -> (Vec<bool>, Vec<String>) {
-    let mut matched: Vec<String> = Vec::new();
+/// of the groups they matched in the order the result first carries them: a
+/// row belongs to a group when the key its `groupby` columns hold
+/// ([`groupby_key_at`], the reader the partition keys with) is one of
+/// `emptied`'s keys. A group whose rows the result does not carry matches
+/// nothing, so it is neither blanked nor recorded. A result without every
+/// `groupby` column, or holding one in a dtype that cannot key a group,
+/// matches nothing.
+fn emptied_rows(result: &RecordBatch, groupby: &[String], emptied: &EmptiedGroups) -> (Vec<bool>, Vec<String>) {
+    let schema = result.schema();
+    let columns: Option<Vec<&ArrayRef>> = groupby
+        .iter()
+        .map(|name| schema.index_of(name).ok().map(|idx| result.column(idx)).filter(|column| is_groupby_supported_dtype(column.data_type())))
+        .collect();
+    let Some(columns) = columns else { return (vec![false; result.num_rows()], Vec::new()) };
+    let by_key: BTreeMap<&[KeyValue], usize> = emptied.keys.iter().enumerate().map(|(i, keys)| (keys.as_slice(), i)).collect();
+    let mut matched: Vec<usize> = Vec::new();
     let flags = (0..result.num_rows())
         .map(|row| {
-            let Some(group) = describe_group_row(result, groupby, row).filter(|group| labels.contains(group)) else { return false };
+            let key: Option<Vec<KeyValue>> = columns.iter().map(|column| groupby_key_at(column.as_ref(), column.data_type(), row)).collect();
+            let Some(group) = key.and_then(|key| by_key.get(key.as_slice()).copied()) else { return false };
             if !matched.contains(&group) {
                 matched.push(group);
             }
             true
         })
         .collect();
-    (flags, matched)
-}
-
-/// `result` with each of its `outputs` columns set to NaN (every position
-/// `shape` maps, for a list column) on the rows `blank` flags: an emptied
-/// group's default output must take no position on the axis. A column the
-/// result lacks, or holds in another type, is left as it is.
-fn blank_rows(result: RecordBatch, blank: &[bool], outputs: &[(&str, ColumnShape)], label: &str) -> PyResult<RecordBatch> {
-    if !blank.contains(&true) {
-        return Ok(result);
-    }
-    outputs.iter().try_fold(result, |result, (name, shape)| {
-        rewrite_output(result, name, *shape, |row, v| Some(if blank[row] { f64::NAN } else { v }), label)
-    })
-}
-
-/// Drop from `ctx`'s warnings, from index `from` on (the ones the body just
-/// raised), each per-group `DegenerateFit` and `IntervalUndefined` that
-/// names a group in `labels` (`None`: the ones that name no group, which is
-/// how a body that fit the whole batch reports itself): the axis emptied
-/// that group, so its fit failed for want of values the caller never gave
-/// the statistic, and the axis's own off-side report already says why.
-/// Every other warning stays.
-fn drop_fit_warnings(ctx: &TransformContext, from: usize, labels: Option<&[String]>) {
-    let mut index = 0;
-    ctx.warnings.borrow_mut().retain(|warning| {
-        index += 1;
-        let group = match warning {
-            TransformWarning::DegenerateFit { group, .. } | TransformWarning::IntervalUndefined { group, .. } => Some(group.as_deref()),
-            _ => None,
-        };
-        let dropped = group.is_some_and(|group| match (group, labels) {
-            (None, None) => true,
-            (Some(group), Some(labels)) => labels.iter().any(|label| label == group),
-            _ => false,
-        });
-        index <= from || !dropped
-    });
+    (flags, matched.into_iter().map(|group| emptied.labels[group].clone()).collect())
 }
 
 /// `ctx` with a fresh, independent warnings sink: every other shared sink
@@ -474,9 +462,11 @@ impl SlotColumns {
 /// A grouped call runs `body` on the whole mapped batch (each grouped body
 /// degrades a group with no usable value and never refuses it). A group of
 /// its own `groupby` that holds no on-side value and at least one off-side
-/// one is then emptied by the axis: the `DegenerateFit` and
-/// `IntervalUndefined` the body raised for it are dropped, every `outputs`
-/// column on its rows is set to NaN, and its label is recorded
+/// one is emptied by the axis, which is known before `body` runs: `body`
+/// runs under a context that does not record the `DegenerateFit` and
+/// `IntervalUndefined` of those groups ([`TransformContext::with_axis_emptied`]),
+/// every `outputs` column on the rows carrying their keys is set to NaN as
+/// the output maps back, and their labels are recorded
 /// ([`TransformContext::note_log_emptied`]) for the null census. The axis's
 /// own off-side report names that cause once, so the group keeps its row,
 /// its legend entry and its place, and takes no position on the axis.
@@ -519,37 +509,40 @@ pub(crate) fn run_in_log_space(
     }
     let slots: Vec<(&Float64Array, LogAxisSpace)> = caller_slots.iter().map(|(values, space)| (values, *space)).collect();
     let emptied = emptied_by_axis(ctx, label, batch, &slots, null_keys);
-    let warned_before = ctx.warnings.borrow().len();
+    let scoped;
+    let body_ctx = match &emptied {
+        AxisEmptied::Groups(groups) => {
+            scoped = ctx.with_axis_emptied(EmptiedByAxis::Groups(groups.labels.clone()));
+            &scoped
+        }
+        AxisEmptied::FallbackBatch => {
+            scoped = ctx.with_axis_emptied(EmptiedByAxis::WholeBatch);
+            &scoped
+        }
+        AxisEmptied::Nothing | AxisEmptied::WholeCall => ctx,
+    };
     let mut result = if emptied == AxisEmptied::WholeCall {
         if ctx.is_partition {
             ctx.record_all_null(AllNullOutcome::OffSide);
         }
         body(&mapped_batch.slice(0, 0), &columns, &with_scratch_warnings(ctx))?.slice(0, 0)
     } else {
-        body(&mapped_batch, &columns, ctx)?
+        body(&mapped_batch, &columns, body_ctx)?
+    };
+    let (blank, emptied_labels) = match &emptied {
+        AxisEmptied::Groups(groups) => {
+            let (blank, matched) = emptied_rows(&result, &ctx.groupby, groups);
+            (blank, (!matched.is_empty()).then_some(Some(matched)))
+        }
+        AxisEmptied::FallbackBatch => (vec![true; result.num_rows()], Some(None)),
+        AxisEmptied::Nothing | AxisEmptied::WholeCall => (Vec::new(), None),
     };
     for (output, slot, shape) in outputs {
         let Some(d) = demand.iter().find(|d| d.slot == *slot) else { continue };
-        result = backward_map_output(result, output, *shape, &d.space.space, label)?;
+        result = backward_map_output(result, output, *shape, &d.space.space, &blank, label)?;
     }
-    let blanked: Vec<(&str, ColumnShape)> =
-        outputs.iter().filter(|(_, slot, _)| demand.iter().any(|d| d.slot == *slot)).map(|(name, _, shape)| (*name, *shape)).collect();
-    match &emptied {
-        AxisEmptied::Groups(labels) => {
-            let (flags, matched) = rows_of_groups(&result, &ctx.groupby, labels);
-            if !matched.is_empty() {
-                result = blank_rows(result, &flags, &blanked, label)?;
-                drop_fit_warnings(ctx, warned_before, Some(&matched));
-                ctx.note_log_emptied(Some(matched));
-            }
-        }
-        AxisEmptied::FallbackBatch => {
-            let all = vec![true; result.num_rows()];
-            result = blank_rows(result, &all, &blanked, label)?;
-            drop_fit_warnings(ctx, warned_before, None);
-            ctx.note_log_emptied(None);
-        }
-        AxisEmptied::Nothing | AxisEmptied::WholeCall => {}
+    if let Some(labels) = emptied_labels {
+        ctx.note_log_emptied(labels);
     }
     let schema = result.schema();
     let kept: Vec<usize> = (0..schema.fields().len()).filter(|&i| !columns.private.contains(schema.field(i).name())).collect();
@@ -817,7 +810,7 @@ mod tests {
         builder.values().append_slice(&[0.0, 2.0, 5.0, 7.0]);
         builder.append(true);
         let batch = RecordBatch::try_from_iter([("extent", Arc::new(builder.finish()) as ArrayRef)]).unwrap();
-        let mapped = backward_map_output(batch, "extent", ColumnShape::ListPositions(0, 2), &positive(), "t").unwrap();
+        let mapped = backward_map_output(batch, "extent", ColumnShape::ListPositions(0, 2), &positive(), &[], "t").unwrap();
         let list = mapped.column(0).as_any().downcast_ref::<ListArray>().unwrap().value(0);
         let values = list.as_any().downcast_ref::<Float64Array>().unwrap().values().to_vec();
         assert_eq!(values, [1.0, 100.0, 5.0, 7.0]);
@@ -1175,13 +1168,13 @@ mod tests {
         assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=c".to_string()]) }]);
     }
 
-    /// The fit warning is dropped, and the group recorded, only for a group
-    /// whose output rows were blanked: of two emptied groups, the one whose
-    /// rows read a label other than the partition's keeps its warning and is
-    /// not recorded, while the matched one is blanked, recorded and loses its
-    /// warning, so the halves of one fact cannot disagree.
+    /// A group is blanked and recorded only when the result carries rows
+    /// under its key: of two emptied groups, the one whose rows the result
+    /// does not carry (a statistic that dropped it) is neither blanked nor
+    /// recorded, while the matched one is both. The fit warnings of both are
+    /// not recorded, since the axis emptied both before the body ran.
     #[test]
-    fn a_group_whose_output_rows_cannot_be_matched_keeps_its_warning_and_is_not_recorded() {
+    fn a_group_whose_output_rows_are_not_carried_is_neither_blanked_nor_recorded() {
         pyo3::Python::initialize();
         let batch = grouped(&["a", "b", "c"], &[Some(10.0), Some(-1.0), Some(-2.0)]);
         let ctx = demanding_v(&["g"]);
@@ -1201,7 +1194,7 @@ mod tests {
         assert_eq!(out[0], 10.0);
         assert!(out[1].is_nan(), "the matched group is blanked: {out:?}");
         assert_eq!(out[2], 10.0, "the unmatched group keeps its output");
-        assert_eq!(fit_groups(&ctx), ["g=c"], "only the matched group's warning is dropped");
+        assert!(fit_groups(&ctx).is_empty(), "the axis emptied both groups before the body ran");
         assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: Some(vec!["g=b".to_string()]) }]);
     }
 
@@ -1220,5 +1213,332 @@ mod tests {
         let body = |mapped: &RecordBatch, _: &str, _: &str, _: &TransformContext| -> PyResult<RecordBatch> { Ok(mapped.clone()) };
         run_fit_in_log_space(&ctx, "stat_test", &batch, &columns, ("v", Some(&space)), ("w", None), body).unwrap();
         assert_eq!(*ctx.log_emptied.borrow(), vec![LogEmptied { panel: None, groups: None }]);
+    }
+
+    // ---- what the seam knows before a statistic runs ----
+
+    /// A step this seam does not own raising its own warnings through the
+    /// context it was handed.
+    fn clamped(group: &str) -> TransformWarning {
+        TransformWarning::ParameterClamped {
+            transform: "Kde".into(),
+            group: Some(group.into()),
+            param: "n".into(),
+            requested: "5".into(),
+            applied: "3".into(),
+            panel: None,
+        }
+    }
+
+    /// The seven statistics a drawn log axis can empty a group of, each run
+    /// through its own `apply_with_context` on a spec of its real wire form.
+    /// Contour demands list slots only, which never form a group, so the
+    /// seam finds nothing for it to empty.
+    struct Arm {
+        name: &'static str,
+        spec: serde_json::Value,
+        slot: SpaceSlot,
+        /// A scalar output column the demanded slot's units fill.
+        output: &'static str,
+        run: fn(&serde_json::Value, &RecordBatch, &TransformContext) -> PyResult<RecordBatch>,
+    }
+
+    fn from_spec<T: serde::de::DeserializeOwned>(spec: &serde_json::Value) -> T {
+        serde_json::from_value(spec.clone()).unwrap_or_else(|e| panic!("{spec}: {e}"))
+    }
+
+    fn arms() -> Vec<Arm> {
+        use serde_json::json;
+        let fit = |extra: serde_json::Value| {
+            let mut spec = json!({"x": "v", "y": "w", "groupby": ["g"]});
+            spec.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            spec
+        };
+        vec![
+            Arm {
+                name: "bin",
+                spec: json!({"field": "v", "bin_count": 3, "groupby": ["g"]}),
+                slot: SpaceSlot::Field,
+                output: "bin_start",
+                run: |spec, batch, ctx| crate::transform::bin::apply_with_context(&from_spec(spec), batch, ctx),
+            },
+            Arm {
+                name: "kde",
+                spec: json!({"field": "v", "bandwidth": {"kind": "silverman"}, "n": 5, "groupby": ["g"]}),
+                slot: SpaceSlot::Field,
+                output: "value",
+                run: |spec, batch, ctx| crate::transform::kde::apply_with_context(&from_spec(spec), batch, ctx),
+            },
+            Arm {
+                name: "kde_2d",
+                spec: json!({"x": "v", "y": "w", "n": 4, "groupby": ["g"]}),
+                slot: SpaceSlot::X,
+                output: "grid_x",
+                run: |spec, batch, ctx| crate::transform::kde_2d::apply_with_context(&from_spec(spec), batch, ctx),
+            },
+            Arm {
+                name: "smooth",
+                spec: fit(json!({"method": "lm", "bandwidth": 0.5, "degree": 1, "n": 4})),
+                slot: SpaceSlot::X,
+                output: "x",
+                run: |spec, batch, ctx| crate::transform::smooth::apply_with_context(&from_spec(spec), batch, ctx),
+            },
+            Arm {
+                name: "robust",
+                spec: fit(json!({"n_grid": 4, "huber_c": 1.345, "max_iter": 20, "tol": 1e-6})),
+                slot: SpaceSlot::X,
+                output: "x",
+                run: |spec, batch, ctx| crate::transform::robust::apply_with_context(&from_spec(spec), batch, ctx),
+            },
+            Arm {
+                name: "logistic",
+                spec: fit(json!({"n_grid": 4, "max_iter": 25, "tol": 1e-6})),
+                slot: SpaceSlot::X,
+                output: "x",
+                run: |spec, batch, ctx| crate::transform::logistic::apply_with_context(&from_spec(spec), batch, ctx),
+            },
+            Arm {
+                name: "glm",
+                spec: fit(json!({"family": "gaussian", "link": "identity", "n_grid": 4, "max_iter": 25, "tol": 1e-6})),
+                slot: SpaceSlot::X,
+                output: "x",
+                run: |spec, batch, ctx| crate::transform::glm::apply_with_context(&from_spec(spec), batch, ctx),
+            },
+        ]
+    }
+
+    /// `ctx` demanding the arm's slot in the positive log space, grouped by `g`.
+    fn demanding_arm(arm: &Arm) -> TransformContext {
+        let slot = SlotSpace {
+            space: positive(),
+            axes: vec![PositionalAxis::X],
+            records_caller_input: true,
+        };
+        TransformContext {
+            log_space: Some(Rc::new(crate::transform::color_bin_group::StepSpace::for_slots([(arm.slot, slot)]))),
+            ..demanding_v(&["g"])
+        }
+    }
+
+    /// `g` (nullable text), `v` (the demanded field) and `w` (a binary
+    /// response, for the fits).
+    fn arm_batch(g: &[Option<&str>], v: &[f64]) -> RecordBatch {
+        let w: Vec<f64> = (0..v.len()).map(|i| (i % 2) as f64).collect();
+        RecordBatch::try_from_iter([
+            ("g", Arc::new(arrow::array::StringArray::from(g.to_vec())) as ArrayRef),
+            ("v", Arc::new(Float64Array::from(v.to_vec())) as ArrayRef),
+            ("w", Arc::new(Float64Array::from(w)) as ArrayRef),
+        ])
+        .unwrap()
+    }
+
+    fn group_column(result: &RecordBatch) -> Vec<Option<String>> {
+        let g = result.column_by_name("g").unwrap().as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
+        g.iter().map(|v| v.map(str::to_string)).collect()
+    }
+
+    /// Whether row `row` of the arm's demanded output holds no finite value.
+    fn output_is_blank(result: &RecordBatch, name: &str, row: usize) -> bool {
+        let column = result.column_by_name(name).unwrap_or_else(|| panic!("no column {name}"));
+        match column.as_any().downcast_ref::<Float64Array>() {
+            Some(values) => values.is_null(row) || values.value(row).is_nan(),
+            None => {
+                let lists = column.as_any().downcast_ref::<ListArray>().unwrap();
+                let list = lists.value(row);
+                let values = list.as_any().downcast_ref::<Float64Array>().unwrap();
+                values.iter().all(|v| v.is_none_or(f64::is_nan))
+            }
+        }
+    }
+
+    /// Each statistic keeps a row for a group its log axis emptied and takes
+    /// no position on the axis with it: the group's label is recorded, its
+    /// demanded output is blank, and the group's `DegenerateFit` and
+    /// `IntervalUndefined` are not in the run's warnings. Rejects a
+    /// statistic that drops an emptied group's rows (its warning would
+    /// then be suppressed for a group that no longer draws anything) and a
+    /// seam that leaves the axis's own explanation restated.
+    #[test]
+    fn every_log_space_statistic_keeps_a_row_for_a_group_its_axis_emptied() {
+        pyo3::Python::initialize();
+        let g = [Some("a"), Some("a"), Some("a"), Some("b"), Some("b"), Some("b")];
+        let batch = arm_batch(&g, &[1.0, 10.0, 100.0, -1.0, 0.0, -5.0]);
+        for arm in arms() {
+            let ctx = demanding_arm(&arm);
+            let result = (arm.run)(&arm.spec, &batch, &ctx).unwrap_or_else(|e| panic!("{}: {e}", arm.name));
+            let groups = group_column(&result);
+            let rows_of_b: Vec<usize> = (0..groups.len()).filter(|&i| groups[i].as_deref() == Some("b")).collect();
+            assert!(!rows_of_b.is_empty(), "{}: the emptied group keeps a row: {groups:?}", arm.name);
+            for &row in &rows_of_b {
+                assert!(output_is_blank(&result, arm.output, row), "{}: row {row} of the emptied group takes a position", arm.name);
+            }
+            assert!(
+                (0..groups.len()).any(|i| groups[i].as_deref() == Some("a") && !output_is_blank(&result, arm.output, i)),
+                "{}: the group the axis kept still draws",
+                arm.name
+            );
+            assert_eq!(
+                *ctx.log_emptied.borrow(),
+                vec![LogEmptied { panel: None, groups: Some(vec!["g=b".to_string()]) }],
+                "{}",
+                arm.name
+            );
+            let warnings = ctx.warnings.borrow();
+            assert!(
+                !warnings.iter().any(|w| matches!(
+                    w,
+                    TransformWarning::DegenerateFit { group: Some(group), .. } | TransformWarning::IntervalUndefined { group: Some(group), .. } if group == "g=b"
+                )),
+                "{}: {warnings:?}",
+                arm.name
+            );
+        }
+    }
+
+    /// Each statistic's seam forms the groups under the null-key policy its
+    /// own partition reads: null-keyed off-side rows next to a keyed group
+    /// form no group for any statistic here (each drops them), so nothing
+    /// is recorded for them, and an all-null key column is the whole batch
+    /// for a fit and no group for the rest. Rejects a seam partitioning
+    /// under a policy its statistic does not, which would record a group
+    /// the statistic never drew.
+    #[test]
+    fn each_log_space_statistic_partitions_under_the_policy_its_seam_reads() {
+        pyo3::Python::initialize();
+        let mixed = arm_batch(&[Some("a"), Some("a"), Some("a"), None, None, None], &[1.0, 10.0, 100.0, -1.0, 0.0, -5.0]);
+        let all_null = arm_batch(&[None; 3], &[-1.0, 0.0, -5.0]);
+        let fits = ["smooth", "robust", "logistic", "glm"];
+        for arm in arms() {
+            let ctx = demanding_arm(&arm);
+            (arm.run)(&arm.spec, &mixed, &ctx).unwrap_or_else(|e| panic!("{}: {e}", arm.name));
+            assert!(ctx.log_emptied.borrow().is_empty(), "{}: null-keyed rows form no group: {:?}", arm.name, ctx.log_emptied.borrow());
+
+            let ctx = demanding_arm(&arm);
+            (arm.run)(&arm.spec, &all_null, &ctx).unwrap_or_else(|e| panic!("{}: {e}", arm.name));
+            let expected = if fits.contains(&arm.name) { vec![LogEmptied { panel: None, groups: None }] } else { vec![] };
+            assert_eq!(*ctx.log_emptied.borrow(), expected, "{}", arm.name);
+        }
+    }
+
+    /// A warning a statistic raises for an emptied group through a context
+    /// derived from the one it was handed (a clone shares the run's sink) is
+    /// not recorded either.
+    #[test]
+    fn an_emptied_groups_fit_warning_is_never_recorded_through_a_nested_context() {
+        pyo3::Python::initialize();
+        let batch = grouped(&["a", "c"], &[Some(10.0), Some(-1.0)]);
+        let ctx = demanding_v(&["g"]);
+        let space = x_slot();
+        let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
+        let body = |mapped: &RecordBatch, _: &SlotColumns, ctx: &TransformContext| -> PyResult<RecordBatch> {
+            let nested = ctx.clone();
+            nested.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::degenerate("too few"))?;
+            nested.warn(TransformWarning::IntervalUndefined {
+                transform: "Smooth".into(),
+                group: Some("g=c".into()),
+                ci: 0.95,
+                reason: "no band".into(),
+                panel: None,
+                step: nested.step.clone(),
+            });
+            nested.degrade_group_or_refuse("Kde", Some("g=a"), Unfittable::degenerate("too few"))?;
+            RecordBatch::try_from_iter([
+                ("g", Arc::clone(mapped.column_by_name("g").unwrap())),
+                ("out", Arc::new(Float64Array::from(vec![1.0, 1.0])) as ArrayRef),
+            ])
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+        };
+        run_in_log_space(&ctx, "stat_test", &batch, &demand, NullKeyPolicy::Skip, body, &[("out", SpaceSlot::Field, ColumnShape::Scalar)]).unwrap();
+        assert_eq!(fit_groups(&ctx), ["g=a"]);
+    }
+
+    /// A fit warning an earlier step of the pipeline raised into the shared
+    /// sink, for a group labelled like one this step's axis empties (or for
+    /// no group at all, as a whole-batch fit reports itself), stays.
+    #[test]
+    fn an_earlier_steps_fit_warning_for_a_same_named_group_stays() {
+        let earlier = TransformContext { step: StepInstance::Chain(vec![0]), ..demanding_v(&["g"]) };
+        earlier.degrade_group_or_refuse("Kde", Some("g=c"), Unfittable::degenerate("an earlier step's reason")).unwrap();
+        earlier.degrade_group_or_refuse("Smooth", None, Unfittable::degenerate("an earlier whole-batch fit")).unwrap();
+        let grouped_call = TransformContext { step: StepInstance::Chain(vec![1]), ..earlier.clone() };
+        run_per_group(&grouped_call, &grouped(&["a", "c"], &[Some(10.0), Some(-1.0)]), &["c"], &[]);
+        assert_eq!(fit_groups(&earlier), ["g=c"], "the earlier step's group warning stays, this step's is not recorded");
+
+        let fallback = TransformContext { step: StepInstance::Chain(vec![1]), ..earlier.clone() };
+        run_keyed(&fallback, &keyed(&[None, None], &[Some(-1.0), Some(0.0)]), FIT_NULL_KEYS, &[]);
+        let groupless = earlier.warnings.borrow().iter().filter(|w| matches!(w, TransformWarning::DegenerateFit { group: None, .. })).count();
+        assert_eq!(groupless, 1, "only the earlier step's whole-batch warning remains");
+    }
+
+    /// Only the fit warnings of an emptied group are not recorded: any other
+    /// warning for the group, and every warning for a group the axis kept,
+    /// stays.
+    #[test]
+    fn an_emptied_groups_other_warnings_stay() {
+        pyo3::Python::initialize();
+        let batch = grouped(&["a", "c"], &[Some(10.0), Some(-1.0)]);
+        let ctx = demanding_v(&["g"]);
+        let space = x_slot();
+        let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
+        let body = |mapped: &RecordBatch, _: &SlotColumns, ctx: &TransformContext| -> PyResult<RecordBatch> {
+            ctx.warn(clamped("g=c"));
+            ctx.warn(clamped("g=a"));
+            RecordBatch::try_from_iter([
+                ("g", Arc::clone(mapped.column_by_name("g").unwrap())),
+                ("out", Arc::new(Float64Array::from(vec![1.0, 1.0])) as ArrayRef),
+            ])
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+        };
+        run_in_log_space(&ctx, "stat_test", &batch, &demand, NullKeyPolicy::Skip, body, &[("out", SpaceSlot::Field, ColumnShape::Scalar)]).unwrap();
+        let kept: Vec<Option<String>> = ctx
+            .warnings
+            .borrow()
+            .iter()
+            .map(|w| match w {
+                TransformWarning::ParameterClamped { group, .. } => group.clone(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(kept, [Some("g=c".to_string()), Some("g=a".to_string())]);
+    }
+
+    /// A group keyed by a timestamp is blanked by its key: the row whose key
+    /// equals the emptied group's, and no other, whatever time zone the
+    /// column carries.
+    #[test]
+    fn an_emptied_date_keyed_group_is_blanked_by_its_key() {
+        use arrow::array::TimestampMillisecondArray;
+        pyo3::Python::initialize();
+        let day = 1_704_153_600_000_i64;
+        let days = |zone: Option<&str>| {
+            Arc::new(TimestampMillisecondArray::from(vec![day, day, day + 86_400_000, day + 86_400_000]).with_timezone_opt(zone)) as ArrayRef
+        };
+        for zone in [None, Some("UTC"), Some("Europe/Paris")] {
+            let batch = RecordBatch::try_from_iter([
+                ("d", days(zone)),
+                ("v", Arc::new(Float64Array::from(vec![10.0, 100.0, -1.0, 0.0])) as ArrayRef),
+            ])
+            .unwrap();
+            let ctx = TransformContext { groupby: vec!["d".to_string()], step: StepInstance::Chain(vec![1]), ..TransformContext::default() };
+            let space = x_slot();
+            let demand = [DemandedField { slot: SpaceSlot::Field, field: "v", space: &space, shape: ColumnShape::Scalar }];
+            let body = |mapped: &RecordBatch, _: &SlotColumns, ctx: &TransformContext| -> PyResult<RecordBatch> {
+                let partition = group_partition_multi(mapped, &ctx.groupby, "stat_test", NullKeyPolicy::Skip, ctx)?;
+                let rows: Vec<usize> = partition.groups.iter().map(|(_, rows)| rows[0]).collect();
+                let key = arrow::compute::take(mapped.column_by_name("d").unwrap(), &arrow::array::UInt32Array::from(rows.iter().map(|&r| r as u32).collect::<Vec<_>>()), None)
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                RecordBatch::try_from_iter([("d", key), ("out", Arc::new(Float64Array::from(vec![1.0; rows.len()])) as ArrayRef)])
+                    .map_err(|e| PyValueError::new_err(e.to_string()))
+            };
+            let result = run_in_log_space(&ctx, "stat_test", &batch, &demand, NullKeyPolicy::Skip, body, &[("out", SpaceSlot::Field, ColumnShape::Scalar)]).unwrap();
+            let out = out_values(&result);
+            assert_eq!(out[0], 10.0, "{zone:?}: the group the axis kept");
+            assert!(out[1].is_nan(), "{zone:?}: the emptied group is blanked: {out:?}");
+            assert_eq!(
+                *ctx.log_emptied.borrow(),
+                vec![LogEmptied { panel: None, groups: Some(vec!["d=2024-01-03T00:00:00".to_string()]) }],
+                "{zone:?}"
+            );
+        }
     }
 }

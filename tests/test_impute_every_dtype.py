@@ -691,15 +691,19 @@ def test_a_colour_the_mark_reads_as_categories_keys_its_series(name: str, mark: 
     )
 
 
-def test_a_numeric_colour_under_a_categorical_scale_keys_its_series():
+def test_an_untyped_numeric_colour_under_an_ordinal_scale_is_drawn_continuous_and_keys_no_series():
+    """The colour is drawn as one continuous colour whatever the ordinal scale beside it says, so it
+    splits nothing: the imputed chart is the chart without ``impute=`` (no row gains a mark), and
+    differs from the twin that writes the per-``h`` row out. ``type_="N"`` on the same frame is the
+    categorical contrast (``_CATEGORICAL_COLOURS``): there each series is completed."""
     frame, twin = _coloured(1, 2, pl.Int64), _coloured_twin(1, 2, pl.Int64)
     channel = fm.Color("h", scale=fm.OrdinalScale(domain=["1", "2"]))
-    _assert_twin(
-        lambda: _chart(frame, y=_y(True), color=channel),
-        lambda: _chart(twin, color=channel),
-        plain=lambda: _chart(frame, color=channel),
-        shown=[],
-    )
+    svg, shown = _render_capturing(lambda: _chart(frame, y=_y(True), color=channel).to_svg())
+    plain, _ = _render_capturing(lambda: _chart(frame, color=channel).to_svg())
+    written, _ = _render_capturing(lambda: _chart(twin, color=channel).to_svg())
+    assert shown == []
+    assert svg == plain
+    assert svg != written
 
 
 _CONTINUOUS_COLOURS = {

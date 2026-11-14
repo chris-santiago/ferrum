@@ -23,10 +23,9 @@
 //! - Neither: single area over all rows.
 
 use crate::render::color::with_opacity;
-use crate::render::arrow_cast::col_as_identity_key_str;
-use crate::render::draw::{col_as_f64, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, BinnedColorSeries, SeriesPartition};
+use crate::render::marks::channels::{build_color_detail_groups, detail_series, grouping_series_values, series_keys, ColorSeries, SeriesPartition};
 use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
 
@@ -194,33 +193,26 @@ fn build_stacked_area_cmds(top: &[(f64, f64)], bottom: &[(f64, f64)], trace: Tra
 /// by [`vertex_frame`] too, so the census's vertex-unit count and the real
 /// render can never group a statistic layer's rows differently.
 pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
-    let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
-    let cf = color_field(ctx, spec);
-    // Use col_as_identity_key_str so that Int*, Float*, and Bool color columns
-    // split into groups just like Utf8 columns do. col_as_str returns Err for
-    // non-Utf8 dtypes, which silently collapsed everything into one path (the bug).
-    //
-    // A binned color groups by bin instead: one band per bin, keyed by a value
-    // its bin's color resolves from (the bin's lower edge), in bin order.
-    let binned = BinnedColorSeries::of(ctx);
-    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
-    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
-    let detail_values = ctx.mark_style.group.detail.as_deref()
-        .and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
+    // An area groups by its colour's categories whatever the scale reads, so
+    // Int*, Float* and Bool colours split into bands like text ones; a binned
+    // colour groups by bin instead, one band per bin in bin order.
+    let keys = series_keys(ctx);
+    let color = ColorSeries::of(ctx, &keys);
+    let detail = detail_series(ctx, &keys);
 
     // area does not consume the `stroke_dash` channel (only line, rule,
     // point, bar and rect draw it); only a statistic's grouping splits further.
     let grouping = grouping_series_values(ctx);
     let mut partition = build_color_detail_groups(
-        cf.zip(color_values),
-        ctx.mark_style.group.detail.as_deref().zip(detail_values.as_ref()),
+        color.as_ref().map(ColorSeries::split),
+        detail.as_ref().map(|(field, values)| (field.as_str(), values)),
         grouping.iter().map(|(field, values)| (field.as_str(), values)),
         ctx.scales.color.is_some(),
         n_rows,
     );
-    if let Some(binned) = &binned {
-        binned.order(&mut partition.groups);
+    if let Some(color) = &color {
+        color.order(&mut partition.groups);
     }
     partition
 }
@@ -1281,7 +1273,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: Some(StackValueAxis::X),
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert!(crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "value_axis: Some(X) must stamp the marker");
 
         let spec = ChartSpec {
@@ -1376,7 +1368,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert!(!crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "vertical Stack must not stamp the horizontal-value marker");
 
         let spec = ChartSpec {
@@ -2270,7 +2262,7 @@ mod tests {
             let (scales, _) = resolve_scales(&spec, &raw, (0.0, 300.0), (0.0, 100.0), &theme).unwrap();
             let (lo, hi) = scales.y.data_domain().unwrap();
             assert!(hi < 0.0, "{offset:?}: premise, 0 is outside the domain; got ({lo}, {hi})");
-            let stacked = apply_position(&raw, Some(&pos), &scales, &spec.encoding, false, &mut Vec::new()).unwrap();
+            let stacked = apply_position(&raw, Some(&pos), &scales, &spec.encoding, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
             let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &stacked, mark_style: &mark_style };
             let first = super::build(&ctx).nodes.into_iter().find_map(|n| {
                 if let SceneNode::Path { commands, .. } = n { Some(commands) } else { None }
@@ -2421,7 +2413,7 @@ mod tests {
     /// values as text do.
     #[test]
     fn a_timestamp_detail_splits_the_series() {
-        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
         let partition = temporal_key_partition(Mark::Area, TemporalKeyChannel::Detail, super::series_groups);
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
         assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
@@ -2432,7 +2424,7 @@ mod tests {
     /// per instant, each keyed by its epoch string.
     #[test]
     fn a_timestamp_color_splits_the_series() {
-        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
         let partition = temporal_key_partition(Mark::Area, TemporalKeyChannel::Color, super::series_groups);
         let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();

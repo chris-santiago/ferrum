@@ -343,6 +343,22 @@ impl Mark {
         self.style_fields().iter().copied().find(|f| f.name == name)
     }
 
+    /// Whether this mark splits its rows into series by a `detail` field: the
+    /// marks whose style table carries `detail` (line, area, ribbon,
+    /// polygon). The one answer the series partitions, the unreadable-detail
+    /// refusal and the null-key drop read.
+    pub(crate) fn splits_series_by_detail(self) -> bool {
+        self.style_field("detail").is_some()
+    }
+
+    /// Whether this mark places each row on its own and dashes it by a
+    /// numeric `stroke_dash` field read as a dash index (point, bar, rect,
+    /// rule). A series mark (line, ribbon) splits series by a categorical dash
+    /// only and reads a numeric one from a series' first row.
+    pub(crate) fn dashes_each_row_by_index(self) -> bool {
+        matches!(self, Mark::Point | Mark::Bar | Mark::Rect | Mark::Rule)
+    }
+
     /// The mark's own kwarg that sets how big or thick it draws, named when a
     /// constant `size=` it never draws is refused.
     pub(crate) fn size_knob(self) -> Option<&'static str> {
@@ -921,6 +937,34 @@ mod tests {
             let mark: Mark = name.parse().unwrap();
             assert!(!mark.style_fields().is_empty(), "{name} has no table row");
         }
+    }
+
+    /// The marks that split series by `detail` are exactly the four whose
+    /// builders read it, and no mark outside the list does.
+    #[test]
+    fn the_marks_that_split_by_detail_are_the_marks_whose_style_carries_it() {
+        let splitting: Vec<&str> = style_table_marks()
+            .into_iter()
+            .filter(|name| name.parse::<Mark>().unwrap().splits_series_by_detail())
+            .collect();
+        assert_eq!(splitting, ["line", "area", "polygon", "ribbon"]);
+    }
+
+    /// A numeric dash is an index per row on the per-row marks that draw the
+    /// channel, and only on those.
+    #[test]
+    fn only_the_per_row_marks_that_draw_a_dash_read_it_as_an_index() {
+        for name in style_table_marks() {
+            let mark: Mark = name.parse().unwrap();
+            if mark.dashes_each_row_by_index() {
+                assert!(mark.draws_channel(crate::spec::layer::InheritedChannel::StrokeDash), "{name}");
+            }
+        }
+        let indexed: Vec<&str> = style_table_marks()
+            .into_iter()
+            .filter(|name| name.parse::<Mark>().unwrap().dashes_each_row_by_index())
+            .collect();
+        assert_eq!(indexed, ["point", "bar", "rule", "rect"]);
     }
 
     /// The wire names are the serde spellings, which a warning serializes.

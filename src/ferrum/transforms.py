@@ -1009,11 +1009,6 @@ def transform_loess(
 
 _IMPUTE_KINDS = "string, number, bool, date or datetime"
 
-#: The registry params of ``impute`` that are not options of the impute rule: the
-#: transform's own columns and its output name. Every other param is an option
-#: both doors accept.
-_IMPUTE_NOT_OPTIONS = frozenset({"field", "groupby", "key", "name"})
-
 
 def _finite_real(label: str, value: object) -> int | float:
     """*value* in its wire form, refused in *label*'s voice unless it is a finite real number."""
@@ -1151,24 +1146,17 @@ def _impute_options(
     """Validate an impute option dict for ``transform_impute`` and the encoding dict.
 
     Wires :func:`ferrum._validate.coerce_impute_options` to the literal
-    normalizers and to the option names the engine's registry publishes for
-    ``impute`` (the registry's params that are options of the rule, in its
-    order), so a ``Y(impute=...)`` and a ``transform_impute(...)`` refuse the
+    normalizers and to the option names the rule accepts
+    (:data:`ferrum._validate.IMPUTE_OPTION_NAMES`), so a ``Y(impute=...)`` and a ``transform_impute(...)`` refuse the
     same malformed option in the same words. *door* is the public call the
     refusals speak as, *key* the key column's name where the door has one, and
     *value_label* the label ``value`` is refused under.
     """
-    from ferrum._core import transform_registry
-
-    accepted = [
-        name for name in transform_registry("impute")["params"] if name not in _IMPUTE_NOT_OPTIONS
-    ]
     if isinstance(options, dict):
         _reject_bare_string(options.get("keyvals"), where=door, param="keyvals", noun="key values")
     return coerce_impute_options(
         door,
         options,
-        accepted=accepted,
         normalize_value=lambda value: _normalize_impute_value(value_label, value),
         normalize_keyval=lambda keyval: _normalize_keyval(keyval, key=key, door=door),
     )

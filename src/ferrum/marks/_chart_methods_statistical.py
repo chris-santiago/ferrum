@@ -1722,7 +1722,7 @@ class StatisticalMarksMixin:
             refuse_style_no_layer_draws,
             resolve_method_bool,
         )
-        from ferrum.marks.heavy_stat import _parent_axis_values, desugar_function
+        from ferrum.marks.heavy_stat import desugar_function
 
         clip = resolve_method_bool("mark_function", "clip", clip, True)
         style = MarkBase("function", **mark_kwargs).to_mark_kwargs_dict()
@@ -1781,14 +1781,12 @@ class StatisticalMarksMixin:
             except (ImportError, TypeError, ValueError, KeyError):
                 pass
 
-        # Outside the try blocks above, so the refusal is never swallowed; only when the domain
-        # is inferred.
-        if domain is None and parent_x_data is not None:
-            parent_x_data = _parent_axis_values(parent_x_data, parent_x_name)
-
+        # The column is handed over as the parent holds it; `desugar_function` reads it in its
+        # axis's units, outside the try blocks above so its refusal is never swallowed.
         result = desugar_function(
             fn,
             parent_chart_x_data=parent_x_data,
+            parent_chart_x_name=parent_x_name,
             domain=domain,
             n=n,
             clip=clip,

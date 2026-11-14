@@ -49,13 +49,13 @@
 //! layer's `size` conditional never reaches the line.
 
 use crate::render::color::with_opacity;
-use crate::render::arrow_cast::col_as_identity_key_str;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, color_field, stroke_width_column, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries, SeriesPartition};
+use crate::render::marks::channels::{build_color_detail_groups, detail_series, grouping_series_values, resolve_row_stroke_dash, series_keys, stroke_dash_column_loader, ColorSeries, SeriesPartition};
+use crate::render::series_keys::{SeriesKey, SplitChannel};
 use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
 use crate::render::marks::opacity::{OpacityFallback, OpacityResolver};
-use crate::render::scale_resolve::{ColorInput, ScaleKind};
+use crate::render::scale_resolve::ScaleKind;
 use crate::render::{LineWidthSources, NonPositiveLineWidth, RenderError, WidthBinding};
 
 /// `mark_line` spells its step risers with the `HLineTo`/`VLineTo` shorthand.
@@ -139,62 +139,30 @@ fn refuse_width_conflict(ctx: &DrawCtx, size_conditional: bool) -> Result<(), Re
 /// [`SeriesPartition::fields`] are the caller's own fields that actually
 /// split the series, for naming a dropped one.
 pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
-    let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
-    let cf = color_field(ctx, spec);
-    // col_as_identity_key_str (not col_as_str), gated on the resolved
-    // color scale being category-keyed (Categorical) or absent — mirrors
-    // channels.rs::color_column_loader's `ColorInput::Category | None` gate.
-    // Unlike `area` (which always force-resolves ColorScale::Categorical,
-    // scale_resolve/mod.rs), line does not: a Quantitative-typed/-inferred
-    // color column resolves ColorScale::Continuous or ::Discretizing
-    // (ColorInput::Numeric), and must NOT be grouped here — grouping by every
-    // distinct numeric value fragments the series into (mostly) single-point
-    // groups, which the `points.len() < 2` gate below then drops, silently
-    // blanking the plot under a still-drawn colorbar legend (NF-A3 follow-up).
-    // For a Category-keyed (or scale-less) color column, Int*/Float*/Bool
-    // dtypes still split into per-category polylines matching the legend
-    // domain built by the dtype-wide distinct_values_in_order — `col_as_str`
-    // returns `Err` for non-Utf8, which previously collapsed every category
-    // into one merged polyline.
-    //
-    // A binned color is the one numeric color these marks draw: it splits the
-    // series by bin instead, one series per bin in its bin's color, in bin
-    // order, as the area's bands do.
-    let binned = BinnedColorSeries::of(ctx);
-    let color_input = ctx.scales.color.as_ref().map(|s| s.input());
-    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| {
-        match color_input {
-            Some(ColorInput::Category) | None => col_as_identity_key_str(ctx.batch, f).ok(),
-            Some(ColorInput::Numeric) => None,
-        }
-    });
-    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
-    let detail_values = ctx.mark_style.group.detail.as_deref()
-        .and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
+    let keys = series_keys(ctx);
+    let color = ColorSeries::of(ctx, &keys);
+    let detail = detail_series(ctx, &keys);
 
     // A categorical `stroke_dash` field extends the series partition key
     // (color, detail) -> (color, detail, stroke_dash-field), spec §4.3, so
     // distinct style categories draw as distinct polylines rather than all
     // sampling the first row's dash within their color/detail group. A
     // numeric field (or none) yields `dash_cols.categorical == None`, which
-    // skips subdivision entirely — byte-identical grouping.
+    // skips subdivision entirely.
     let dash_cols = stroke_dash_column_loader(ctx);
-    let dash_field = ctx.scales.stroke_dash.is_some().then(|| spec.encoding.stroke_dash.as_ref().map(|e| e.field.as_str())).flatten();
+    let dash = keys.partition_on(SplitChannel::StrokeDash).map(SeriesKey::field).zip(dash_cols.categorical.as_ref());
 
     let grouping = grouping_series_values(ctx);
     let mut partition = build_color_detail_groups(
-        cf.zip(color_values),
-        ctx.mark_style.group.detail.as_deref().zip(detail_values.as_ref()),
-        dash_field
-            .zip(dash_cols.categorical.as_ref())
-            .into_iter()
-            .chain(grouping.iter().map(|(field, values)| (field.as_str(), values))),
+        color.as_ref().map(ColorSeries::split),
+        detail.as_ref().map(|(field, values)| (field.as_str(), values)),
+        dash.into_iter().chain(grouping.iter().map(|(field, values)| (field.as_str(), values))),
         ctx.scales.color.is_some(),
         n_rows,
     );
-    if let Some(binned) = &binned {
-        binned.order(&mut partition.groups);
+    if let Some(color) = &color {
+        color.order(&mut partition.groups);
     }
     partition
 }
@@ -3472,7 +3440,7 @@ mod tests {
     /// values as text do.
     #[test]
     fn a_timestamp_detail_splits_the_series() {
-        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
         let partition = temporal_key_partition(Mark::Line, TemporalKeyChannel::Detail, super::series_groups);
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
         assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
@@ -3483,7 +3451,7 @@ mod tests {
     /// per instant, each keyed by its epoch string.
     #[test]
     fn a_timestamp_color_splits_the_series() {
-        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
         let partition = temporal_key_partition(Mark::Line, TemporalKeyChannel::Color, super::series_groups);
         let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();

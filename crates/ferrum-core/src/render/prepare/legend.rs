@@ -1870,7 +1870,6 @@ mod tests {
             dropped_reads: Vec::new(),
             raster_value_field: None,
             grouping_series: crate::render::prepare::SeriesGrouping::default(),
-            own_rows: None,
         }
     }
 

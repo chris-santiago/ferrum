@@ -367,12 +367,13 @@ pub struct Layer {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flip_by_call: bool,
     /// The key in the transform outputs that holds this layer's own rows,
-    /// when the render's null-key drop gave the layer rows its key-siblings
-    /// do not share ([`crate::render::prepare::LayerPrepared::own_rows`]).
-    /// Internal: set only by the render's prepare step on its own routed copy
-    /// of the spec, never read from or written to the wire. It changes which
-    /// batch the layer is fetched from and nothing about how the layer is
-    /// classified: `data_source` stays what the caller wrote.
+    /// when the render's null-key drop or impute gave the layer rows its
+    /// key-siblings do not share. Internal: set only by the render's prepare
+    /// step, on the one spec `PreparedInputs` owns
+    /// ([`crate::render::prepare::PreparedInputs::spec`]); never read from or
+    /// written to the wire. It changes which batch the layer is fetched from
+    /// and nothing about how the layer is classified: `data_source` stays what
+    /// the caller wrote.
     #[serde(skip)]
     pub(crate) own_rows: Option<String>,
 }

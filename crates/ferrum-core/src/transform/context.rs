@@ -432,6 +432,38 @@ pub(crate) struct LogEmptied {
     pub(crate) groups: Option<Vec<String>>,
 }
 
+/// What a step's log axis left with no value to place, known before the
+/// step's body runs ([`TransformContext::with_axis_emptied`]): the body's
+/// own fit failures for those groups are the axis's doing and its own
+/// off-side report already names the cause, so [`TransformContext::warn`]
+/// does not record them.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EmptiedByAxis {
+    /// The labels ([`describe_group_keys`]) of the step's own groups the
+    /// axis emptied.
+    Groups(Vec<String>),
+    /// The whole batch, which a fit with every key null fits as one group
+    /// and so reports under no group name.
+    WholeBatch,
+}
+
+impl EmptiedByAxis {
+    /// Whether `warning` is a fit failure of a group this axis emptied: a
+    /// [`TransformWarning::DegenerateFit`] or [`TransformWarning::IntervalUndefined`]
+    /// naming one of the emptied groups, or naming no group when the whole
+    /// batch is emptied. Every other warning is the step's to report.
+    fn silences(&self, warning: &TransformWarning) -> bool {
+        let (TransformWarning::DegenerateFit { group, .. } | TransformWarning::IntervalUndefined { group, .. }) = warning else {
+            return false;
+        };
+        match (self, group.as_deref()) {
+            (Self::Groups(labels), Some(group)) => labels.iter().any(|label| label == group),
+            (Self::WholeBatch, None) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Why one fit's rows could not be fit: the reason a degraded group's or
 /// panel's warning gives, and, for a response the method cannot read, the
 /// refusal the genuine whole frame raises
@@ -931,6 +963,12 @@ pub struct TransformContext {
     /// shared across every clone of a run's context as [`Self::warnings`]
     /// is, and read back by `render::prepare::run_transforms_with_facet`.
     pub(crate) all_null_partitions: Rc<RefCell<Vec<AllNullPartition>>>,
+    /// What the log axis left empty of the call this context is handed to,
+    /// set by the log seam on the child context its body runs under
+    /// ([`Self::with_axis_emptied`]); [`Self::warn`] does not record the
+    /// fit failures of those groups. `None` (the default) records every
+    /// warning.
+    pub(crate) axis_emptied: Option<Rc<EmptiedByAxis>>,
 }
 
 #[cfg(test)]
@@ -956,8 +994,22 @@ impl TransformContext {
     /// Record a degrade at the current call site. Cheap and infallible —
     /// pushes onto the shared sink (see [`TransformContext::warnings`]'s doc
     /// for why `Rc<RefCell<_>>` is load-bearing here).
+    ///
+    /// A context the log seam scoped to a call ([`Self::with_axis_emptied`])
+    /// does not record a fit failure of a group the axis emptied.
     pub(crate) fn warn(&self, warning: TransformWarning) {
+        if self.axis_emptied.as_deref().is_some_and(|emptied| emptied.silences(&warning)) {
+            return;
+        }
         self.warnings.borrow_mut().push(warning);
+    }
+
+    /// A child of this context for a call whose log axis emptied `emptied`:
+    /// every sink stays shared with this one, so what the call reports
+    /// still reaches the run, minus the fit failures of the emptied groups
+    /// ([`Self::warn`]).
+    pub(crate) fn with_axis_emptied(&self, emptied: EmptiedByAxis) -> TransformContext {
+        TransformContext { axis_emptied: Some(Rc::new(emptied)), ..self.clone() }
     }
 
     /// Record `column`, the caller's own input for `field` on `axis`, before

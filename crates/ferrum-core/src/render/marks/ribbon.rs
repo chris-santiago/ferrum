@@ -27,12 +27,12 @@
 //! When neither `y2` nor `x2` is bound the drawer skips — ribbon requires a
 //! band channel.
 
-use crate::render::arrow_cast::col_as_identity_key_str;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, color_field, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
-use crate::render::marks::channels::{build_color_detail_groups, grouping_series_values, resolve_row_stroke_dash, stroke_dash_column_loader, BinnedColorSeries, SeriesPartition};
+use crate::render::marks::channels::{build_color_detail_groups, detail_series, grouping_series_values, resolve_row_stroke_dash, series_keys, stroke_dash_column_loader, ColorSeries, SeriesPartition};
+use crate::render::series_keys::{SeriesKey, SplitChannel};
 use crate::render::marks::curve::{CurveAxis, SeriesNoun, ShortRuns, StepSpelling, Trace};
-use crate::render::scale_resolve::{ColorInput, ScaleKind};
+use crate::render::scale_resolve::ScaleKind;
 
 /// `mark_ribbon` spells its step risers as explicit `LineTo` vertices, like
 /// its closest sibling `mark_area` (both are filled bands). See
@@ -131,64 +131,30 @@ fn resolve_shared_pixels(
 /// the census's vertex-unit count and the real render can never group a
 /// statistic layer's rows differently.
 pub(crate) fn series_groups(ctx: &DrawCtx) -> SeriesPartition {
-    let spec = ctx.spec;
     let n_rows = ctx.batch.num_rows();
-    let cf = color_field(ctx, spec);
-    // col_as_identity_key_str (not col_as_str), gated on the resolved
-    // color scale being category-keyed (Categorical) or absent — mirrors
-    // channels.rs::color_column_loader's `ColorInput::Category | None` gate.
-    // Unlike `area` (which always force-resolves ColorScale::Categorical,
-    // scale_resolve/mod.rs), ribbon does not: a Quantitative-typed/-inferred
-    // color column resolves ColorScale::Continuous or ::Discretizing
-    // (ColorInput::Numeric), and must NOT be grouped here — grouping by every
-    // distinct numeric value fragments the band into (mostly) single-point
-    // groups, which the `indices.len() < 2` / `pixels.len() < 2` gates below
-    // then drop, silently blanking the plot under a still-drawn colorbar
-    // legend (NF-A3 follow-up). For a Category-keyed (or scale-less) color
-    // column, Int*/Float*/Bool dtypes still split into per-category bands
-    // matching the legend domain built by the dtype-wide
-    // distinct_values_in_order — `col_as_str` returns `Err` for non-Utf8,
-    // which previously collapsed every category into one merged polygon.
-    //
-    // A binned color is the one numeric color these marks draw: it splits the
-    // series by bin instead, one series per bin in its bin's color, in bin
-    // order, as the area's bands do.
-    let binned = BinnedColorSeries::of(ctx);
-    let color_input = ctx.scales.color.as_ref().map(|s| s.input());
-    let category_values = cf.filter(|_| binned.is_none()).and_then(|f| {
-        match color_input {
-            Some(ColorInput::Category) | None => col_as_identity_key_str(ctx.batch, f).ok(),
-            Some(ColorInput::Numeric) => None,
-        }
-    });
-    let color_values = binned.as_ref().map(BinnedColorSeries::keys).or(category_values.as_ref());
+    let keys = series_keys(ctx);
+    let color = ColorSeries::of(ctx, &keys);
     // A `detail` splits each color's band as it splits the area's.
-    let detail_values = ctx.mark_style.group.detail.as_deref()
-        .and_then(|f| col_as_identity_key_str(ctx.batch, f).ok());
-    // T12 fix round (spec §4.3, amended 2026-09-01): a categorical `stroke_dash`
-    // field extends ribbon's series partition key from (color) to (color,
-    // stroke_dash-field) — mirrors line.rs's `dash_cols.categorical` wiring
-    // exactly, so a two-category `stroke_dash` encoding draws two distinct
-    // bands instead of one merged polygon under a multi-entry dashed legend.
-    // `stroke_dash_column_loader` gates the categorical column on a resolved
-    // `StrokeDashScale`; a numeric (or absent) `stroke_dash` field yields
-    // `categorical == None`, which skips subdivision entirely.
+    let detail = detail_series(ctx, &keys);
+    // A categorical `stroke_dash` field extends ribbon's series partition key
+    // from (color) to (color, stroke_dash-field), spec §4.3, so a two-category
+    // `stroke_dash` encoding draws two distinct bands instead of one merged
+    // polygon under a multi-entry dashed legend. A numeric (or absent)
+    // `stroke_dash` field yields `categorical == None`, which skips
+    // subdivision entirely.
     let dash_cols = stroke_dash_column_loader(ctx);
-    let dash_field = ctx.scales.stroke_dash.is_some().then(|| spec.encoding.stroke_dash.as_ref().map(|e| e.field.as_str())).flatten();
+    let dash = keys.partition_on(SplitChannel::StrokeDash).map(SeriesKey::field).zip(dash_cols.categorical.as_ref());
 
     let grouping = grouping_series_values(ctx);
     let mut partition = build_color_detail_groups(
-        cf.zip(color_values),
-        ctx.mark_style.group.detail.as_deref().zip(detail_values.as_ref()),
-        dash_field
-            .zip(dash_cols.categorical.as_ref())
-            .into_iter()
-            .chain(grouping.iter().map(|(field, values)| (field.as_str(), values))),
+        color.as_ref().map(ColorSeries::split),
+        detail.as_ref().map(|(field, values)| (field.as_str(), values)),
+        dash.into_iter().chain(grouping.iter().map(|(field, values)| (field.as_str(), values))),
         ctx.scales.color.is_some(),
         n_rows,
     );
-    if let Some(binned) = &binned {
-        binned.order(&mut partition.groups);
+    if let Some(color) = &color {
+        color.order(&mut partition.groups);
     }
     partition
 }
@@ -1505,7 +1471,7 @@ mod tests {
     /// values as text do.
     #[test]
     fn a_timestamp_detail_splits_the_series() {
-        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
         let partition = temporal_key_partition(Mark::Ribbon, TemporalKeyChannel::Detail, super::series_groups);
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
         assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
@@ -1516,7 +1482,7 @@ mod tests {
     /// per instant, each keyed by its epoch string.
     #[test]
     fn a_timestamp_color_splits_the_series() {
-        use crate::render::marks::channels::{temporal_key_partition, TemporalKeyChannel};
+        use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
         let partition = temporal_key_partition(Mark::Ribbon, TemporalKeyChannel::Color, super::series_groups);
         let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();

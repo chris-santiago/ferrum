@@ -200,7 +200,7 @@ pub(crate) fn apply_with_context(
             match emptied_by_axis(ctx, "data_window", batch, &slots, GROUP_NULL_KEYS) {
                 AxisEmptied::Nothing => {}
                 AxisEmptied::WholeCall | AxisEmptied::FallbackBatch => ctx.note_log_emptied(None),
-                AxisEmptied::Groups(labels) => ctx.note_log_emptied(Some(labels)),
+                AxisEmptied::Groups(groups) => ctx.note_log_emptied(Some(groups.labels)),
             }
         }
     }

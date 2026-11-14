@@ -2940,7 +2940,7 @@ fn a_zero_row_batch_prepares_and_draws_its_frame() {
     let crate::render::PipelineOutput { prep, layout, applied, mut warnings } =
         crate::render::prepare_and_layout(&spec, &batch, &theme, viewport, &chart_config, None)
             .expect("a zero-row batch prepares successfully, like a filter-emptied one");
-    let scene = crate::render::scene_build::build_scene(&spec, &prep, &layout, &applied.effective_theme, &config, &mut warnings, &chart_config, None)
+    let scene = crate::render::scene_build::build_scene(&prep, &layout, &applied.effective_theme, &config, &mut warnings, &chart_config, None)
         .expect("a zero-row batch builds a scene");
     assert_eq!(scene.panels.len(), 1, "one panel is drawn, empty");
     assert!(scene.panels[0].marks.iter().all(|m| m.nodes.is_empty()), "no mark nodes are drawn");
@@ -7536,7 +7536,6 @@ fn scene_over(
     )
     .expect("the spec prepares and lays out");
     let scene = crate::render::scene_build::build_scene(
-        spec,
         &prep,
         &layout,
         &applied.effective_theme,
@@ -8654,7 +8653,6 @@ fn marks_and_legend_warned(
     )
     .map_err(|e| e.to_string())?;
     let scene = crate::render::scene_build::build_scene(
-        spec,
         &prep,
         &layout,
         &applied.effective_theme,
@@ -10447,7 +10445,7 @@ fn a_greedy_log_y_axis_never_draws_two_labels_closer_than_a_line() {
             &spec, &batch, &theme, crate::layout::Viewport { width: 400.0, height }, &chart_config, None,
         )
         .unwrap_or_else(|e| panic!("height {height}: expected to prepare, refused with {e}"));
-        let scene = crate::render::scene_build::build_scene(&spec, &prep, &layout, &applied.effective_theme, &config, &mut warnings, &chart_config, None)
+        let scene = crate::render::scene_build::build_scene(&prep, &layout, &applied.effective_theme, &config, &mut warnings, &chart_config, None)
             .unwrap_or_else(|e| panic!("height {height}: expected to build a scene, refused with {e}"));
         let mut drawn: Vec<(String, f64)> = axis_text_positions(&scene.panels[0], true)
             .into_iter()
@@ -10639,7 +10637,7 @@ fn a_log_axis_over_five_or_six_decades_labels_only_powers() {
                 None,
             )
             .unwrap_or_else(|e| panic!("{channel} hi={hi}: {e}"));
-            let scene = crate::render::scene_build::build_scene(&spec, &prep, &layout, &applied.effective_theme, &crate::render::config::RenderConfig::default(), &mut warnings, &chart_config, None)
+            let scene = crate::render::scene_build::build_scene(&prep, &layout, &applied.effective_theme, &crate::render::config::RenderConfig::default(), &mut warnings, &chart_config, None)
                 .unwrap_or_else(|e| panic!("{channel} hi={hi}: {e}"));
             assert!(warnings.is_empty(), "{channel} hi={hi}: {warnings:?}");
             let on_y = channel == "y";
@@ -11390,7 +11388,6 @@ fn gate_render(spec: &ChartSpec, batch: &RecordBatch) -> (Result<ferrum_scene::S
         Err(e) => return (Err(e), Vec::new()),
     };
     let scene = crate::render::scene_build::build_scene(
-        spec,
         &prep,
         &layout,
         &applied.effective_theme,
@@ -21526,7 +21523,7 @@ fn a_row_with_a_null_series_key_belongs_to_no_series_and_adds_no_key() {
         (3.0, None, Some("p")),
         (4.0, Some("y"), None),
     ]);
-    let series = series_of_rows(&batch, &["h".to_string(), "d".to_string()], None).expect("both keys read");
+    let series = impute::series_of_rows(&batch, &["h".to_string(), "d".to_string()], None).expect("both keys read");
     assert_eq!(series.of_row, vec![Some(0), Some(1), Some(0), None, None], "the null-key rows are in no series");
     assert_eq!(series.labels, vec![Some("h=x, d=p".to_string()), Some("h=y, d=p".to_string())]);
     // the drop removes both rows (a null colour, a null detail), and the step completes what is left
@@ -21559,6 +21556,36 @@ fn impute_with_colour_alone_inserts_each_row_at_its_keys_place() {
     );
 }
 
+/// An integer colour splits an area into one band per value (an area that draws
+/// colour makes the colour scale categorical), so its impute completes each band;
+/// a line colours the same column continuously, draws one series, and has no
+/// colour series to complete.
+#[test]
+fn an_integer_colour_series_is_completed_on_an_area_and_not_on_a_line() {
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Int64, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 3.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
+            Arc::new(arrow::array::Int64Array::from(vec![1, 1, 1, 2, 2])),
+        ],
+    )
+    .unwrap();
+    let imputed = |mark: Mark| prep(&impute_spec(mark, None, None), &batch).final_batch().clone();
+    let area = imputed(Mark::Area);
+    assert_eq!(area.num_rows(), 6, "the h=2 band gains the t=2 point it lacks");
+    let t = area.column_by_name("t").unwrap().as_any().downcast_ref::<Float64Array>().unwrap();
+    let h = area.column_by_name("h").unwrap().as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+    let v = area.column_by_name("v").unwrap().as_any().downcast_ref::<Float64Array>().unwrap();
+    let inserted = (0..area.num_rows()).find(|&row| h.value(row) == 2 && t.value(row) == 2.0).expect("an h=2 row at t=2");
+    assert_eq!(v.value(inserted), 0.0);
+    assert_eq!(imputed(Mark::Line).num_rows(), 5, "one series holds every key");
+}
+
 /// Layer 0 draws the chart's colour with the impute; layer 1 inherits it and
 /// also keys `d`, so each layer completes the series it draws.
 fn impute_with_a_sibling_keying_d(batch: &RecordBatch) -> PreparedInputs {
@@ -21580,8 +21607,8 @@ fn a_sibling_keying_a_field_the_impute_series_lack_completes_its_own_series() {
     let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), Some("q")), (1.0, Some("y"), Some("p"))]);
     let prep = impute_with_a_sibling_keying_d(&batch);
     assert_eq!(prep.final_batch().num_rows(), 3, "the two layers impute differently, so the tail keeps the caller's rows");
-    assert_eq!(prep.layer_routes.iter().map(|(layer, _)| *layer).collect::<Vec<_>>(), vec![0, 1]);
-    let own = |layer: usize| rows_of(&prep.transform_outputs[&prep.layer_routes[layer].1]);
+    assert!((0..2).all(|layer| prep.own_rows(layer).is_some()), "both layers read rows of their own");
+    let own = |layer: usize| rows_of(&prep.transform_outputs[prep.own_rows(layer).unwrap()]);
     assert_eq!(own(0).len(), 4, "the colour layer completes (2, y)");
     assert_eq!(
         own(1),
@@ -21602,10 +21629,9 @@ fn a_sibling_keying_a_field_the_impute_series_lack_completes_its_own_series() {
 fn a_layer_whose_rows_the_drop_moved_is_imputed_in_place_under_its_own_key() {
     let batch = impute_batch(&[(1.0, Some("x"), Some("p")), (2.0, Some("x"), None), (1.0, Some("y"), Some("p"))]);
     let prep = impute_with_a_sibling_keying_d(&batch);
-    let route_of = |layer: usize| prep.layer_routes.iter().find(|(index, _)| *index == layer).map(|(_, key)| key.clone());
-    let moved = route_of(1).expect("the null-d row moves layer 1 onto its own rows");
-    assert_eq!(moved, null_keys::layer_key(1));
-    assert_eq!(prep.layer_routes.len(), 1, "layer 0 is the only reader left on the tail, so its impute is in place: {:?}", prep.layer_routes);
+    let moved = prep.own_rows(1).expect("the null-d row moves layer 1 onto its own rows").to_string();
+    assert_eq!(moved, routes::own_rows_key(1));
+    assert_eq!(prep.own_rows(0), None, "layer 0 is the only reader left on the tail, so its impute is in place");
     let own = rows_of(&prep.transform_outputs[&moved]);
     assert!(own.iter().all(|(_, _, d, _)| d.is_some()), "the layer draws no row null on its key");
     assert_eq!(own.len(), 2, "its series (x, p) and (y, p) each hold key 1 only, so nothing is imputed");
@@ -21634,7 +21660,7 @@ fn layers_that_impute_identically_share_the_key_completed_in_place() {
         crate::spec::layer::Layer { mark: Mark::Line, encoding: spec.encoding.clone(), ..Default::default() },
     ]);
     let prep = prep(&spec, &batch);
-    assert!(prep.layer_routes.is_empty(), "{:?}", prep.layer_routes);
+    assert!((0..2).all(|layer| prep.own_rows(layer).is_none()), "the layers share the tail");
     assert_eq!(prep.final_batch().num_rows(), 4, "the shared rows hold the one imputed row both layers draw");
 }
 
@@ -21650,9 +21676,9 @@ fn a_layer_with_no_impute_keeps_the_callers_rows_beside_one_that_imputes() {
     ]);
     let prep = prep(&spec, &batch);
     assert_eq!(prep.final_batch().num_rows(), 3, "the line draws the caller's rows");
-    assert_eq!(prep.layer_routes.len(), 1);
-    assert_eq!(prep.layer_routes[0].0, 0, "the imputing layer alone reads rows of its own");
-    assert_eq!(prep.transform_outputs[&prep.layer_routes[0].1].num_rows(), 4);
+    assert_eq!(prep.own_rows(1), None);
+    let own = prep.own_rows(0).expect("the imputing layer alone reads rows of its own");
+    assert_eq!(prep.transform_outputs[own].num_rows(), 4);
 }
 
 // ── Each key dtype, colour kind and value kind the mark can draw ──
@@ -22314,8 +22340,8 @@ fn a_chart_with_no_impute_and_no_null_key_touches_no_batch_and_borrows_its_spec(
         },
     ]);
     let prep = prep(&spec, &batch);
-    assert!(prep.layer_routes.is_empty());
-    assert!(matches!(prep.routed_spec(&spec), std::borrow::Cow::Borrowed(_)));
+    assert!((0..2).all(|layer| prep.own_rows(layer).is_none()));
+    assert_eq!(prep.spec().layers, spec.layers, "no route is written on the spec");
     assert_eq!(prep.final_batch().num_rows(), 3);
 }
 
@@ -22678,4 +22704,153 @@ fn a_faceted_impute_over_two_fields_writes_each_imputed_row_its_own_cell() {
         assert_eq!(out.num_rows(), 8, "{col}/{row}: one completed point per panel");
         assert_eq!(pairs(out), pairs(&batch), "{col}/{row}: every row sits in a cell the frame holds");
     }
+}
+
+// ── One owner for a layer's routed rows ──
+
+/// A frame whose key columns hold their nulls on different rows, so layers
+/// keying different fields drop different rows: `t` (numeric key), `v`,
+/// `h` (null at row 1), `d` (null at row 3), `e` (null at row 5), `c`
+/// (categorical position, null at row 6), `f` (facet field).
+fn sibling_batch() -> RecordBatch {
+    let text = |nulls: &[usize], names: &[&str]| -> StringArray {
+        (0..8).map(|row| (!nulls.contains(&row)).then(|| names[row % names.len()])).collect()
+    };
+    RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Float64, true),
+            Field::new("v", DataType::Float64, true),
+            Field::new("h", DataType::Utf8, true),
+            Field::new("d", DataType::Utf8, true),
+            Field::new("e", DataType::Utf8, true),
+            Field::new("c", DataType::Utf8, true),
+            Field::new("f", DataType::Utf8, true),
+        ])),
+        vec![
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 1.0, 3.0, 4.0, 1.0, 2.0])),
+            Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])),
+            Arc::new(text(&[1], &["p", "q"])),
+            Arc::new(text(&[3], &["r", "s"])),
+            Arc::new(text(&[5], &["u", "w"])),
+            Arc::new(text(&[6], &["k", "m", "n"])),
+            Arc::new(text(&[], &["F1", "F2"])),
+        ],
+    )
+    .unwrap()
+}
+
+/// The three sibling shapes: each keys a different field, so each drops
+/// different rows from the one frame. `categorical` puts the layer's key on
+/// the nominal position `c` (whose own nulls are dropped too) instead of the
+/// numeric `t`.
+fn sibling_layer(kind: usize, impute: bool, categorical: bool) -> crate::spec::layer::Layer {
+    let binding = |field: &str| Some(EncodingSpec { field: field.into(), ..Default::default() });
+    let value = EncodingSpec {
+        field: "v".into(),
+        impute: impute.then(|| serde_json::json!({"value": 0.0})),
+        ..Default::default()
+    };
+    let mut layer = crate::spec::layer::Layer { mark: Mark::Line, ..Default::default() };
+    layer.encoding = Encoding { x: binding("t"), y: Some(value), ..Default::default() };
+    if categorical {
+        layer.mark = Mark::Point;
+        layer.encoding.x = Some(EncodingSpec { field: "c".into(), type_: Some(crate::spec::encoding::DataType::Nominal), ..Default::default() });
+    }
+    match kind {
+        0 => layer.encoding.color = binding("h"),
+        1 => {
+            layer.mark = Mark::Point;
+            layer.encoding.shape = binding("d");
+        }
+        _ => layer.mark_style = Some(crate::spec::mark_style::MarkKwargsSpec { detail: Some("e".into()), ..Default::default() }),
+    }
+    layer
+}
+
+fn faceted(mut spec: ChartSpec) -> ChartSpec {
+    spec.facet = Some(crate::layout::FacetSpec {
+        field: "f".into(),
+        row: None,
+        title: None,
+        row_title: None,
+        sort: None,
+        row_sort: None,
+        repeat: Vec::new(),
+        mode: crate::layout::FacetMode::Wrap { ncols: 2 },
+        spacing: None,
+        resolve: crate::layout::facet::FacetResolve { x: crate::layout::ResolveMode::Shared, y: crate::layout::ResolveMode::Shared },
+    });
+    spec
+}
+
+/// The rows layer `index` of `prep` draws.
+fn rows_the_layer_draws(prep: &PreparedInputs, index: usize) -> &RecordBatch {
+    &prep.transform_outputs[prep.rows_key(index)]
+}
+
+/// Whatever its siblings key or impute, a layer reads the rows it reads when
+/// it is the only layer, on the chart's frame, with and without a facet.
+#[test]
+fn each_layer_draws_the_rows_it_draws_alone_whatever_its_siblings_key() {
+    let batch = sibling_batch();
+    let mut cases = 0;
+    for (facet, categorical) in [(false, false), (true, false), (false, true), (true, true)] {
+        for set in 0u32..8 {
+            let kinds: Vec<usize> = (0..3).filter(|kind| set & (1 << kind) != 0).collect();
+            if kinds.len() < 2 {
+                continue;
+            }
+            // Impute on none, on the first layer, on every layer (a categorical
+            // key has nothing to complete along).
+            for imputing in 0..if categorical { 1 } else { 3 } {
+                let layers: Vec<crate::spec::layer::Layer> = kinds
+                    .iter()
+                    .enumerate()
+                    .map(|(place, kind)| sibling_layer(*kind, imputing == 2 || (imputing == 1 && place == 0), categorical))
+                    .collect();
+                let build = |layers: Vec<crate::spec::layer::Layer>| {
+                    let spec = ChartSpec { mark: Mark::Point, layers: Some(layers), ..Default::default() };
+                    if facet { faceted(spec) } else { spec }
+                };
+                let together = prep(&build(layers.clone()), &batch);
+                for (place, layer) in layers.iter().enumerate() {
+                    let alone = prep(&build(vec![layer.clone()]), &batch);
+                    assert_eq!(
+                        rows_the_layer_draws(&together, place),
+                        rows_the_layer_draws(&alone, 0),
+                        "layer {place} (shape {}) among {kinds:?}, impute {imputing}, facet {facet}, categorical {categorical}",
+                        kinds[place]
+                    );
+                    cases += 1;
+                }
+            }
+        }
+    }
+    assert!(cases > 60, "the matrix ran: {cases}");
+}
+
+/// A layer one step moved reads one key: the drop and the impute each
+/// publish under the layer's own-rows key, and a layer has at most one.
+#[test]
+fn a_layer_the_drop_and_the_impute_both_move_reads_one_key() {
+    let batch = sibling_batch();
+    // Layer 0 keys `h`, layer 1 keys `d` (the drop moves it), layer 2 keys `e`
+    // and shares the tail with layer 0; both impute, differently.
+    let layers = vec![sibling_layer(0, true, false), sibling_layer(1, true, false), sibling_layer(2, true, false)];
+    let prep = prep(&ChartSpec { mark: Mark::Point, layers: Some(layers), ..Default::default() }, &batch);
+    let keys: Vec<String> = (0..3).map(|index| prep.rows_key(index).to_string()).collect();
+    for (index, key) in keys.iter().enumerate() {
+        assert!(prep.transform_outputs.contains_key(key), "layer {index} reads a published key: {key}");
+    }
+    let own: Vec<&String> = keys.iter().filter(|key| *key != FINAL_OUTPUT_KEY).collect();
+    let distinct: std::collections::HashSet<&String> = own.iter().copied().collect();
+    assert_eq!(own.len(), distinct.len(), "no two layers read one own-rows key: {keys:?}");
+    assert!(own.len() >= 2, "the frame's three keys give at least two layers rows of their own: {keys:?}");
+}
+
+#[test]
+fn a_row_selection_failure_names_its_step_and_is_not_a_scale_failure() {
+    let error = RenderError::RowSelectionFailed { step: "impute", reason: "boom".into() };
+    assert_eq!(error.to_string(), "impute: selecting rows failed: boom");
+    assert!(!matches!(error, RenderError::ScaleResolutionFailed(_)));
 }

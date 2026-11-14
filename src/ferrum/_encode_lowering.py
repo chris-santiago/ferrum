@@ -696,13 +696,14 @@ class _DoorVocabulary:
     position_normalize: str | None = None
     position_stack: str | None = None
     channel_stack: str | None = "stack=True"
-    chains_transform: bool = True
-    #: The door's statistic reads only the columns its own call names, so a
-    #: ``.transform(...)`` step's output column is bound by naming it as the
-    #: call's own ``x=``/``y=``, never by a later ``.encode()`` (which the
-    #: statistic would not read). Only meaningful where ``chains_transform``
-    #: holds: a door with no ``.transform(...)`` takes no such step at all.
-    binds_at_call: bool = False
+    #: How the door's remedy binds the column a ``.transform(...)`` step computes:
+    #: ``"encode"`` chains the step and binds the column with a later
+    #: ``.encode()``; ``"call"`` is for a door whose statistic reads only the
+    #: columns its own call names, so the column is bound by naming it as the
+    #: call's own ``x=``/``y=`` (a later ``.encode()`` would not be read);
+    #: ``"drop"`` is for a door whose result takes no ``.transform(...)`` at
+    #: all, so the only remedy that renders is dropping the kwarg.
+    remedy_binding: Literal["drop", "encode", "call"] = "encode"
     styles_dropped_axis: bool = True
     #: mark_hex's own cell-sizing knob, and its cell-aggregate call template
     #: (a ``str.format`` template over ``op``/``field``, the codebase's
@@ -743,7 +744,7 @@ _CHART_CALL_VOCABULARY = _DoorVocabulary()
 #: ``joint_kws=``, which ``_jointplot_build`` forwards to ``mark_hex``
 #: verbatim, so those two spellings run exactly as written.
 #:
-#: regplot's and lmplot's rows set ``binds_at_call``: both build their scatter
+#: regplot's and lmplot's rows set ``remedy_binding="call"``: both build their scatter
 #: and fit once, at the call, from the ``x=``/``y=`` it names, so the
 #: ``.transform(...)`` remedy's output column is read only when the call
 #: itself names it, not when a later ``.encode()`` binds it.
@@ -770,15 +771,15 @@ _DOOR_VOCABULARY: dict[str, _DoorVocabulary] = {
         multiple_fill="marginal_kws={'multiple': 'fill'}",
         position_normalize="marginal_kws={'position': fm.Stack(offset='normalize')}",
         channel_stack=None,
-        chains_transform=False,
+        remedy_binding="drop",
         styles_dropped_axis=False,
         hex_bin_size="joint_kws={'bin_size': ...}",
         hex_cells="joint_kws={{'aggregate': {op!r}, 'field': {field!r}}}",
     ),
-    "pairplot": _DoorVocabulary(chains_transform=False),
+    "pairplot": _DoorVocabulary(remedy_binding="drop"),
     "mark_smooth": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>"),
-    "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", binds_at_call=True),
-    "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", binds_at_call=True),
+    "regplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", remedy_binding="call"),
+    "lmplot": _DoorVocabulary(fit_x_bins="x_bins=<number of bins>", remedy_binding="call"),
     "mark_hex": _DoorVocabulary(
         hex_bin_size="mark_hex's bin_size=",
         hex_cells="mark_hex(aggregate={op!r}, field={field!r})",
@@ -1341,14 +1342,14 @@ def _chained_remedy(
     is untypeable there; dropping the kwarg is the only remedy that renders.
     Every other door binds the computed column with a later ``.encode()``,
     except one that reads only the columns its own call names
-    (:attr:`_DoorVocabulary.binds_at_call`, regplot and lmplot): a later
+    (:attr:`_DoorVocabulary.remedy_binding` ``"call"``, regplot and lmplot): a later
     binding never reaches its fit, so the remedy names the column as the
     call's own *channel*= instead.
     """
-    if not door.chains_transform:
+    if door.remedy_binding == "drop":
         return _drop_remedy(door, kwarg=kwarg)
     with_clause = f" with {call_kwargs}" if call_kwargs else ""
-    if door.binds_at_call:
+    if door.remedy_binding == "call":
         binding = f"pass its {column} column as the call's own {channel}="
     else:
         binding = f"bind its {column} column"
@@ -1722,7 +1723,7 @@ def _category_count_clause(
     """The histogram's own category-count clause, chained where *door*'s result can.
 
     A door whose result takes ``.encode(...)`` (:func:`_chained_remedy`'s
-    same ``chains_transform`` gate) is told the ``mark_bar()`` rewrite an
+    same ``remedy_binding`` gate) is told the ``mark_bar()`` rewrite an
     Altair user would otherwise write by hand, keeping the declared *type_*
     in the shorthand so a declared ``'O'`` keeps its order. jointplot and
     pairplot have no such call on their own result, so they end in the
@@ -1733,7 +1734,7 @@ def _category_count_clause(
         f"the histogram bins {channel} as numbers and draws a bar per bin, so "
         f"type={type_!r} would draw one bar per row instead of one per category. "
     )
-    if door.chains_transform:
+    if door.remedy_binding != "drop":
         shorthand = f"{field}:{type_}"
         return reason + (
             f"To count each category, use mark_bar().encode({channel}={shorthand!r}, "

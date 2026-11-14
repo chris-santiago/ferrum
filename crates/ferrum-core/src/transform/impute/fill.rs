@@ -14,9 +14,8 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use super::literal::{as_instant, unit_words, AsInstant, Literal};
-use super::METHODS;
 use crate::transform::numeric_util::usable_at;
-use crate::transform::vocabulary::refuse_undeclared;
+use crate::transform::vocabulary::Vocabulary;
 
 /// A fill statistic over the usable values it is given.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,29 +34,34 @@ pub(super) enum Method {
     Statistic(Statistic),
 }
 
+/// `Impute`'s `method` vocabulary, declared once: [`Method::parse`] and the
+/// refusal text derive from it, and its spellings equal
+/// [`super::METHODS`], which the registry publishes.
+impl Vocabulary for Method {
+    const ALL: &'static [Self] = &[
+        Self::Value,
+        Self::Statistic(Statistic::Mean),
+        Self::Statistic(Statistic::Median),
+        Self::Statistic(Statistic::Min),
+        Self::Statistic(Statistic::Max),
+    ];
+
+    fn spellings(self) -> &'static [&'static str] {
+        match self {
+            Self::Value => &["value"],
+            Self::Statistic(Statistic::Mean) => &["mean"],
+            Self::Statistic(Statistic::Median) => &["median"],
+            Self::Statistic(Statistic::Min) => &["min"],
+            Self::Statistic(Statistic::Max) => &["max"],
+        }
+    }
+}
+
 impl Method {
     /// The method `method` spells, refused with the vocabulary's own text when
-    /// it is not one of [`METHODS`].
+    /// it is not one of [`super::METHODS`].
     pub(super) fn parse(door: &str, method: &str) -> Result<Self, String> {
-        refuse_undeclared(METHODS, door, "method", method)?;
-        Ok(match method {
-            "value" => Self::Value,
-            "mean" => Self::Statistic(Statistic::Mean),
-            "median" => Self::Statistic(Statistic::Median),
-            "min" => Self::Statistic(Statistic::Min),
-            _ => Self::Statistic(Statistic::Max),
-        })
-    }
-
-    #[cfg(test)]
-    pub(super) fn name(self) -> &'static str {
-        match self {
-            Self::Value => "value",
-            Self::Statistic(Statistic::Mean) => "mean",
-            Self::Statistic(Statistic::Median) => "median",
-            Self::Statistic(Statistic::Min) => "min",
-            Self::Statistic(Statistic::Max) => "max",
-        }
+        <Self as Vocabulary>::parse_or_refuse("method", method).map_err(|reason| format!("{door}: {reason}"))
     }
 }
 
@@ -267,6 +271,7 @@ pub(super) fn fill_array(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transform::impute::METHODS;
     use arrow::array::{
         Array, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
         TimestampSecondArray,
@@ -277,8 +282,9 @@ mod tests {
 
     #[test]
     fn every_declared_method_parses_to_itself() {
+        assert_eq!(Method::all(), METHODS, "the registry's list is the vocabulary's");
         for method in METHODS {
-            assert_eq!(Method::parse(DOOR, method).unwrap().name(), *method);
+            assert_eq!(Method::parse(DOOR, method).unwrap().as_str(), *method);
         }
     }
 

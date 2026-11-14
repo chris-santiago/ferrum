@@ -9034,7 +9034,7 @@ fn stacked_and_tops_only_domains(
     let stacked_domain = value_scale(&scales);
 
     let stacked_rows = crate::render::position::apply_position(
-        &batch, stacked.position.as_ref(), &scales, &stacked.encoding, false, &mut Vec::new(),
+        &batch, stacked.position.as_ref(), &scales, &stacked.encoding, crate::render::position::LayerFlip::as_written(false), &mut Vec::new(),
     )
     .expect("the stack applies");
     let tops_only = stack_spec(mark, None, value_on_x, zero_anchor, with_y2);

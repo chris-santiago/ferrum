@@ -31,6 +31,10 @@ pub(crate) mod curve;
 #[cfg(test)]
 mod color_dtype_parity;
 
+/// Test-only: the series partition fixture the line family's tests share.
+#[cfg(test)]
+mod temporal_key_partition;
+
 /// Test-only: the cross-mark band-width family invariant (F-L04-03, spec §4A)
 /// — every ordinal mark's width is the resolved scale's drawn band times its
 /// own `band_size` factor. Same reason as above: nine formulas across `bar`,

@@ -55,7 +55,7 @@ enum LayerSource<'a> {
     /// The chart's data, read panel by panel: carries the key holding its
     /// all-panel rows. The panel's own rows are `primary_batch` for
     /// [`FINAL_OUTPUT_KEY`], else the slice published under
-    /// [`crate::render::prepare::null_keys::panel_key`] (or, in a pass that
+    /// [`crate::render::prepare::routes::panel_key`] (or, in a pass that
     /// reads the whole chart, the all-panel rows themselves).
     Chart(&'a str),
     Output(&'a str),
@@ -114,7 +114,7 @@ impl<'a> LayerSource<'a> {
             // A moved chart-data layer's panel rows: its slice, published
             // beside its rows when the pass cuts panels, else the rows whole.
             LayerSource::Chart(key) => transform_outputs
-                .get(crate::render::prepare::null_keys::panel_key(key).as_str())
+                .get(crate::render::prepare::routes::panel_key(key).as_str())
                 .or_else(|| transform_outputs.get(key)),
             LayerSource::Output(key) => transform_outputs.get(key),
             LayerSource::Batch(batch) | LayerSource::Member(batch, _) => Some(batch),
@@ -613,7 +613,7 @@ pub(in crate::render) fn layer_sort_rows<'a>(
         (Some(key), None) => {
             let rows = match include_final {
                 true => transform_outputs.get(key),
-                false => transform_outputs.get(crate::render::prepare::null_keys::panel_key(key).as_str()).or_else(|| transform_outputs.get(key)),
+                false => transform_outputs.get(crate::render::prepare::routes::panel_key(key).as_str()).or_else(|| transform_outputs.get(key)),
             };
             (None, rows.unwrap_or(primary_batch), false)
         }
@@ -6432,10 +6432,10 @@ mod tests {
     /// rows under a facet-shared axis, never the pipeline tail's.
     #[test]
     fn a_moved_chart_data_layer_reads_its_own_all_panel_rows_not_the_tails() {
-        use crate::render::prepare::null_keys::{layer_key, panel_key};
+        use crate::render::prepare::routes::{own_rows_key, panel_key};
         const CHART_DATA_LAYERS: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"g","type":"nominal"},"y":{"field":"v"}}},{"mark":"point","encoding":{"x":{"field":"h","type":"nominal"},"y":{"field":"v"}}}]}"#;
         let mut spec = spec_from(CHART_DATA_LAYERS);
-        let key = layer_key(1);
+        let key = own_rows_key(1);
         spec.layers.as_mut().unwrap()[1].own_rows = Some(key.clone());
         let rows = |g: &[Option<&str>], h: &[Option<&str>]| {
             columns_batch(vec![("g", opt_str_col(g)), ("h", opt_str_col(h)), ("v", f64_col(&vec![1.0; g.len()]))])

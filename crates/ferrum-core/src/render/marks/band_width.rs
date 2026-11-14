@@ -186,7 +186,7 @@ fn render_nodes(
         position.as_ref(),
         &scales,
         &spec.encoding,
-        false,
+        crate::render::position::LayerFlip::as_written(false),
         &mut Vec::new(),
     )
     .expect("fixture position adjustment must apply");

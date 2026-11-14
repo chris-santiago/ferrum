@@ -24,13 +24,18 @@ use crate::transform::core::{apply_transforms_named, SpaceSlot, TransformSpec, F
 use crate::transform::run::{step_spec_at, OutputLineage, OutputLineages};
 
 use super::scale_resolve::{OverlayLegends, ResolvedScales};
+use super::series_keys::ColorSplit;
 use std::borrow::Cow;
 use super::{RenderError, RenderWarning};
 
 mod extent;
 mod facet_panels;
+mod impute;
 mod legend;
 pub(in crate::render) mod null_keys;
+pub(in crate::render) mod routes;
+
+pub(in crate::render) use impute::ImputeReport;
 
 // Re-exported into this module's namespace so the orchestrator and the inline
 // `#[cfg(test)] mod tests` (which uses `super::*`) resolve the extracted helpers
@@ -148,22 +153,6 @@ pub struct LayerPrepared {
     /// once the layer's rows are resolved. Empty for every layer whose rows
     /// no statistic grouped by such a field.
     pub(in crate::render) grouping_series: SeriesGrouping,
-    /// The key in the transform outputs that holds this layer's own rows,
-    /// set by the null-key drop ([`null_keys`]) when the layer draws rows its
-    /// key-siblings do not (their key fields differ, so they drop different
-    /// rows). `data_source` is left as the caller wrote it, so every question
-    /// that classifies the layer by its source answers as before; only code
-    /// that fetches the layer's batch reads this, through [`Self::rows_key`].
-    pub(in crate::render) own_rows: Option<String>,
-}
-
-impl LayerPrepared {
-    /// The key in the transform outputs whose batch this layer draws: its own
-    /// rows ([`Self::own_rows`]), else the output its `data_source` names,
-    /// else the pipeline tail ([`FINAL_OUTPUT_KEY`]).
-    pub(in crate::render) fn rows_key(&self) -> &str {
-        self.own_rows.as_deref().or(self.data_source.as_deref()).unwrap_or(FINAL_OUTPUT_KEY)
-    }
 }
 
 /// The position adjustment `layer` of `spec` draws with, resolved once at
@@ -289,7 +278,6 @@ impl LayerPrepared {
             dropped_reads: Vec::new(),
             raster_value_field: None,
             grouping_series: SeriesGrouping::default(),
-            own_rows: None,
         }
     }
 
@@ -343,7 +331,6 @@ impl LayerPrepared {
             dropped_reads: Vec::new(),
             raster_value_field: None,
             grouping_series: SeriesGrouping::default(),
-            own_rows: layer.own_rows.clone(),
         }
     }
 
@@ -769,11 +756,13 @@ pub struct PreparedInputs {
     /// empty, frame and axes over no marks, where a cell no layer has rows
     /// for is skipped.
     pub(in crate::render) facet_emptied_by_drop: HashSet<FacetPartitionKey>,
-    /// The layers the null-key drop gave rows of their own, as `(layer index,
-    /// key of those rows in `transform_outputs`)`: where two layers read one
-    /// key but drop different rows, the later one reads its own. Empty for
-    /// every chart whose layers all read the key they started on.
-    pub(in crate::render) layer_routes: Vec<(usize, String)>,
+    /// The spec this render reads after prepare: the declaration with its
+    /// primary y owner resolved and every layer's routed rows written on it
+    /// ([`routes::LayerRows`]). The one record of which rows each layer draws;
+    /// every reader that resolves a layer's batch asks this spec
+    /// ([`Self::rows_key`], [`Self::own_rows`]) rather than a declaration it
+    /// holds beside it.
+    pub(in crate::render) spec: ChartSpec,
     /// What each completion the impute step ran said, with the identity of the
     /// completion, so an overlay composite whose leaves complete the same rows
     /// the same way reports their notices once ([`ImputeReport`]).
@@ -942,12 +931,24 @@ impl PreparedInputs {
         self.facet_emptied_by_drop.contains(&(col.value.clone(), row.map(|row| row.value.clone())))
     }
 
-    /// `spec` with [`Self::layer_routes`] written on its layers (`own_rows`),
-    /// so every reader that resolves a layer's batch through the spec finds
-    /// the rows the layer draws; `spec` itself, borrowed, when no layer moved.
-    /// Called wherever a spec reaches scale resolution after prepare.
-    pub(in crate::render) fn routed_spec<'s>(&self, spec: &'s ChartSpec) -> Cow<'s, ChartSpec> {
-        routed_spec(spec, &self.layer_routes)
+    /// The spec every post-prepare reader resolves over ([`Self::spec`] the field).
+    pub(in crate::render) fn spec(&self) -> &ChartSpec {
+        &self.spec
+    }
+
+    /// The key in `transform_outputs` whose batch layer `index` draws: its own
+    /// rows ([`Self::own_rows`]), else the output its `data_source` names,
+    /// else the pipeline tail ([`FINAL_OUTPUT_KEY`]).
+    pub(in crate::render) fn rows_key(&self, index: usize) -> &str {
+        routes::spec_rows_key(&self.spec, index)
+    }
+
+    /// The key of the rows layer `index` draws when the null-key drop or the
+    /// impute gave it rows its key-siblings do not share, else `None`.
+    /// `data_source` is left as the caller wrote it, so every question that
+    /// classifies a layer by its source answers as before.
+    pub(in crate::render) fn own_rows(&self, index: usize) -> Option<&str> {
+        self.spec.layers.as_deref()?.get(index)?.own_rows.as_deref()
     }
 
     /// The chart's rendering encoding: the `rendering_encoding` field this
@@ -964,23 +965,6 @@ impl PreparedInputs {
             .get(FINAL_OUTPUT_KEY)
             .expect("apply_transforms_named publishes FINAL_OUTPUT_KEY unconditionally")
     }
-}
-
-/// `spec` with each route's `own_rows` written on its layer
-/// ([`PreparedInputs::routed_spec`]); borrowed when there is no route.
-fn routed_spec<'s>(spec: &'s ChartSpec, routes: &[(usize, String)]) -> Cow<'s, ChartSpec> {
-    if routes.is_empty() {
-        return Cow::Borrowed(spec);
-    }
-    let mut routed = spec.clone();
-    if let Some(layers) = routed.layers.as_mut() {
-        for (index, key) in routes {
-            if let Some(layer) = layers.get_mut(*index) {
-                layer.own_rows = Some(key.clone());
-            }
-        }
-    }
-    Cow::Owned(routed)
 }
 
 /// Which positional channel an axis-input derivation is for.
@@ -1496,11 +1480,11 @@ pub fn prepare_render_inputs(
 
     // Run the Phase 5 transform pipeline, applying the facet-aware partition →
     // per-panel transforms → inject → concat path when a facet is present and
-    // the plain single-partition path otherwise. The D10 impute step runs
-    // after the null-key drop below (SPINE-12). `viewport`/`theme` seed the M2
+    // the plain single-partition path otherwise. The impute step runs
+    // after the null-key drop below. `viewport`/`theme` seed the M2
     // pre-layout panel-size estimate (see `run_transforms_with_facet`'s doc).
     //
-    // #162: `run_transforms_with_facet` also drains every `TransformWarning`
+    // `run_transforms_with_facet` also drains every `TransformWarning`
     // its `TransformContext` sink accumulated (NaN-panel degrades, the gam
     // `k` clamp, `LetterValue`'s depth cap, `Impute`'s fallbacks). Hoisted
     // here, above `scale_warnings`' construction below, so both land in the
@@ -1635,38 +1619,30 @@ pub fn prepare_render_inputs(
         }
     }
 
-    // The mark-level null-key drop, then the D10 impute step over the rows
-    // it kept, so no synthesised row is ever counted as a caller's. After
-    // this, every reader below finds each layer's kept rows under the key the
-    // layer reads (`LayerPrepared::rows_key`), and `spec` carries the routes
-    // that tell scale resolution where a moved layer's rows live.
-    let mut null_key_drop =
-        null_keys::drop_null_key_rows(spec, &mut layers, &mut transform_outputs, &mut transform_lineages, &mut facet_partitions)?;
+    // The mark-level null-key drop, then the impute step over the rows
+    // it kept, so no synthesised row is ever counted as a caller's. Both
+    // publish a layer's own rows through `LayerRows`, which writes the route
+    // on the spec it holds: after this, `spec` below is the one record of
+    // where each layer's rows live, for every reader here and after prepare.
+    let colors = layer_color_splits(spec, &layers, &transformed, &transform_outputs, theme, leaf_scales);
+    let mut rows = routes::LayerRows::new(spec, &mut transform_outputs, &mut transform_lineages);
+    let mut drop_warnings = null_keys::drop_null_key_rows(spec, &layers, &colors, &mut rows, &mut facet_partitions)?;
     // Each layer that writes an impute completes its own series; a layer whose
     // series differ from its key-siblings' reads rows of its own.
-    let imputed = apply_impute_after_drop(
-        spec,
-        theme,
-        leaf_scales,
-        &facet_partitions.order,
-        &mut layers,
-        &mut transform_outputs,
-        &mut transform_lineages,
-    )?;
-    null_key_drop.routes.extend(imputed.routes);
-    null_key_drop.warnings.extend(imputed.reports.iter().flat_map(|report| report.warnings.iter().cloned()));
-    let impute_reports = imputed.reports;
+    let impute_reports = impute::apply_impute_after_drop(spec, theme, leaf_scales, &facet_partitions.order, &layers, &colors, &mut rows)?;
+    drop_warnings.extend(impute_reports.iter().flat_map(|report| report.warnings.iter().cloned()));
+    let routed_spec = rows.into_spec();
+    let spec = &routed_spec;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
         .cloned()
         .ok_or_else(|| unpublished_data_source(0, FINAL_OUTPUT_KEY, &transform_outputs))?;
-    let routed = routed_spec(spec, &null_key_drop.routes);
-    let spec = &*routed;
     let mut layer_batches: Vec<&RecordBatch> = Vec::with_capacity(layers.len());
-    for (i, layer) in layers.iter().enumerate() {
-        match transform_outputs.get(layer.rows_key()) {
+    for i in 0..layers.len() {
+        let key = routes::spec_rows_key(spec, i);
+        match transform_outputs.get(key) {
             Some(batch) => layer_batches.push(batch),
-            None => return Err(unpublished_data_source(i, layer.rows_key(), &transform_outputs)),
+            None => return Err(unpublished_data_source(i, key, &transform_outputs)),
         }
     }
 
@@ -1746,13 +1722,12 @@ pub fn prepare_render_inputs(
             leaf_scales,
         )?;
 
-    // Derive both axis inputs + their tick counts (SPINE-08/SPINE-12). The
+    // Derive both axis inputs + their tick counts. The
     // rendering encoding is post-CoordFlip; the spec-level encoding (whose
     // explicit title wins) is threaded through for the title 3-way. Also
-    // derives the provisional secondary y-axis inputs (secondary-y-axis, GH
-    // #52) from `layers`/`transformed`/`transform_outputs`, pushing any scale
+    // derives the provisional secondary y-axis inputs from `layers`/`transformed`/`transform_outputs`, pushing any scale
     // warnings into `scale_warnings` alongside the primary's.
-    // #162: merge the transform layer's own degrade warnings in, wrapped as
+    // Merge the transform layer's own degrade warnings in, wrapped as
     // `RenderWarning::Transform` (mirrors `RenderWarning::Layout`'s
     // newtype-wrap idiom). Order doesn't matter to `emit_warnings` (each
     // becomes its own independent Python `UserWarning`), so these are simply
@@ -1762,7 +1737,7 @@ pub fn prepare_render_inputs(
     let mut scale_warnings: Vec<RenderWarning> = transform_warnings
         .into_iter()
         .map(RenderWarning::Transform)
-        .chain(null_key_drop.warnings)
+        .chain(drop_warnings)
         .chain(column_warnings)
         .chain(undrawn_channel_warnings(spec, &layers))
         .chain(layer_scale_warnings)
@@ -1903,7 +1878,7 @@ pub fn prepare_render_inputs(
         axes,
         facet_groups,
         facet_emptied_by_drop: facet_partitions.emptied_by_drop,
-        layer_routes: null_key_drop.routes,
+        spec: routed_spec,
         impute_reports,
         legend_entries,
         legend_title,
@@ -2260,14 +2235,14 @@ pub(super) struct FacetPartitions {
 /// [`ArrayRef`] per panel to concatenate into [`OutputLineage::log_input`].
 type MergedLineage = (OutputLineage, Vec<RecordBatch>, HashMap<(crate::spec::layer::PositionalAxis, String), Vec<ArrayRef>>);
 
-/// Run the Phase 5 transform pipeline, producing the named-output map (SPINE-12).
+/// Run the Phase 5 transform pipeline, producing the named-output map.
 ///
 /// When faceting is active, partition the input batch by the facet column(s)
 /// BEFORE running transforms so each panel gets its own data subset and
 /// transforms execute independently per panel; the facet column(s) are
 /// re-injected into every output and per-key batches are concatenated across
 /// panels. When there is no facet, the pipeline is the plain single-partition
-/// path (one partition = full batch). The D10 impute step runs after the
+/// path (one partition = full batch). The impute step runs after the
 /// null-key drop ([`apply_impute_after_drop`]), not here.
 ///
 /// `viewport`/`theme` seed `TransformContext.panel_pixel_size` with the M2
@@ -2307,7 +2282,7 @@ fn run_transforms_with_facet(
         };
         let (outputs, lineages) = apply_transforms_named(&spec.transforms, normalized, &ctx)
             .map_err(|e| transform_refusal(e.to_string(), &ctx))?;
-        // #162: drain whatever this run's (possibly per-step-cloned, but
+        // Drain whatever this run's (possibly per-step-cloned, but
         // `Rc`-shared) sink accumulated — see `TransformContext::warnings`'s
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
         // `ctx.clone()` in `apply_transforms_named`. `merge_null_key_reports`
@@ -2544,7 +2519,7 @@ fn run_transforms_with_facet(
     let order: Vec<FacetPartitionKey> = partitions.iter().map(|(key, _)| key.clone()).collect();
     let AllNullSettled { emptied_by_drop, replaced_counts, warnings: all_null_warnings } =
         settle_all_null_partitions(all_null_steps, &order, fspec);
-    // #162: `ctx` is the SAME context across every partition in the loop
+    // `ctx` is the SAME context across every partition in the loop
     // above (not re-constructed per panel), so its `Rc`-shared sink
     // accumulated every panel's warnings — one drain covers the whole facet.
     // A transform's per-panel null-key drop counts sum to the frame's count,
@@ -2725,488 +2700,6 @@ fn concat_batches_by_name(
     .map_err(RenderError::TransformFailed)
 }
 
-// ── The impute step: each layer completes its own series ─────────────────────
-
-/// What the impute step did: the layers that read rows of their own now, and
-/// the warnings it raised.
-#[derive(Debug, Default)]
-struct ImputeStep {
-    /// `(layer index, key of the layer's own rows)`, joining the null-key
-    /// drop's routes.
-    routes: Vec<(usize, String)>,
-    /// One report per completion that raised a notice, in layer order.
-    reports: Vec<ImputeReport>,
-}
-
-/// The notices one impute completion raised, with what identifies the
-/// completion: the plan (value channel, key, series fields and options) and
-/// the rows it read. Two completions with equal plans over equal rows produce
-/// the same rows and the same notices, so a composite that renders them as
-/// separate charts reports them once ([`ImputeReport::completes_like`]), the
-/// way one chart reports layers that share a completion once.
-#[derive(Debug, Clone)]
-pub(in crate::render) struct ImputeReport {
-    plan: ImputePlan,
-    rows: RecordBatch,
-    pub(in crate::render) warnings: Vec<RenderWarning>,
-}
-
-impl ImputeReport {
-    /// Whether `other` completed the same rows the same way as this report.
-    pub(in crate::render) fn completes_like(&self, other: &Self) -> bool {
-        self.plan == other.plan && self.rows == other.rows
-    }
-}
-
-/// What one layer's impute completes, read off its drawn encoding: the value
-/// channel's field, the key channel's field it is completed along, the
-/// columns that ride with the key, the fields that name its series, and the
-/// options of the `impute=` dict. Two layers that read one batch and hold equal
-/// plans complete it identically.
-#[derive(Debug, Clone, PartialEq)]
-struct ImputePlan {
-    value: String,
-    key: String,
-    /// The key channel's secondary (`x2` for an `x` key, a binned x's
-    /// `bin_end`), copied from the row an imputed row's key is copied from.
-    companions: Vec<String>,
-    /// The fields a series splits by ([`null_keys::series_fields`]), less the
-    /// key and value fields, which are never a series key.
-    series: Vec<String>,
-    /// The series field that is a binned colour, keyed by bin.
-    binned: Option<String>,
-    options: crate::transform::impute::ChannelImpute,
-}
-
-/// How a layer's impute speaks when it refuses: the key channel as the caller
-/// wrote it. The layer is named by the caller of the step, through
-/// [`RenderError::in_layer_context`], as every layer-voiced refusal is.
-#[derive(Debug, Clone, Copy)]
-struct ImputeVoice {
-    key: &'static str,
-}
-
-impl ImputeVoice {
-    fn refusal(&self, text: String) -> RenderError {
-        RenderError::Impute { reason: text }
-    }
-
-    /// The refusal of a completion, in the channels the caller wrote.
-    fn of(&self, refusal: crate::transform::impute::ImputeRefusal) -> RenderError {
-        use crate::transform::impute::ImputeRefusal;
-        let key = self.key;
-        let text = match refusal {
-            ImputeRefusal::Refused(text) => text,
-            ImputeRefusal::CompanionDiffers { key: at, .. } => {
-                let article = if key == "x" { "an" } else { "a" };
-                format!(
-                    "impute: rows with {key} {at} hold different {key}2 values, so an imputed row has no \
-                     {key}2; impute {article} {key} whose {key}2 follows from it"
-                )
-            }
-            ImputeRefusal::CompanionUnheld { key: at, .. } => format!(
-                "impute: keyvals {at} is held by no row, so an imputed row has no {key}2 to copy; list \
-                 only {key} values some row holds"
-            ),
-        };
-        self.refusal(text)
-    }
-}
-
-/// The facts every layer's completion reads besides its own rows.
-struct ImputeEnv<'a> {
-    spec: &'a ChartSpec,
-    /// A faceted chart's partitions, in the order the pipeline made them.
-    order: &'a [FacetPartitionKey],
-    /// The buckets a binned colour is cut into, when the colour scale is one.
-    buckets: Option<&'a crate::render::scale_resolve::DiscretizedColors>,
-    /// How many rows the completions in progress left in no series, summed over
-    /// facet partitions, for the one notice that names them.
-    unseriesed: std::cell::Cell<usize>,
-}
-
-/// Layer `index`'s impute over `batch` (its own rows), or `None` when it
-/// writes none or its columns cannot be completed (a missing column or a key
-/// no reader takes: the render's own refusal speaks for those).
-fn layer_impute(
-    spec: &ChartSpec,
-    index: usize,
-    layer: &LayerPrepared,
-    batch: &RecordBatch,
-    buckets: Option<&crate::render::scale_resolve::DiscretizedColors>,
-) -> Result<Option<(ImputePlan, ImputeVoice)>, RenderError> {
-    use crate::spec::encoding::EncodingSpec;
-    let drawn = layer.drawn_encoding();
-    let voice_for = |key: &'static str| ImputeVoice {
-        key: user_facing_channel(key, layer_names_unflipped(spec, index, layer.coord.as_ref())),
-    };
-    fn impute_of(binding: &Option<EncodingSpec>) -> Option<&serde_json::Value> {
-        binding.as_ref().and_then(|binding| binding.impute.as_ref())
-    }
-    let (value_wire, key_wire, wire) = match (impute_of(&drawn.x), impute_of(&drawn.y)) {
-        (None, None) => return Ok(None),
-        (Some(_), Some(_)) => {
-            return Err(voice_for("x").refusal(
-                "impute: impute= is written on both x and y; a series is completed along one axis, so \
-                 write it on the value channel only"
-                    .to_string(),
-            ))
-        }
-        (Some(wire), None) => ("x", "y", wire),
-        (None, Some(wire)) => ("y", "x", wire),
-    };
-    let voice = voice_for(key_wire);
-    let said = |wire: &'static str| voice_for(wire).key;
-    let (value_binding, key_binding, value_secondary, key_secondary) = if value_wire == "y" {
-        (&drawn.y, &drawn.x, &drawn.y2, &drawn.x2)
-    } else {
-        (&drawn.x, &drawn.y, &drawn.x2, &drawn.y2)
-    };
-    let (Some(value_binding), Some(key_binding)) = (value_binding, key_binding) else {
-        let (value, key) = (said(value_wire), said(key_wire));
-        return Err(voice.refusal(format!(
-            "impute: impute= on {value} completes each series along {key}, but the layer draws no {key}; \
-             bind {key} or remove impute="
-        )));
-    };
-    if let Some(secondary) = value_secondary {
-        let value = said(value_wire);
-        return Err(voice.refusal(format!(
-            "impute: the layer also draws {value}2 '{}', which an imputed row would leave empty; remove \
-             {value}2 or write the missing rows",
-            secondary.field
-        )));
-    }
-    let options = crate::transform::impute::ChannelImpute::from_wire(wire).map_err(|reason| voice.refusal(reason))?;
-    let (value, key) = (value_binding.field.clone(), key_binding.field.clone());
-    let key_readable = batch
-        .column_by_name(&key)
-        .is_some_and(|column| crate::transform::group_key::is_groupby_supported_dtype(column.data_type()));
-    if !key_readable || batch.column_by_name(&value).is_none() {
-        return Ok(None);
-    }
-    let companions: Vec<String> = key_secondary
-        .iter()
-        .map(|binding| binding.field.clone())
-        .filter(|field| *field != key && *field != value && batch.column_by_name(field).is_some())
-        .collect();
-    // A binned colour keys its series by bin when its scale is cut by the bin
-    // rule; otherwise it is a continuous colour, which the mark draws as one
-    // series, and keys nothing.
-    let binned_colour = drawn.color.as_ref().filter(|color| color.color_bin().is_some()).map(|color| color.field.as_str());
-    let cut_by_bin = buckets.is_some_and(|buckets| buckets.is_cut_by_bin());
-    let series: Vec<String> = null_keys::series_fields(spec, index, layer, batch)
-        .into_iter()
-        .filter(|field| *field != key && *field != value)
-        .filter(|field| cut_by_bin || binned_colour != Some(field.as_str()))
-        .collect();
-    let binned = binned_colour.filter(|field| series.iter().any(|name| name == field)).map(str::to_string);
-    Ok(Some((ImputePlan { value, key, companions, series, binned, options }, voice)))
-}
-
-/// Each row's series over `fields`: rows sharing every field's key are one
-/// series, numbered in first-appearance order and named as a warning names a
-/// group (`h=y`); a row with no value on a field belongs to none. No fields
-/// make the whole frame one series. `None` when a field's key cannot be read,
-/// which the mark's own refusal reports.
-fn series_of_rows(
-    batch: &RecordBatch,
-    fields: &[String],
-    binned: Option<(&str, &crate::render::scale_resolve::DiscretizedColors)>,
-) -> Option<crate::transform::impute::Series> {
-    use crate::transform::impute::Series;
-    let n_rows = batch.num_rows();
-    if fields.is_empty() {
-        return Some(Series { of_row: vec![Some(0); n_rows], labels: vec![None], leave_unseriesed: false });
-    }
-    let mut columns: Vec<Vec<Option<String>>> = Vec::with_capacity(fields.len());
-    let mut bins: Vec<Option<Vec<Option<usize>>>> = Vec::with_capacity(fields.len());
-    for field in fields {
-        match binned.filter(|(name, _)| *name == field.as_str()) {
-            Some((_, buckets)) => {
-                let rows: Vec<Option<usize>> = crate::render::arrow_cast::col_as_f64(batch, field)
-                    .ok()?
-                    .into_iter()
-                    .map(|value| value.and_then(|v| buckets.bucket(v)))
-                    .collect();
-                columns.push(rows.iter().map(|bin| bin.map(|bin| bin.to_string())).collect());
-                bins.push(Some(rows));
-            }
-            None => {
-                columns.push(crate::render::arrow_cast::col_as_identity_key_str(batch, field).ok()?);
-                bins.push(None);
-            }
-        }
-    }
-    // A series is named as the transform door names a group: a date as a date, a
-    // binned colour by its range (the legend's), never by an index or an epoch.
-    let named = |index: usize, row: usize| -> String {
-        let field = &fields[index];
-        if let (Some(rows), Some((_, buckets))) = (&bins[index], binned) {
-            if let Some(bin) = rows[row] {
-                let bounds = buckets.bounds();
-                let close = if bin + 2 == bounds.len() { ']' } else { ')' };
-                return format!("{field}=[{}, {}{close}", bounds[bin], bounds[bin + 1]);
-            }
-        }
-        let column = batch.column_by_name(field);
-        let key = column.and_then(|column| crate::transform::group_key::groupby_key_at(column.as_ref(), column.data_type(), row));
-        match key {
-            Some(key) => crate::transform::context::describe_group_keys(std::slice::from_ref(field), &[key]),
-            None => format!("{field}={}", columns[index][row].as_deref().unwrap_or("")),
-        }
-    };
-    let mut ids: HashMap<Vec<&str>, usize> = HashMap::new();
-    let mut labels: Vec<Option<String>> = Vec::new();
-    let mut of_row = Vec::with_capacity(n_rows);
-    for row in 0..n_rows {
-        let key: Option<Vec<&str>> = columns.iter().map(|column| column[row].as_deref()).collect();
-        of_row.push(key.map(|key| {
-            *ids.entry(key).or_insert_with(|| {
-                let parts: Vec<String> = (0..fields.len()).map(|index| named(index, row)).collect();
-                labels.push(Some(parts.join(", ")));
-                labels.len() - 1
-            })
-        }));
-    }
-    Some(Series { of_row, labels, leave_unseriesed: true })
-}
-
-/// `batch`'s rows complete along `plan`: each series gains a row for every key
-/// it lacks, and a null or `NaN` value is filled. `None` when a series key
-/// cannot be read, which leaves the rows as they are. `facet_fields` are
-/// constant within `batch` (a facet partition), so an imputed row copies the
-/// panel's value with its series' own keys.
-fn complete_rows(
-    batch: &RecordBatch,
-    plan: &ImputePlan,
-    facet_fields: &[String],
-    voice: &ImputeVoice,
-    env: &ImputeEnv<'_>,
-    sink: &TransformContext,
-) -> Result<Option<RecordBatch>, RenderError> {
-    use crate::transform::impute::{complete_series, ImputeColumns, ImputeKey, ObservedKeys};
-    if batch.num_rows() == 0 {
-        return Ok(Some(batch.clone()));
-    }
-    let binned = plan.binned.as_deref().zip(env.buckets);
-    let Some(series) = series_of_rows(batch, &plan.series, binned) else { return Ok(None) };
-    env.unseriesed.set(env.unseriesed.get() + series.of_row.iter().filter(|series| series.is_none()).count());
-    let mut copied = plan.series.clone();
-    for field in facet_fields {
-        if *field != plan.key && *field != plan.value && !copied.contains(field) {
-            copied.push(field.clone());
-        }
-    }
-    let columns = ImputeColumns {
-        value: &plan.value,
-        key: Some(ImputeKey { field: &plan.key, observed: ObservedKeys::Placed, companions: &plan.companions }),
-        series: &copied,
-    };
-    complete_series(batch, &columns, &series, &plan.options.options(), "impute", sink)
-        .map(Some)
-        .map_err(|refusal| voice.of(refusal))
-}
-
-/// `batch` split into its facet partitions, in `order`, and the rows that
-/// belong to none (a null facet value).
-fn split_by_facet(
-    batch: &RecordBatch,
-    facet: &crate::layout::FacetSpec,
-    order: &[FacetPartitionKey],
-) -> Result<(Vec<RecordBatch>, Option<RecordBatch>), RenderError> {
-    let columns = crate::render::facet_key_column(batch, &facet.field)?;
-    let rows = facet.row.as_deref().map(|field| crate::render::facet_key_column(batch, field)).transpose()?;
-    let places: HashMap<&FacetPartitionKey, usize> = order.iter().enumerate().map(|(place, key)| (key, place)).collect();
-    let part_of: Vec<Option<usize>> = (0..batch.num_rows())
-        .map(|row| {
-            let column = columns.is_valid(row).then(|| columns.value(row).to_string())?;
-            let row_value = match &rows {
-                Some(rows) => Some(rows.is_valid(row).then(|| rows.value(row).to_string())?),
-                None => None,
-            };
-            places.get(&(column, row_value)).copied()
-        })
-        .collect();
-    let select = |keep: &dyn Fn(Option<usize>) -> bool| -> Result<RecordBatch, RenderError> {
-        let mask: arrow::array::BooleanArray = part_of.iter().map(|part| Some(keep(*part))).collect();
-        arrow::compute::filter_record_batch(batch, &mask)
-            .map_err(|e| RenderError::ScaleResolutionFailed(format!("impute: {e}")))
-    };
-    let parts = (0..order.len()).map(|place| select(&|part| part == Some(place))).collect::<Result<Vec<_>, _>>()?;
-    let unplaced = part_of.contains(&None).then(|| select(&|part| part.is_none())).transpose()?;
-    Ok((parts, unplaced))
-}
-
-/// Complete `plan` over `batch`, each facet partition on its own when the chart
-/// facets (every panel completes the series it holds, over the keys it holds),
-/// and the partitions put back in their order.
-fn complete_layer_rows(
-    batch: &RecordBatch,
-    plan: &ImputePlan,
-    voice: &ImputeVoice,
-    env: &ImputeEnv<'_>,
-    sink: &TransformContext,
-) -> Result<Option<RecordBatch>, RenderError> {
-    let facet = env.spec.facet.as_ref().filter(|facet| {
-        batch.column_by_name(&facet.field).is_some() && facet.row.as_deref().is_none_or(|row| batch.column_by_name(row).is_some())
-    });
-    let Some(facet) = facet else { return complete_rows(batch, plan, &[], voice, env, sink) };
-    let facet_fields: Vec<String> = std::iter::once(facet.field.clone()).chain(facet.row.clone()).collect();
-    let (parts, unplaced) = split_by_facet(batch, facet, env.order)?;
-    let mut completed = Vec::with_capacity(parts.len() + 1);
-    for part in &parts {
-        match complete_rows(part, plan, &facet_fields, voice, env, sink)? {
-            Some(rows) => completed.push(rows),
-            None => return Ok(None),
-        }
-    }
-    completed.extend(unplaced);
-    concat_batches_by_name("impute", completed).map(Some)
-}
-
-/// `error` named as raised by layer `index`, through the one layer context
-/// every layer-voiced refusal uses (a composite overlay names a member's own
-/// index on it afterwards).
-fn in_its_layer(spec: &ChartSpec, index: usize, layer: &LayerPrepared, error: RenderError) -> RenderError {
-    error.in_layer_context(public_layer(spec, index, layer.mark), &layer_entry(spec, index, layer.mark))
-}
-
-/// The warnings a completion raised, each once, led by the one notice naming the
-/// rows it left in no series (null on a series key the null-key drop kept
-/// because they also place nothing): they are left as written.
-fn drain_completion(sink: &TransformContext, env: &ImputeEnv<'_>, plan: &ImputePlan) -> Vec<TransformWarning> {
-    let mut warnings = Vec::new();
-    let left = env.unseriesed.replace(0);
-    if left > 0 {
-        let columns = plan.series.iter().map(|field| format!("'{field}'")).collect::<Vec<_>>().join(" or ");
-        // A binned colour is also un-seried by a NaN or infinite value (it has no bin).
-        let cause = if plan.binned.is_some() { "a null or non-finite value" } else { "a null" };
-        warnings.push(TransformWarning::FallbackApplied {
-            transform: "Impute".into(),
-            group: None,
-            reason: format!(
-                "{left} row(s) have {cause} in {columns}, so they belong to no series; they were left as \
-                 written and no key is completed for them"
-            ),
-        });
-    }
-    warnings.extend(drain_once(sink));
-    warnings
-}
-
-/// The warnings a completion raised, each once: a faceted completion raises
-/// the same notice in every panel that has it.
-fn drain_once(sink: &TransformContext) -> Vec<TransformWarning> {
-    let mut warnings: Vec<TransformWarning> = Vec::new();
-    for warning in sink.warnings.borrow_mut().drain(..) {
-        if !warnings.contains(&warning) {
-            warnings.push(warning);
-        }
-    }
-    warnings
-}
-
-/// The D10 impute step, run over the rows the null-key drop kept so no
-/// synthesised row is ever counted as a caller's (SPINE-12).
-///
-/// A layer imputes when its drawn encoding writes `impute=` on `x` or `y`
-/// (its own or inherited): that channel is the value, the other positional
-/// channel the key, and the layer's series (its colour when the mark splits by
-/// it, `shape`, `stroke_dash`, `detail`) are each completed over the keys the
-/// layer's rows hold ([`crate::transform::impute::complete_series`]). Every layer
-/// completes its own series, so layers that key different series read
-/// different rows.
-///
-/// Layers reading one key whose impute is identical share its completed rows,
-/// published in place. Where they differ, each imputing layer reads its
-/// completed rows under [`null_keys::layer_key`] (the route the drop uses) and
-/// a layer with no impute keeps the caller's rows. Each imputing layer reports
-/// its own fallback warnings once, in layer order.
-fn apply_impute_after_drop(
-    spec: &ChartSpec,
-    theme: &crate::layout::ThemeInputs,
-    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
-    order: &[FacetPartitionKey],
-    layers: &mut [LayerPrepared],
-    outputs: &mut HashMap<String, RecordBatch>,
-    lineages: &mut OutputLineages,
-) -> Result<ImputeStep, RenderError> {
-    let mut step = ImputeStep::default();
-    // The drawn encoding is a subset of the completed one, so a layer whose
-    // completed encoding writes no impute draws none.
-    let writes_impute = |layer: &LayerPrepared| [&layer.encoding.x, &layer.encoding.y].into_iter().any(|binding| binding.as_ref().is_some_and(|b| b.impute.is_some()));
-    if !layers.iter().any(writes_impute) {
-        return Ok(step);
-    }
-    let buckets = layers
-        .iter()
-        .filter(|layer| writes_impute(layer))
-        .any(|layer| !layer.binned_color_bindings().is_empty())
-        .then(|| binned_color_buckets(spec, outputs, lineages, theme, leaf_scales))
-        .flatten();
-    let mut plans: Vec<Option<(ImputePlan, ImputeVoice)>> = Vec::with_capacity(layers.len());
-    for (index, layer) in layers.iter().enumerate() {
-        plans.push(match outputs.get(layer.rows_key()) {
-            Some(batch) => layer_impute(spec, index, layer, batch, buckets.as_ref()).map_err(|e| in_its_layer(spec, index, layer, e))?,
-            None => None,
-        });
-    }
-    if plans.iter().all(Option::is_none) {
-        return Ok(step);
-    }
-    let env = ImputeEnv { spec, order, buckets: buckets.as_ref(), unseriesed: std::cell::Cell::new(0) };
-    let sink = TransformContext::default();
-    let mut reports: Vec<(usize, ImputeReport)> = Vec::new();
-    let mut keys: Vec<String> = Vec::new();
-    for (index, _) in plans.iter().enumerate().filter(|(_, plan)| plan.is_some()) {
-        let key = layers[index].rows_key().to_string();
-        if !keys.contains(&key) {
-            keys.push(key);
-        }
-    }
-    for key in keys {
-        let members: Vec<usize> = (0..layers.len()).filter(|&index| layers[index].rows_key() == key).collect();
-        let Some(original) = outputs.get(&key).cloned() else { continue };
-        let plan_of = |index: usize| plans[index].as_ref().map(|(plan, _)| plan);
-        let shared = plan_of(members[0]).is_some() && members.iter().all(|&index| plan_of(index) == plan_of(members[0]));
-        if shared {
-            let Some((plan, voice)) = &plans[members[0]] else { continue };
-            let completed = complete_layer_rows(&original, plan, voice, &env, &sink).map_err(|e| in_its_layer(spec, members[0], &layers[members[0]], e))?;
-            // One computation ran for every layer on the key, so its notices are said once.
-            reports.push((members[0], impute_report(plan, &original, drain_completion(&sink, &env, plan))));
-            if let Some(rows) = completed {
-                outputs.insert(key, rows);
-            }
-            continue;
-        }
-        for &index in members.iter().filter(|&&index| plans[index].is_some()) {
-            let Some((plan, voice)) = &plans[index] else { continue };
-            let completed = complete_layer_rows(&original, plan, voice, &env, &sink).map_err(|e| in_its_layer(spec, index, &layers[index], e))?;
-            reports.push((index, impute_report(plan, &original, drain_completion(&sink, &env, plan))));
-            if let Some(rows) = completed {
-                let own = null_keys::layer_key(index);
-                outputs.insert(own.clone(), rows);
-                if let Some(lineage) = lineages.get(&key).cloned() {
-                    lineages.insert(own.clone(), lineage);
-                }
-                layers[index].own_rows = Some(own.clone());
-                step.routes.push((index, own));
-            }
-        }
-    }
-    reports.sort_by_key(|(index, _)| *index);
-    step.reports = reports.into_iter().map(|(_, report)| report).filter(|report| !report.warnings.is_empty()).collect();
-    Ok(step)
-}
-
-fn impute_report(plan: &ImputePlan, rows: &RecordBatch, said: Vec<TransformWarning>) -> ImputeReport {
-    ImputeReport {
-        plan: plan.clone(),
-        rows: rows.clone(),
-        warnings: said.into_iter().map(RenderWarning::Transform).collect(),
-    }
-}
 
 /// Refuse a `group` grouping key where nothing reads it
 /// ([`RenderError::GroupKeyMisplaced`]): on the chart-level encoding, or on a
@@ -3232,7 +2725,7 @@ fn refuse_misplaced_group_keys(spec: &ChartSpec) -> Result<(), RenderError> {
 }
 
 /// Build the per-layer prepared inputs, applying [`LayerPrepared::flip_coords`]
-/// to every layer whose OWN effective coord flips (SPINE-12) — the whole
+/// to every layer whose OWN effective coord flips — the whole
 /// coordinate-space group (channels AND their provenance flags) swaps together.
 ///
 /// Single-layer charts (`spec.layers == None`) produce exactly one
@@ -3346,6 +2839,43 @@ fn establishing_encoding(
         }
     }
     Ok(encoding)
+}
+
+/// How each layer's colour binding splits its marks into series
+/// ([`ColorSplit`]), decided from the colour scale's kind before any row is
+/// dropped or imputed: the establishing binding's split under the scale
+/// `build_color_scale` builds, narrowed to each layer's own binding; for a
+/// leaf of an overlay group that resolves colour for its members, the split
+/// under the group's scale, which every member's marks draw through. The
+/// null-key drop, the impute and the mark builders so read one decision.
+fn layer_color_splits(
+    spec: &ChartSpec,
+    layers: &[LayerPrepared],
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+    theme: &crate::layout::ThemeInputs,
+    leaf_scales: Option<&crate::render::scale_resolve::LeafScaleContext>,
+) -> Vec<ColorSplit> {
+    use crate::render::scale_resolve::{aux_reads, color_grouping_area, color_split, LeafScaleContext};
+    let own = |layer: &LayerPrepared| layer.drawn_encoding().color;
+    let group = leaf_scales.filter(|scales| scales.overlay_groups_channel("color")).and_then(LeafScaleContext::overlay_group);
+    if let Some(group) = group {
+        let scale = group.scales_for(theme).color();
+        return layers.iter().map(|layer| ColorSplit::of_scale(own(layer).as_ref(), scale)).collect();
+    }
+    let unsplit = || vec![ColorSplit::Unsplit; layers.len()];
+    let Some(channel) = crate::spec::encoding::AUXILIARY_SCALE_CHANNELS.iter().find(|channel| channel.name == "color") else {
+        return unsplit();
+    };
+    let Some(establishing) = establishing_binding(spec, layers, *channel, primary_batch, transform_outputs) else {
+        return unsplit();
+    };
+    let reads = match spec.layers.as_deref() {
+        Some(raw) => aux_reads(raw, &spec.encoding, *channel, primary_batch, transform_outputs),
+        None => Vec::new(),
+    };
+    let split = color_split(&establishing, color_grouping_area(spec.mark, &reads), &reads, primary_batch, transform_outputs);
+    layers.iter().map(|layer| split.for_binding(own(layer).as_ref())).collect()
 }
 
 /// The binding an auxiliary-scale `channel`'s scale and legend are
@@ -4272,7 +3802,7 @@ fn build_secondary_y_axis_inputs(
     for (slot_index, &layer_idx) in y_slot_plan.secondary_layers().iter().enumerate() {
         let y_slot = slot_index + 1;
         let layer = &layers[layer_idx];
-        let layer_batch: &RecordBatch = match layer.rows_key() {
+        let layer_batch: &RecordBatch = match routes::spec_rows_key(spec, layer_idx) {
             FINAL_OUTPUT_KEY => transformed,
             key => transform_outputs.get(key).ok_or_else(|| unpublished_data_source(layer_idx, key, transform_outputs))?,
         };

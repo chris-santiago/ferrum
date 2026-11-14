@@ -21,9 +21,9 @@
 //! - **Where the kept rows live.** Layers reading one key that count the same
 //!   rows replace that key's batch in place. Where two layers on one key count
 //!   different rows, the first keeps the key and a later one gets its own kept
-//!   rows under [`layer_key`], recorded on the layer as `own_rows`; its
-//!   `data_source` is untouched, so everything that classifies a layer by its
-//!   source answers as before.
+//!   rows under [`own_rows_key`](super::routes::own_rows_key), recorded on the spec's layer as `own_rows`
+//!   ([`LayerRows`]); its `data_source` is untouched, so everything that
+//!   classifies a layer by its source answers as before.
 //! - **Reporting.** One [`report_skipped_null_keys`] call per layer under its
 //!   entry: a count per field, or the all-null sentence when every row of the
 //!   layer is null-keyed.
@@ -33,38 +33,14 @@ use std::collections::{HashMap, HashSet};
 use arrow::array::{Array, BooleanArray};
 use arrow::record_batch::RecordBatch;
 
+use super::routes::LayerRows;
+use crate::render::series_keys::{reads_categorical, ColorSplit, SeriesKeys, SplitSource};
 use super::{layer_entry, FacetPartitionKey, FacetPartitions, LayerPrepared};
 use crate::render::{RenderError, RenderWarning};
 use crate::spec::chart::ChartSpec;
-use crate::spec::encoding::EncodingSpec;
 use crate::spec::layer::PositionalChannel;
 use crate::transform::context::TransformContext;
-use crate::transform::core::FINAL_OUTPUT_KEY;
 use crate::transform::group_key::{report_skipped_null_keys, NullKeyCounts, NullKeyPolicy};
-use crate::transform::run::OutputLineages;
-
-/// The key a layer's own kept rows are published under in the transform
-/// outputs, for a layer the drop gave rows its key-siblings do not share.
-pub(in crate::render) fn layer_key(index: usize) -> String {
-    format!("__null_keys_layer_{index}__")
-}
-
-/// The key a panel's slice of the rows published under `key` is published
-/// under, in the per-panel output map the panel pass builds
-/// (`scene_build::resolve_panel_scales`).
-pub(in crate::render) fn panel_key(key: &str) -> String {
-    format!("{key}__panel__")
-}
-
-/// What the drop did: the layers that read rows of their own now, and the
-/// warnings it raised.
-#[derive(Debug, Default)]
-pub(super) struct NullKeyDrop {
-    /// `(layer index, key of the layer's own rows)`, empty for every chart
-    /// whose layers all read the key they started on.
-    pub(super) routes: Vec<(usize, String)>,
-    pub(super) warnings: Vec<RenderWarning>,
-}
 
 /// How a null-category row's opposite positional channel decides whether the
 /// row counts.
@@ -121,30 +97,15 @@ fn pooled_fields(lineage: Option<&crate::transform::run::OutputLineage>) -> Hash
         .unwrap_or_default()
 }
 
-/// Whether `enc`'s column of `dtype` reads as categories: typed nominal or
-/// ordinal, carrying a categorical scale, or a dtype the continuous reader
-/// cannot place. An untyped all-null column is a quantitative position.
-fn reads_categorical(enc: &EncodingSpec, dtype: &arrow::datatypes::DataType) -> bool {
-    use crate::spec::encoding::DataType;
-    matches!(enc.type_, Some(DataType::Nominal | DataType::Ordinal))
-        || enc.scale.as_ref().is_some_and(crate::render::scale_resolve::is_categorical_scale)
-        || (*dtype != arrow::datatypes::DataType::Null && crate::render::scale_resolve::dtype_reads_categorical(dtype))
-}
-
-/// Whether `mark` dashes each row by a numeric `stroke_dash` index (a tick
-/// draws no `stroke_dash`, so its binding never reaches the drop).
-fn dashes_each_row_by_index(mark: crate::spec::mark::Mark) -> bool {
-    use crate::spec::mark::Mark;
-    matches!(mark, Mark::Point | Mark::Bar | Mark::Rect | Mark::Rule)
-}
-
-/// The key fields of layer `index`, read against its own `batch`.
+/// The key fields of layer `index`, read against its own `batch`. `color` is
+/// how the layer's colour scale splits its series ([`ColorSplit`]).
 fn layer_key_fields(
     spec: &ChartSpec,
     index: usize,
     layer: &LayerPrepared,
     batch: &RecordBatch,
     pooled: &HashSet<String>,
+    color: ColorSplit,
 ) -> LayerKeys {
     let drawn = layer.drawn_encoding();
     let raw = spec.layers.as_ref().and_then(|layers| layers.get(index));
@@ -206,26 +167,14 @@ fn layer_key_fields(
     let dtype_of = |field: &str| batch.column_by_name(field).map(|c| c.data_type().clone());
     for (wire, enc) in drawn.bindings() {
         let Some(dtype) = dtype_of(&enc.field) else { continue };
-        match wire {
-            "x" | "y" if reads_categorical(enc, &dtype) => push(&enc.field, KeyKind::Category(opposite_of(wire))),
-            "color" if reads_categorical(enc, &dtype) || enc.color_bin().is_some() => push(&enc.field, KeyKind::Grouping),
-            // A shape binding draws a symbol per level whatever the field's
-            // dtype (a numeric field's values are its levels).
-            "shape" => push(&enc.field, KeyKind::Grouping),
-            // A dash binding is a key where the mark draws levels from the
-            // field: a categorical field on any mark that draws the channel,
-            // a numeric index on the marks that dash each row by it. A series
-            // mark (line, ribbon) splits series by categorical dashes only and
-            // reads a numeric one from a group's first row, so a null there
-            // draws nothing the drop would remove.
-            "stroke_dash" if reads_categorical(enc, &dtype) || dashes_each_row_by_index(layer.mark) => {
-                push(&enc.field, KeyKind::Grouping)
-            }
-            _ => {}
+        if matches!(wire, "x" | "y") && reads_categorical(enc, &dtype) {
+            push(&enc.field, KeyKind::Category(opposite_of(wire)));
         }
     }
-    if let Some(detail) = layer.mark_style.as_ref().and_then(|m| m.detail.as_deref()).filter(|_| layer.mark.style_field("detail").is_some()) {
-        push(detail, KeyKind::Grouping);
+    // The series the mark splits by: one description, read by the draw and the impute too.
+    let detail = layer.mark_style.as_ref().and_then(|m| m.detail.as_deref());
+    for key in SeriesKeys::of(layer.mark, &drawn, detail, SplitSource::Decided(color), batch.schema().as_ref()).levels() {
+        push(key.field(), KeyKind::Grouping);
     }
     // Positional keys first, then the grouping ones, as the gate reads them.
     fields.sort_by_key(|key| !matches!(key.kind, KeyKind::Category(_)));
@@ -271,7 +220,7 @@ fn counted_rows(batch: &RecordBatch, keys: &LayerKeys) -> Option<Vec<bool>> {
 /// `batch` filtered to the rows `keep` selects.
 fn filter_rows(batch: &RecordBatch, keep: BooleanArray) -> Result<RecordBatch, RenderError> {
     arrow::compute::filter_record_batch(batch, &keep)
-        .map_err(|e| RenderError::ScaleResolutionFailed(format!("null-key drop: {e}")))
+        .map_err(|e| RenderError::RowSelectionFailed { step: "null-key drop", reason: e.to_string() })
 }
 
 /// `batch` without the rows `counted` marks.
@@ -320,19 +269,20 @@ fn emptied_partitions(spec: &ChartSpec, batch: &RecordBatch, counted: &[bool]) -
 /// composite leaves do, so the number of lines never depends on what else a
 /// layer keys.
 ///
-/// `outputs` holds the pipeline's published batches (the tail at
-/// [`FINAL_OUTPUT_KEY`] included) and is updated in place; a layer the drop
-/// gives rows of its own has `own_rows` set and its rows published under
-/// [`layer_key`], with its source's lineage copied beside them. `facet`
-/// gains the partitions the drop emptied.
+/// `rows` holds the pipeline's published batches (the tail at
+/// [`FINAL_OUTPUT_KEY`](crate::transform::core::FINAL_OUTPUT_KEY) included)
+/// and is updated in place; a layer the drop gives rows of its own has them
+/// published through [`LayerRows::publish_own_rows`]. `facet` gains the
+/// partitions the drop emptied. Returns the warnings it raised, one report per
+/// layer in layer order.
 pub(super) fn drop_null_key_rows(
     spec: &ChartSpec,
-    layers: &mut [LayerPrepared],
-    outputs: &mut HashMap<String, RecordBatch>,
-    lineages: &mut OutputLineages,
+    layers: &[LayerPrepared],
+    colors: &[ColorSplit],
+    rows: &mut LayerRows<'_>,
     facet: &mut FacetPartitions,
-) -> Result<NullKeyDrop, RenderError> {
-    let mut result = NullKeyDrop::default();
+) -> Result<Vec<RenderWarning>, RenderError> {
+    let mut warnings = Vec::new();
 
     // Each layer's keys and counted rows over the batch of the key it reads.
     struct Judged {
@@ -342,23 +292,23 @@ pub(super) fn drop_null_key_rows(
     }
     let mut judged: Vec<Judged> = Vec::with_capacity(layers.len());
     for (index, layer) in layers.iter().enumerate() {
-        let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
-        let Some(batch) = outputs.get(&key) else {
+        let key = rows.rows_key(index).to_string();
+        let Some(batch) = rows.outputs().get(&key) else {
             judged.push(Judged { key, fields: Vec::new(), counted: None });
             continue;
         };
-        let keys = layer_key_fields(spec, index, layer, batch, &pooled_fields(lineages.get(&key)));
+        let keys = layer_key_fields(spec, index, layer, batch, &pooled_fields(rows.lineages().get(&key)), colors[index]);
         let has_null = keys.fields.iter().any(|k| null_mask(batch, &k.field).is_some());
         let counted = if has_null { counted_rows(batch, &keys) } else { None };
         judged.push(Judged { key, fields: keys.fields, counted });
     }
     if judged.iter().all(|j| j.counted.is_none()) {
-        return Ok(result);
+        return Ok(warnings);
     }
 
     // The rows each key held before any layer's drop.
     let originals: HashMap<String, RecordBatch> =
-        judged.iter().filter(|j| j.counted.is_some()).filter_map(|j| outputs.get(&j.key).map(|b| (j.key.clone(), b.clone()))).collect();
+        judged.iter().filter(|j| j.counted.is_some()).filter_map(|j| rows.outputs().get(&j.key).map(|b| (j.key.clone(), b.clone()))).collect();
 
     // Per key, in layer order: the first layer keeps the key, and a later one
     // whose counted rows differ reads rows of its own.
@@ -376,23 +326,17 @@ pub(super) fn drop_null_key_rows(
         let Some(original) = originals.get(key) else { continue };
         let first = members[0];
         if let Some(counted) = &judged[first].counted {
-            outputs.insert(key.to_string(), kept(original, counted)?);
+            rows.replace(key, kept(original, counted)?);
         }
         for &i in &members[1..] {
             if judged[i].counted == judged[first].counted {
                 continue;
             }
-            let rows = match &judged[i].counted {
+            let own_rows = match &judged[i].counted {
                 Some(counted) => kept(original, counted)?,
                 None => original.clone(),
             };
-            let own = layer_key(i);
-            outputs.insert(own.clone(), rows);
-            if let Some(lineage) = lineages.get(key).cloned() {
-                lineages.insert(own.clone(), lineage);
-            }
-            layers[i].own_rows = Some(own.clone());
-            result.routes.push((i, own));
+            rows.publish_own_rows(i, key, own_rows);
         }
     }
 
@@ -421,24 +365,9 @@ pub(super) fn drop_null_key_rows(
         facet.emptied_by_drop.extend(emptied_partitions(spec, original, counted)?);
     }
     for warning in ctx.warnings.borrow_mut().drain(..) {
-        let warning = RenderWarning::Transform(warning);
-        result.warnings.push(warning);
+        warnings.push(RenderWarning::Transform(warning));
     }
-    Ok(result)
-}
-
-/// The fields layer `index`'s series split by over `batch`: the grouping
-/// bindings the layer's mark draws and partitions by (the colour when it reads
-/// as categories or carries a bin rule, `shape`, a categorical or per-row
-/// `stroke_dash`, `detail`), in the column gate's read order and each once.
-/// The impute completes the series these fields name.
-pub(super) fn series_fields(spec: &ChartSpec, index: usize, layer: &LayerPrepared, batch: &RecordBatch) -> Vec<String> {
-    layer_key_fields(spec, index, layer, batch, &HashSet::new())
-        .fields
-        .into_iter()
-        .filter(|key| key.kind == KeyKind::Grouping)
-        .map(|key| key.field)
-        .collect()
+    Ok(warnings)
 }
 
 /// The chart's facet fields, which a count never names: they are constant and
@@ -451,6 +380,7 @@ fn facet_fields(spec: &ChartSpec) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::render::prepare::prepare_render_inputs;
+    use crate::render::prepare::routes::own_rows_key;
     use arrow::array::{Float64Array, NullArray, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
@@ -510,7 +440,7 @@ mod tests {
             drops(&prep),
             ["mark_point: 1 row has a null 'c' and belongs to no group, so it was dropped; fill or filter the nulls in 'c'"]
         );
-        assert!(prep.layer_routes.is_empty(), "one layer on one key replaces the key in place");
+        assert_eq!(prep.own_rows(0), None, "one layer on one key replaces the key in place");
     }
 
     #[test]
@@ -543,6 +473,77 @@ mod tests {
         let json = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"c","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"c","type":"nominal"},"y":{"field":"v"}}},{"mark":"rule","encoding":{"x":{"field":"ref","type":"nominal"},"y":{"field":"v"}},"inherited_positional":["y"]}]}"#;
         let prep = prepared(&spec(json), &b);
         assert_eq!(prep.final_batch().num_rows(), 2, "the structural null drops nothing");
+        assert!(drops(&prep).is_empty(), "got {:?}", drops(&prep));
+    }
+
+    fn ints(values: &[Option<i64>]) -> Arc<dyn Array> {
+        Arc::new(arrow::array::Int64Array::from(values.to_vec()))
+    }
+
+    /// `t`, `v` and an integer `h` holding one null.
+    fn integer_colour_batch() -> RecordBatch {
+        batch(vec![
+            ("t", floats(&[Some(1.0), Some(2.0), Some(3.0), Some(1.0), Some(2.0)])),
+            ("v", floats(&[Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)])),
+            ("h", ints(&[Some(1), Some(1), Some(1), Some(2), None])),
+        ])
+    }
+
+    fn colour_spec(mark: &str) -> String {
+        format!(
+            r#"{{"data":{{"kind":"named","name":"default"}},"mark":"{mark}","encoding":{{"x":{{"field":"t"}},"y":{{"field":"v"}},"color":{{"field":"h"}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_null_integer_colour_on_an_area_is_a_dropped_level() {
+        // An area draws one band per colour category whatever the column's dtype, so its
+        // null is a null level, as a text column's is.
+        let prep = prepared(&spec(&colour_spec("area")), &integer_colour_batch());
+        assert_eq!(prep.final_batch().num_rows(), 4);
+        assert_eq!(
+            drops(&prep),
+            ["mark_area: 1 row has a null 'h' and belongs to no group, so it was dropped; fill or filter the nulls in 'h'"]
+        );
+    }
+
+    #[test]
+    fn a_null_integer_colour_on_a_line_is_no_level() {
+        // A continuous colour scale colours each vertex by its own value and splits no series.
+        let prep = prepared(&spec(&colour_spec("line")), &integer_colour_batch());
+        assert_eq!(prep.final_batch().num_rows(), 5);
+        assert!(drops(&prep).is_empty(), "got {:?}", drops(&prep));
+    }
+
+    #[test]
+    fn a_line_beside_an_area_that_groups_the_colour_counts_its_nulls() {
+        // The area makes the colour scale categorical for every layer of the panel.
+        let area_then_line = |first: &str, second: &str| {
+            format!(
+                r#"{{"data":{{"kind":"named","name":"default"}},"mark":"{first}","encoding":{{"x":{{"field":"t"}},"y":{{"field":"v"}},"color":{{"field":"h"}}}},"layers":[{{"mark":"{first}","encoding":{{"x":{{"field":"t"}},"y":{{"field":"v"}},"color":{{"field":"h"}}}}}},{{"mark":"{second}","encoding":{{"x":{{"field":"t"}},"y":{{"field":"v"}},"color":{{"field":"h"}}}}}}]}}"#
+            )
+        };
+        for (first, second) in [("area", "line"), ("line", "area")] {
+            let prep = prepared(&spec(&area_then_line(first, second)), &integer_colour_batch());
+            let said = drops(&prep);
+            assert_eq!(said.len(), 2, "{first} then {second}: each layer reports its own drop, got {said:?}");
+            assert!(said.iter().all(|line| line.contains("1 row has a null 'h'")), "{said:?}");
+        }
+    }
+
+    #[test]
+    fn a_text_colour_a_continuous_scale_leaves_out_counts_no_null() {
+        // Layer 0's numeric colour establishes a continuous scale; layer 1's text colour is
+        // left out of it and draws unsplit, so a null in it is no group's.
+        let b = batch(vec![
+            ("t", floats(&[Some(1.0), Some(2.0), Some(3.0)])),
+            ("v", floats(&[Some(1.0), Some(2.0), Some(3.0)])),
+            ("q", floats(&[Some(0.1), Some(0.5), Some(0.9)])),
+            ("s", strings(&[Some("a"), None, Some("b")])),
+        ]);
+        let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"t"},"y":{"field":"v"},"color":{"field":"q"}}},{"mark":"line","encoding":{"x":{"field":"t"},"y":{"field":"v"},"color":{"field":"s"}}}]}"#;
+        let prep = prepared(&spec(json), &b);
+        assert_eq!(prep.final_batch().num_rows(), 3);
         assert!(drops(&prep).is_empty(), "got {:?}", drops(&prep));
     }
 
@@ -592,7 +593,7 @@ mod tests {
         let b = batch(vec![("h", strings(&[Some("x"), None]))]);
         let json = r#"{"data":{"kind":"named","name":"default"},"mark":"geoshape","encoding":{"color":{"field":"h","type":"nominal"}}}"#;
         let layers = super::super::build_layers(&spec(json)).unwrap();
-        let keys = layer_key_fields(&spec(json), 0, &layers[0], &b, &HashSet::new());
+        let keys = layer_key_fields(&spec(json), 0, &layers[0], &b, &HashSet::new(), ColorSplit::Categories);
         assert!(keys.fields.is_empty(), "geoshape draws no colour, so a binding on it is no key: {:?}", keys.fields);
     }
 
@@ -678,8 +679,8 @@ mod tests {
         let s = spec(POINT_CAT_VAL);
         let layers = super::super::build_layers(&s).unwrap();
         let exempt: HashSet<String> = HashSet::from(["c".to_string()]);
-        assert!(layer_key_fields(&s, 0, &layers[0], &b, &exempt).fields.is_empty());
-        assert_eq!(layer_key_fields(&s, 0, &layers[0], &b, &HashSet::new()).fields.len(), 1);
+        assert!(layer_key_fields(&s, 0, &layers[0], &b, &exempt, ColorSplit::Categories).fields.is_empty());
+        assert_eq!(layer_key_fields(&s, 0, &layers[0], &b, &HashSet::new(), ColorSplit::Categories).fields.len(), 1);
 
         use crate::transform::core::TransformSpec;
         let transform = |json: serde_json::Value| -> TransformSpec { serde_json::from_value(json).expect("a transform spec") };
@@ -723,7 +724,7 @@ mod tests {
     fn layers_keying_the_same_fields_replace_the_key_in_place_and_each_reports() {
         let b = cat_batch(&[Some("a"), Some("b"), None], &[Some(1.0), Some(2.0), Some(3.0)]);
         let prep = prepared(&spec(TWO_LAYERS_SAME_KEYS), &b);
-        assert!(prep.layer_routes.is_empty());
+        assert!((0..2).all(|layer| prep.own_rows(layer).is_none()));
         assert_eq!(prep.final_batch().num_rows(), 2);
         let texts = drops(&prep);
         assert_eq!(texts.len(), 2, "each layer reports its own count in its own voice: {texts:?}");
@@ -746,18 +747,19 @@ mod tests {
     fn layers_keying_different_fields_give_the_later_one_its_own_rows() {
         let s = spec(TWO_LAYERS_DIFFERENT_KEYS);
         let prep = prepared(&s, &disagreeing_batch());
-        assert_eq!(prep.layer_routes, vec![(1, layer_key(1))]);
+        assert_eq!(prep.own_rows(0), None);
+        assert_eq!(prep.own_rows(1), Some(own_rows_key(1).as_str()));
         assert_eq!(prep.final_batch().num_rows(), 4, "the point layer keeps the key and every row it draws");
-        assert_eq!(prep.transform_outputs[&layer_key(1)].num_rows(), 3, "the line's own rows lose its null-h row");
+        assert_eq!(prep.transform_outputs[&own_rows_key(1)].num_rows(), 3, "the line's own rows lose its null-h row");
         assert_eq!(prep.layers[1].data_source, None, "the layer's source is untouched");
-        assert_eq!(prep.layers[1].own_rows.as_deref(), Some(layer_key(1).as_str()));
+        assert_eq!(prep.rows_key(1), own_rows_key(1));
         assert_eq!(
             drops(&prep),
             ["mark_line: 1 row has a null 'h' and belongs to no group, so it was dropped; fill or filter the nulls in 'h'"]
         );
-        let routed = prep.routed_spec(&s);
+        let routed = prep.spec();
         let layers = routed.layers.as_ref().unwrap();
-        assert_eq!(layers[1].own_rows.as_deref(), Some(layer_key(1).as_str()));
+        assert_eq!(layers[1].own_rows.as_deref(), Some(own_rows_key(1).as_str()));
         assert_eq!(layers[1].data_source, None);
         assert!(
             layers[1].completed_encoding(&routed.encoding).x.is_some(),
@@ -774,17 +776,19 @@ mod tests {
         // Publish the operand's rows as the pipeline would: the same rows the tail holds.
         let layers = s.layers.as_ref().unwrap();
         assert_eq!(layers[0].data_source.as_deref(), Some("_operand_0"));
-        let mut outputs = HashMap::from([(FINAL_OUTPUT_KEY.to_string(), b.clone()), ("_operand_0".to_string(), b.clone())]);
-        let mut prepared_layers = super::super::build_layers(&s).unwrap();
-        let mut lineages = OutputLineages::new();
+        let mut outputs = HashMap::from([(crate::transform::core::FINAL_OUTPUT_KEY.to_string(), b.clone()), ("_operand_0".to_string(), b.clone())]);
+        let prepared_layers = super::super::build_layers(&s).unwrap();
+        let mut lineages = crate::transform::run::OutputLineages::new();
         let mut facet = FacetPartitions::default();
-        let drop = drop_null_key_rows(&s, &mut prepared_layers, &mut outputs, &mut lineages, &mut facet).unwrap();
-        assert_eq!(drop.routes, vec![(1, layer_key(1))]);
+        let mut rows = LayerRows::new(&s, &mut outputs, &mut lineages);
+        drop_null_key_rows(&s, &prepared_layers, &vec![ColorSplit::Categories; prepared_layers.len()], &mut rows, &mut facet).unwrap();
+        assert_eq!(rows.rows_key(0), "_operand_0");
+        assert_eq!(rows.rows_key(1), own_rows_key(1));
+        drop(rows);
         assert_eq!(outputs["_operand_0"].num_rows(), 4);
-        assert_eq!(outputs[&layer_key(1)].num_rows(), 3);
+        assert_eq!(outputs[&own_rows_key(1)].num_rows(), 3);
         assert_eq!(prepared_layers[1].data_source.as_deref(), Some("_operand_0"));
-        assert_eq!(prepared_layers[1].rows_key(), layer_key(1));
-        assert_eq!(outputs[FINAL_OUTPUT_KEY].num_rows(), 4, "an unrelated key is not touched");
+        assert_eq!(outputs[crate::transform::core::FINAL_OUTPUT_KEY].num_rows(), 4, "an unrelated key is not touched");
     }
 
     #[test]
@@ -797,9 +801,9 @@ mod tests {
             ("h", strings(&[Some("x"), Some("y")])),
         ]);
         let prep = prepared(&s, &b);
-        assert!(prep.layer_routes.is_empty());
+        assert!((0..2).all(|layer| prep.own_rows(layer).is_none()));
         assert!(drops(&prep).is_empty());
-        assert!(matches!(prep.routed_spec(&s), std::borrow::Cow::Borrowed(_)));
+        assert_eq!(prep.spec().layers, s.layers, "no route is written on the spec");
         assert_eq!(prep.final_batch().num_rows(), 2);
     }
 
@@ -926,22 +930,23 @@ mod tests {
         };
         let json = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"c","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"c","type":"nominal"},"y":{"field":"v"}},"data_source":"K"},{"mark":"point","encoding":{"x":{"field":"c","type":"nominal"},"y":{"field":"v"},"color":{"field":"h","type":"nominal"}},"data_source":"K"}]}"#;
         let s = spec(json);
-        let mut layers = super::super::build_layers(&s).unwrap();
-        let mut outputs = HashMap::from([("K".to_string(), rows.clone()), (FINAL_OUTPUT_KEY.to_string(), rows.clone())]);
-        let mut lineages = OutputLineages::from([("K".to_string(), source)]);
+        let layers = super::super::build_layers(&s).unwrap();
+        let mut outputs = HashMap::from([("K".to_string(), rows.clone()), (crate::transform::core::FINAL_OUTPUT_KEY.to_string(), rows.clone())]);
+        let mut lineages = crate::transform::run::OutputLineages::from([("K".to_string(), source)]);
         let mut facet = FacetPartitions::default();
-        let drop = drop_null_key_rows(&s, &mut layers, &mut outputs, &mut lineages, &mut facet).unwrap();
-        assert_eq!(drop.routes, vec![(1, layer_key(1))]);
-        let moved = lineages.get(&layer_key(1)).expect("the moved layer's rows key carries its source's lineage");
+        let mut routes = LayerRows::new(&s, &mut outputs, &mut lineages);
+        drop_null_key_rows(&s, &layers, &vec![ColorSplit::Categories; layers.len()], &mut routes, &mut facet).unwrap();
+        assert_eq!(routes.rows_key(0), "K");
+        assert_eq!(routes.rows_key(1), own_rows_key(1));
+        let routed = routes.into_spec();
+        let moved = lineages.get(&own_rows_key(1)).expect("the moved layer's rows key carries its source's lineage");
         assert_eq!(moved.statistic_input.as_ref(), Some(&consumed));
         // The reader a data-aware sort uses finds the consumed rows through it.
-        let mut routed = s.clone();
-        routed.layers.as_mut().unwrap()[1].own_rows = Some(layer_key(1));
         let sort_rows = crate::render::scale_resolve::layer_sort_rows(
             &routed,
             1,
             &routed.layers.as_ref().unwrap()[1],
-            &outputs[FINAL_OUTPUT_KEY],
+            &outputs[crate::transform::core::FINAL_OUTPUT_KEY],
             &outputs,
             &lineages,
             false,

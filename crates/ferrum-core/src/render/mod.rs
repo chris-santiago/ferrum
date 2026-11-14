@@ -13,6 +13,7 @@ pub(crate) mod svg;
 pub(crate) mod embed_font;
 pub(crate) mod scale_resolve;
 pub(crate) mod prepare;
+pub(crate) mod series_keys;
 pub(crate) mod drawn;
 pub(crate) mod rasterize;
 pub(crate) mod draw;
@@ -377,6 +378,10 @@ pub enum RenderError {
     /// column. `reason` is the whole sentence, door-prefixed (`impute: ...`),
     /// worded in the channels the caller wrote and naming the remedy.
     Impute { reason: String },
+    /// Selecting a subset of a frame's rows failed in Arrow: the rows the
+    /// null-key drop keeps, or a facet panel's rows the impute completes.
+    /// `step` names the step that asked; `reason` is Arrow's.
+    RowSelectionFailed { step: &'static str, reason: String },
     ScaleResolutionFailed(String),
     LayoutFailed(String),
     ResvgFailed(String),
@@ -1349,6 +1354,7 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // Worded in the channels the caller wrote when it is built, so there
         // is no resolved token left to un-flip.
         | RenderError::Impute { .. }
+        | RenderError::RowSelectionFailed { .. }
         | RenderError::ScaleResolutionFailed(_)
         | RenderError::LayoutFailed(_)
         | RenderError::ResvgFailed(_)
@@ -1527,6 +1533,7 @@ impl std::fmt::Display for RenderError {
             Self::TransformFailed(s) =>
                 write!(f, "transform failed: {s}"),
             Self::Impute { reason } => f.write_str(reason),
+            Self::RowSelectionFailed { step, reason } => write!(f, "{step}: selecting rows failed: {reason}"),
             Self::ScaleResolutionFailed(s) =>
                 write!(f, "scale resolution failed: {s}"),
             Self::LayoutFailed(s) =>
@@ -4562,10 +4569,9 @@ fn prepare_and_layout(
     // An independent-x/y facet panel draws its own axis, from its own scale:
     // resolve those axis inputs now, so layout reserves each axis band for
     // what the panels draw.
-    let routed = prep.routed_spec(spec);
     prep.axes.panels = scene_build::independent_panel_axis_inputs(
         &scene_build::PanelResolveCtx {
-            spec: &routed,
+            spec: prep.spec(),
             prep: &prep,
             theme: &applied.effective_theme,
             chart_config,
@@ -4646,7 +4652,7 @@ pub fn render_svg(
         prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let scene = scene_build::build_scene(
-        spec, &prep, &layout, &applied.effective_theme, config, &mut warnings, chart_config, None,
+        &prep, &layout, &applied.effective_theme, config, &mut warnings, chart_config, None,
     )?;
     let svg_string = svg_walk::walk_svg(&scene, config.embed_fonts)?;
 
@@ -4702,7 +4708,7 @@ pub fn render_scene_json(
         prepare_and_layout(spec, batch, theme, viewport, chart_config, None)?;
 
     let mut scene = scene_build::build_scene(
-        spec, &prep, &layout, &applied.effective_theme, config, &mut warnings, chart_config, None,
+        &prep, &layout, &applied.effective_theme, config, &mut warnings, chart_config, None,
     )?;
 
     // Extract large homogeneous mark batches as raw packed bytes, clearing
@@ -4936,7 +4942,6 @@ mod orchestration_tests {
             prepare_and_layout(spec, batch, &theme, viewport, chart_config, None)
                 .expect("fixture must prepare");
         let scene = scene_build::build_scene(
-            spec,
             &prep,
             &layout,
             &applied.effective_theme,
@@ -6891,7 +6896,6 @@ mod orchestration_tests {
             .expect("layout should succeed");
         let mut warnings = Vec::new();
         let scene = scene_build::build_scene(
-            spec,
             &po.prep,
             &po.layout,
             &po.applied.effective_theme,
@@ -7103,7 +7107,6 @@ mod orchestration_tests {
             .expect("layout should succeed");
             let mut warnings = Vec::new();
             let scene = scene_build::build_scene(
-                &spec,
                 &po.prep,
                 &po.layout,
                 &po.applied.effective_theme,
@@ -7202,7 +7205,6 @@ mod orchestration_tests {
             .expect("layout should succeed");
             let mut warnings = Vec::new();
             let scene = scene_build::build_scene(
-                &spec,
                 &po.prep,
                 &po.layout,
                 &po.applied.effective_theme,
@@ -7328,7 +7330,6 @@ mod orchestration_tests {
             .expect("layout should succeed");
         let mut warnings = Vec::new();
         let scene = scene_build::build_scene(
-            spec,
             &po.prep,
             &po.layout,
             &po.applied.effective_theme,
@@ -8030,7 +8031,6 @@ mod orchestration_tests {
                 .expect("layout should succeed");
             let mut warnings = Vec::new();
             let scene = scene_build::build_scene(
-                spec,
                 &po.prep,
                 &po.layout,
                 &po.applied.effective_theme,
@@ -8166,7 +8166,6 @@ mod orchestration_tests {
             let theme = po.applied.effective_theme.clone();
             let mut warnings = Vec::new();
             let scene = scene_build::build_scene(
-                &spec,
                 &po.prep,
                 &po.layout,
                 &theme,
@@ -8616,7 +8615,7 @@ mod orchestration_tests {
         }
 
         let scene = scene_build::build_scene(
-            &spec, &prep, &layout, theme_ref, &cfg, &mut warnings,
+            &prep, &layout, theme_ref, &cfg, &mut warnings,
             &ChartConfig::default(), None,
         ).unwrap();
         let new_svg = svg_walk::walk_svg(&scene, cfg.embed_fonts).unwrap();

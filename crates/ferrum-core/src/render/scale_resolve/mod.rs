@@ -50,7 +50,7 @@ pub use self::auxiliary::{
 pub(crate) use self::auxiliary::NUMERIC_AUX_CHANNELS;
 pub(in crate::render) use self::auxiliary::log_aux_drawn_rows;
 pub use self::color::build_color_scale;
-pub(in crate::render) use self::color::require_binnable;
+pub(in crate::render) use self::color::{color_split, require_binnable};
 
 // Domain-union helpers re-exported for the composite resolve pass
 // (`render::composite`), which unions per-channel domains across a composite

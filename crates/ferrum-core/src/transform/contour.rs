@@ -501,6 +501,11 @@ fn group_key_columns(batch: &RecordBatch) -> Vec<(FieldRef, ArrayRef)> {
         .collect()
 }
 
+/// The null-key policy the log seam forms `Contour`'s groups under. A
+/// `Contour` demands list slots only, which never form a group, so the seam
+/// finds nothing for it to empty whatever the policy.
+const GROUP_NULL_KEYS: NullKeyPolicy = NullKeyPolicy::Skip;
+
 /// Context-aware entry point: when a drawn log axis demands this `Contour`
 /// on its `grid_x` slot, its `grid_y` slot, or both (`ctx.log_space`,
 /// reached through the `Kde2D` surface this reads —
@@ -530,9 +535,7 @@ pub(crate) fn apply_with_context(spec: &ContourSpec, batch: &RecordBatch, ctx: &
         LABEL,
         batch,
         &demand,
-        // Contour demands list slots only, which never form a group, so the
-        // policy is never read.
-        NullKeyPolicy::Skip,
+        GROUP_NULL_KEYS,
         |mapped_batch, _columns, _ctx| apply(spec, mapped_batch),
         &[
             ("contour_x", SpaceSlot::GridX, ColumnShape::Scalar),

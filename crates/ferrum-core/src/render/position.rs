@@ -791,15 +791,6 @@ impl LayerFlip {
     }
 }
 
-/// A test convenience that names as it draws ([`LayerFlip::as_written`]);
-/// production callers build the pair explicitly.
-#[cfg(test)]
-impl From<bool> for LayerFlip {
-    fn from(flipped: bool) -> Self {
-        Self::as_written(flipped)
-    }
-}
-
 /// Apply a position adjustment to a layer batch, returning a new batch with
 /// rewritten coordinate columns (or, for ordinal-x Dodge / Jitter into bands,
 /// with two synthetic `__pos_x_offset__` / `__pos_y_offset__` Float64 columns
@@ -811,10 +802,9 @@ pub(crate) fn apply_position(
     position: Option<&PositionAdjust>,
     scales: &ResolvedScales,
     encoding: &crate::spec::encoding::Encoding,
-    flip: impl Into<LayerFlip>,
+    flip: LayerFlip,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<RecordBatch, crate::render::RenderError> {
-    let flip: LayerFlip = flip.into();
     let LayerFlip { flipped: coord_flipped, names_unflipped } = flip;
     // With no explicit position, the encoding's `stack` shorthand stacks
     // along the channel that declares it (`effective_position`), which must
@@ -2703,7 +2693,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let out = apply_position(&b, Some(&PositionAdjust::Identity), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&PositionAdjust::Identity), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert_eq!(out.num_rows(), b.num_rows());
         assert_eq!(out.num_columns(), b.num_columns());
     }
@@ -2713,7 +2703,7 @@ mod tests {
         let b = batch_xyg();
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
-        let out = apply_position(&b, None, &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, None, &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert_eq!(out.num_rows(), b.num_rows());
     }
 
@@ -2723,7 +2713,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         // Two unique x values: 1.0, 2.0 → bandwidth = 1.0.
         // Two groups (a, b) → sub_band = 0.5; offsets a=-0.25, b=+0.25.
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -2775,7 +2765,7 @@ mod tests {
         };
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
 
         let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let hi = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -2836,7 +2826,7 @@ mod tests {
         let s = dummy_scales();
         // padding 0.1 -> 0.1 off each end of a 1.0 bin, two 0.4 slots between.
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.1 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let hi = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         for (i, (elo, ehi)) in [(0.1, 0.5), (0.5, 0.9)].iter().enumerate() {
@@ -2883,7 +2873,7 @@ mod tests {
         };
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let hi = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
 
@@ -2923,7 +2913,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(xa.value(0), 1.0);
         assert_eq!(xa.value(1), 2.0);
@@ -2986,7 +2976,7 @@ mod tests {
         let enc = enc_xy("cat", "val", Some("grp"));
         let s = scales_one_ordinal(true);
         let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![-12.5, 12.5, -12.5, 12.5]);
         assert_eq!(offset_col(&out, "__pos_y_offset__"), vec![0.0, 0.0, 0.0, 0.0]);
     }
@@ -3002,7 +2992,7 @@ mod tests {
         let enc = enc_xy("val", "cat", Some("grp"));
         let s = scales_one_ordinal(false);
         let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap();
 
         let y_off = offset_col(&out, "__pos_y_offset__");
         assert_eq!(y_off, vec![-12.5, 12.5, -12.5, 12.5]);
@@ -3014,7 +3004,7 @@ mod tests {
             Some(&pos),
             &scales_one_ordinal(true),
             &enc_xy("cat", "val", Some("grp")),
-            false,
+            LayerFlip::as_written(false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -3037,7 +3027,7 @@ mod tests {
         let enc = enc_xy("val", "cat", Some("grp"));
         let s = scales_one_ordinal(false); // ordinal scale lives on y, not x
         let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
 
         let y_off = offset_col(&out, "__pos_y_offset__");
         assert_eq!(y_off, vec![-12.5, 12.5, -12.5, 12.5], "band offset must land in y (the ordinal axis)");
@@ -3064,7 +3054,7 @@ mod tests {
         let enc = enc_xy("val", "cat", Some("grp"));
         let s = scales_one_ordinal(false);
         let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap();
         assert_eq!(out.num_columns(), b.num_columns());
         assert!(out.schema().index_of("__pos_x_offset__").is_err());
         assert!(out.schema().index_of("__pos_y_offset__").is_err());
@@ -3145,7 +3135,7 @@ mod tests {
         let enc = enc_xy("cat", "val", Some("model"));
         let s = scales_ordinal_x_with_color(&["base", "alt"]);
         let pos = PositionAdjust::Dodge { by: Some("model".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         // row0 = "alt" → slot 1 → +12.5; row1 = "base" → slot 0 → -12.5.
         assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![12.5, -12.5]);
     }
@@ -3161,7 +3151,7 @@ mod tests {
         enc.group = Some(EncodingSpec { field: "model".into(), ..Default::default() });
         let s = scales_ordinal_x_with_color(&["base", "alt"]);
         let pos = PositionAdjust::Dodge { by: None, padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         // row0 = "alt" → slot 1 → +12.5; row1 = "base" → slot 0 → -12.5.
         assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![12.5, -12.5]);
     }
@@ -3178,7 +3168,7 @@ mod tests {
         // have no effect because "grp" != "cat".
         let s = scales_ordinal_x_with_color(&["q", "p"]);
         let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![-12.5, 12.5, -12.5, 12.5]);
     }
 
@@ -3191,7 +3181,7 @@ mod tests {
         let enc = enc_xy("cat", "val", Some("grp"));
         let s = scales_one_ordinal(true); // color: None
         let pos = PositionAdjust::Dodge { by: None, padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert_eq!(offset_col(&out, "__pos_x_offset__"), vec![-12.5, 12.5, -12.5, 12.5]);
     }
 
@@ -3201,8 +3191,8 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(42) };
-        let a = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
-        let bb = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let a = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
+        let bb = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ax = a.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let bx = bb.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..4 {
@@ -3216,8 +3206,8 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: None };
-        let a = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
-        let bb = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let a = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
+        let bb = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ax = a.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         let bx = bb.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..4 {
@@ -3231,7 +3221,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // Group order: a=0, b=1. At x=1: a=10 → 10, b=20 → 30. At x=2: a=30 → 30, b=40 → 70.
         assert_eq!(ya.value(0), 10.0);
@@ -3251,7 +3241,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Zero, anchor: StackAnchor::Top, value_axis: None };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let raw = out
             .column_by_name(&own_value_column("y"))
             .expect("own-value column present")
@@ -3299,7 +3289,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // For each x bin the top of the highest stack should be 1.0.
         // x=1: top group (b) reaches 1.0 → row 1.
@@ -3314,7 +3304,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let s = dummy_scales();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset: StackOffset::Center, anchor: StackAnchor::Top, value_axis: None };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: total=30, mid=15. a row goes 0..10 → top at 10-15=-5.
         // b row goes 10..30 → top at 30-15=15.
@@ -3337,7 +3327,7 @@ mod tests {
             anchor: StackAnchor::Mid,
             value_axis: None,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: a segment 0..10 → mid 5;  b segment 10..30 → mid 20.
         // x=2: a segment 0..30 → mid 15; b segment 30..70 → mid 50.
@@ -3367,7 +3357,7 @@ mod tests {
             anchor: StackAnchor::Mid,
             value_axis: None,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1: total=30. a→10/30 ⇒ top=1/3, mid=1/6. b→20/30 ⇒ top=1, mid=2/3.
         assert!((ya.value(0) - (1.0 / 6.0)).abs() < 1e-9);
@@ -3390,7 +3380,7 @@ mod tests {
             anchor: StackAnchor::Mid,
             value_axis: None,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // x=1 total=30, mid_axis=15. a: base=-15, top=-5  → mid=-10.
         //                              b: base=-5,  top=15 → mid=5.
@@ -3496,7 +3486,7 @@ mod tests {
             None,
             &spec.encoding,
             None,
-            false.into(),
+            LayerFlip::as_written(false),
             &mut Vec::new(),
         );
         assert!(
@@ -3534,7 +3524,7 @@ mod tests {
         let preview = position_preview(&batch, Some(&dodge), &encoding, false, StackValueAxis::X, None, None).unwrap();
         assert!(preview.is_none(), "an adjustment error must resolve to None, not propagate as a ScaleResolutionFailed");
 
-        let direct = apply_dodge(&batch, Some("g"), 0.0, &probe_scales(false, false, None), &encoding, false.into(), &mut Vec::new());
+        let direct = apply_dodge(&batch, Some("g"), 0.0, &probe_scales(false, false, None), &encoding, LayerFlip::as_written(false), &mut Vec::new());
         assert!(
             matches!(direct, Err(crate::render::RenderError::PositionAdjustFailed { adjustment: "Dodge", .. })),
             "apply_dodge should fail with its own typed error when the band column is absent: {direct:?}"
@@ -3806,7 +3796,7 @@ mod tests {
 
         // With coord_flipped=true, Stack should treat encoding.x ("val") as
         // the value column and encoding.y ("cat") as the category column.
-        let out = apply_position(&batch, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap();
+        let out = apply_position(&batch, Some(&pos), &s, &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap();
 
         // The value column ("val") should be cumulated.
         let val_idx = out.schema().index_of("val").unwrap();
@@ -3951,7 +3941,7 @@ mod tests {
             value_axis: Some(StackValueAxis::X),
         };
         let out =
-            apply_position(&batch, Some(&pos), &dummy_scales(), &enc, true, &mut Vec::new()).unwrap();
+            apply_position(&batch, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap();
 
         let counts = out.column(out.schema().index_of("count").unwrap());
         let counts = counts.as_any().downcast_ref::<Float64Array>().unwrap();
@@ -4008,7 +3998,7 @@ mod tests {
         };
         for coord_flipped in [false, true] {
             let out =
-                apply_position(&batch, Some(&pos), &dummy_scales(), &enc, coord_flipped, &mut Vec::new())
+                apply_position(&batch, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(coord_flipped), &mut Vec::new())
                     .unwrap();
             assert_eq!(
                 out.schema().metadata().get("__probe__").map(String::as_str),
@@ -4031,7 +4021,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         // Same assertions as stack_zero_accumulates_y.
         assert_eq!(ya.value(0), 10.0);
@@ -4057,12 +4047,12 @@ mod tests {
 
         // No category (x) encoding.
         let enc_no_x = Encoding { x: None, ..enc_xy("x", "y", Some("g")) };
-        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, false, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, LayerFlip::as_written(false), &mut Vec::new()).unwrap_err();
         assert_eq!(format!("{err}"), "Stack: category (x) encoding required");
 
         // No value (y) encoding.
         let enc_no_y = Encoding { y: None, ..enc_xy("x", "y", Some("g")) };
-        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, false, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, LayerFlip::as_written(false), &mut Vec::new()).unwrap_err();
         assert_eq!(format!("{err}"), "Stack: value (y) encoding required");
     }
 
@@ -4087,7 +4077,7 @@ mod tests {
 
         // Post-flip x (value slot) missing → the user's own y is unset.
         let enc_no_x = Encoding { x: None, ..enc_xy("x", "y", Some("g")) };
-        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, true, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, LayerFlip::as_written(true), &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "Stack: value (y) encoding required",
@@ -4096,7 +4086,7 @@ mod tests {
 
         // Post-flip y (category slot) missing → the user's own x is unset.
         let enc_no_y = Encoding { y: None, ..enc_xy("x", "y", Some("g")) };
-        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, true, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, LayerFlip::as_written(true), &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "Stack: category (x) encoding required",
@@ -4221,7 +4211,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let err = apply_position(&batch, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&batch, Some(&pos), &s, &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap_err();
         let text = format!("{err}");
         // The load-bearing part of this assertion is the channel token `y` —
         // the post-flip x column's bad dtype must be reported as the user's own
@@ -4305,7 +4295,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let err = apply_position(&batch_unflipped, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&batch_unflipped, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap_err();
         assert_eq!(format!("{err}"), format!("Stack: x {CATEGORY_REFUSAL}"));
 
         // Flipped: the resolved category slot is post-flip y — Duration "y" is
@@ -4325,7 +4315,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = apply_position(&batch_flipped, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&batch_flipped, Some(&pos), &s, &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             format!("Stack: x {CATEGORY_REFUSAL}"),
@@ -4354,7 +4344,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = apply_position(&batch_value_unflipped, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&batch_value_unflipped, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "Stack: y must be a numeric dtype (Float64/Float32, Int8/Int16/Int32/Int64, \
@@ -4379,7 +4369,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let err = apply_position(&batch_value_flipped, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&batch_value_flipped, Some(&pos), &s, &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "Stack: y must be a numeric dtype (Float64/Float32, Int8/Int16/Int32/Int64, \
@@ -4421,7 +4411,7 @@ mod tests {
         // value_axis=X, coord_flipped=false → value_on_x=true → cat_enc=y.
         // Missing y (category) → HEAD wrongly said "(x)"; now correctly "(y)".
         let enc_no_y = Encoding { y: None, ..enc_xy("x", "y", Some("g")) };
-        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, false, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_y, LayerFlip::as_written(false), &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "Stack: category (y) encoding required",
@@ -4432,7 +4422,7 @@ mod tests {
         // value_axis=X, coord_flipped=false → value_enc=x. Missing x (value) →
         // HEAD wrongly said "(y)"; now correctly "(x)".
         let enc_no_x = Encoding { x: None, ..enc_xy("x", "y", Some("g")) };
-        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, false, &mut Vec::new()).unwrap_err();
+        let err = apply_position(&b, Some(&pos), &s, &enc_no_x, LayerFlip::as_written(false), &mut Vec::new()).unwrap_err();
         assert_eq!(
             format!("{err}"),
             "Stack: value (x) encoding required",
@@ -4472,7 +4462,7 @@ mod tests {
         };
 
         // Must not error — Int64 should be widened to f64.
-        let out = apply_position(&batch, Some(&pos), &s, &enc, false, &mut Vec::new())
+        let out = apply_position(&batch, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new())
             .expect("Stack must accept Int64 measure without error");
 
         // Output y column must be Float64 (promoted from Int64).
@@ -4519,7 +4509,7 @@ mod tests {
             value_axis: None,
         };
 
-        let out = apply_position(&batch, Some(&pos), &s, &enc, false, &mut Vec::new())
+        let out = apply_position(&batch, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new())
             .expect("Stack must accept Int32 measure without error");
 
         assert_eq!(out.schema().field(1).data_type(), &DataType::Float64);
@@ -4604,7 +4594,7 @@ mod tests {
                 Some(&pos),
                 &dummy_scales(),
                 &enc_xy("x", "y", Some("g")),
-                false,
+                LayerFlip::as_written(false),
                 &mut Vec::new(),
             )
             .unwrap_or_else(|e| panic!("{name} must stack, as it already dodges and jitters: {e}"));
@@ -4662,7 +4652,7 @@ mod tests {
             ] {
                 let mut warnings = Vec::new();
                 let out =
-                    apply_position(&batch, Some(&pos), &dummy_scales(), &enc, false, &mut warnings);
+                    apply_position(&batch, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(false), &mut warnings);
                 assert!(
                     out.is_ok(),
                     "{adjustment} must accept a {name} value column, like its two siblings: {:?}",
@@ -4707,7 +4697,7 @@ mod tests {
             Some(&pos),
             &dummy_scales(),
             &enc_xy("x", "y", Some("g")),
-            false,
+            LayerFlip::as_written(false),
             &mut Vec::new(),
         )
         .expect_err("Boolean is not a numeric dtype and must still refuse");
@@ -4758,7 +4748,7 @@ mod tests {
             Some(&pos),
             &dummy_scales(),
             &enc_xy("x", "y", Some("g")),
-            false,
+            LayerFlip::as_written(false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -4854,7 +4844,7 @@ mod tests {
             Some(&pos),
             &dummy_scales(),
             &enc_xy("x", "y", Some("g")),
-            false,
+            LayerFlip::as_written(false),
             &mut warnings,
         )?;
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -5058,7 +5048,7 @@ mod tests {
             Some(&pos),
             &dummy_scales(),
             &enc_xy("x", "y", Some("g")),
-            false,
+            LayerFlip::as_written(false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -5141,7 +5131,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "int64 dodge should not warn: {warnings:?}");
         assert_dodge_oracle(&out);
     }
@@ -5157,7 +5147,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "float64 dodge should not warn: {warnings:?}");
         assert_dodge_oracle(&out);
     }
@@ -5173,7 +5163,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "boolean dodge should not warn: {warnings:?}");
         assert_dodge_oracle(&out);
     }
@@ -5186,7 +5176,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("nope".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         // Batch unchanged — x column is the original 1.0/1.0/2.0/2.0.
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(xa.value(0), 1.0);
@@ -5214,7 +5204,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         // Batch unchanged.
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(xa.value(0), 1.0);
@@ -5241,7 +5231,7 @@ mod tests {
             let b = dodge_batch_with_group(g_field, g_col);
             let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
             let mut warnings = Vec::new();
-            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut warnings).unwrap();
+            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), LayerFlip::as_written(false), &mut warnings).unwrap();
             let xs: Vec<f64> = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap().iter().flatten().collect();
             (xs, warnings.len())
         };
@@ -5269,7 +5259,7 @@ mod tests {
                 value_axis: None,
             };
             let mut warnings = Vec::new();
-            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut warnings).unwrap();
+            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), LayerFlip::as_written(false), &mut warnings).unwrap();
             let ys: Vec<f64> = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap().iter().flatten().collect();
             (ys, warnings.len())
         };
@@ -5292,7 +5282,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: None, padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(xa.value(0), 1.0);
         assert_eq!(xa.value(3), 2.0);
@@ -5308,7 +5298,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         assert_dodge_oracle(&out);
     }
@@ -5430,7 +5420,7 @@ mod tests {
         let s = scales_ordinal_x_numeric_domain();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "ordinal-scale dodge must not warn: {warnings:?}");
 
         // bandwidth 50, 2 groups, padding 0 → sub_band 25 → ∓12.5.
@@ -5457,7 +5447,7 @@ mod tests {
             Some(&PositionAdjust::Dodge { by: Some("g".into()), padding: 0.05 }),
             &scales_ordinal_x_numeric_domain(),
             &enc_xy("x", "y", Some("g")),
-            false,
+            LayerFlip::as_written(false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -5468,7 +5458,7 @@ mod tests {
             Some(&PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.05 }),
             &scales_one_ordinal(true),
             &enc_xy("cat", "val", Some("grp")),
-            false,
+            LayerFlip::as_written(false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -5502,7 +5492,7 @@ mod tests {
             let s = dummy_scales(); // Linear x — a genuinely continuous band.
             let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
             let mut warnings = Vec::new();
-            let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+            let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
             assert!(warnings.is_empty(), "{name}: continuous dodge must not warn: {warnings:?}");
             assert_eq!(
                 out.schema().field(0).data_type(),
@@ -5552,7 +5542,7 @@ mod tests {
             ..Default::default()
         };
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new())
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(false), &mut Vec::new())
             .unwrap();
 
         let lo = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -5592,7 +5582,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut warnings)
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(false), &mut warnings)
             .expect("a Utf8 band on a continuous scale degrades, it does not refuse");
         assert_eq!(out.schema(), b.schema(), "the batch must come back untouched");
         assert_eq!(warnings.len(), 1, "expected exactly one warning, got {warnings:?}");
@@ -5625,7 +5615,7 @@ mod tests {
             for (name, field, col) in x_column_dtype_matrix() {
                 let b = batch_xyg_with_x(field, col);
                 let out =
-                    apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new())
+                    apply_position(&b, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(false), &mut Vec::new())
                         .unwrap_or_else(|e| panic!("{name} (seed {seed:?}) must jitter: {e}"));
                 assert_eq!(
                     out.schema().field(0).data_type(),
@@ -5676,7 +5666,7 @@ mod tests {
                 Some(&pos),
                 &scales_ordinal_x_numeric_domain(),
                 &enc,
-                false,
+                LayerFlip::as_written(false),
                 &mut Vec::new(),
             )
             .unwrap();
@@ -5712,7 +5702,7 @@ mod tests {
         let enc = enc_xy("x", "y", Some("g"));
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 0.5, seed: Some(7) };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut warnings)
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(false), &mut warnings)
             .expect("a Utf8 axis degrades, it does not raise an Arrow schema error");
         let xa = out.column(0).as_any().downcast_ref::<StringArray>().expect("still Utf8");
         assert_eq!((0..4).map(|i| xa.value(i)).collect::<Vec<_>>(), vec!["p", "p", "q", "q"]);
@@ -5740,7 +5730,7 @@ mod tests {
         );
         let enc = enc_xy("x", "y", Some("g"));
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new())
+        let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(false), &mut Vec::new())
             .unwrap();
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert!(xa.is_null(1), "a null band value must stay null, got {}", xa.value(1));
@@ -5984,7 +5974,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "int64 stack should not warn: {warnings:?}");
         assert_stack_top_oracle(&out);
     }
@@ -6003,7 +5993,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         // Batch unchanged — y column is the original 10/20/30/40 (un-stacked).
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(ya.value(0), 10.0);
@@ -6036,7 +6026,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         // Batch unchanged — y column is the original 10/20/30/40.
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(ya.value(0), 10.0);
@@ -6069,7 +6059,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(ya.value(0), 10.0);
         assert_eq!(ya.value(3), 40.0);
@@ -6091,7 +6081,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         assert_stack_top_oracle(&out);
     }
@@ -6144,7 +6134,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "single-group stack must not warn: {warnings:?}");
         // One group, but each x-bin still has TWO rows: stack accumulates every
         // row within a bin (not just across distinct groups). bin x=1: 10 then
@@ -6166,7 +6156,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "single-group dodge must not warn: {warnings:?}");
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!((xa.value(0), xa.value(3)), (1.0, 2.0), "x must be unchanged");
@@ -6192,7 +6182,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "all-null `by` must not warn: {warnings:?}");
         // All rows in one ("") group, but each x-bin still has two rows that
         // accumulate: bin x=1 → 10,30; bin x=2 → 30,70.
@@ -6212,7 +6202,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "all-null `by` dodge must not warn: {warnings:?}");
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!((xa.value(0), xa.value(3)), (1.0, 2.0));
@@ -6285,7 +6275,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "0-row stack must not warn: {warnings:?}");
         assert_eq!(out.num_rows(), 0);
         let base_idx = out.schema().index_of("__stack_y_base__")
@@ -6306,7 +6296,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         assert_eq!(out.num_rows(), 0);
         assert_eq!(out.num_columns(), 3, "0-row dodge must clone unchanged");
@@ -6330,7 +6320,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert_eq!(out.num_rows(), 0);
         assert_eq!(warnings.len(), 1, "exactly one warning expected");
         match &warnings[0] {
@@ -6363,7 +6353,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "NaN-float `by` must categorize, not warn: {warnings:?}");
         // Group order first-appearance: "NaN"=0, "1"=1.
         // bin x=1: rows 0("NaN",10) then 1("1",20) → tops 10, 30.
@@ -6409,7 +6399,7 @@ mod tests {
         let s = dummy_scales();
         let pos = PositionAdjust::Dodge { by: Some("g".into()), padding: 0.0 };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         let xa = out.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
         for i in 0..4 {
@@ -6440,7 +6430,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "boolean stack must not warn: {warnings:?}");
         assert_stack_top_oracle(&out);
     }
@@ -6489,7 +6479,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty(), "by==value column must not warn: {warnings:?}");
         // bin x=1: 10 then 20 → tops 10, 30; bin x=2: 30 then 40 → 30, 70.
         assert_eq!(stack_tops(&out, 1), vec![10.0, 30.0, 30.0, 70.0]);
@@ -6523,7 +6513,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         // Group first-appearance: "1"=0, "0"=1 (row0's value 1 appears first).
         // So segment ordering is by that group index, NOT numeric value.
@@ -6574,7 +6564,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         // Grouped by `by_col` (a/b) → canonical [10,30,30,70]. If color had won,
         // every bin would be a single group "z" → tops would equal raw values
@@ -6598,7 +6588,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         assert_stack_top_oracle(&out);
     }
@@ -6635,7 +6625,7 @@ mod tests {
             value_axis: None,
         };
         let mut warnings = Vec::new();
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut warnings).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut warnings).unwrap();
         assert!(warnings.is_empty());
         let tops = stack_tops(&out, 1);
         let bases = stack_bases(&out);
@@ -6797,7 +6787,7 @@ mod tests {
         let enc = enc_xy("cat", "val", Some("grp"));
         let s = scales_one_ordinal(true);
         let pos = PositionAdjust::Dodge { by: Some("grp".into()), padding: 0.0 };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert_eq!(BatchPositionMeta::from_batch(&out).dodge_n_groups(), 2, "batch_cat_val_grp has 2 groups (p, q)");
     }
 
@@ -6826,7 +6816,7 @@ mod tests {
 
         let pos = PositionAdjust::Dodge { by: Some(by.into()), padding };
         // Real producer: same call scene_build.rs makes before mark dispatch.
-        let adjusted = apply_position(batch, Some(&pos), scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(batch, Some(&pos), scales, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
 
         let spec = ChartSpec {
             mark: Mark::Bar,
@@ -7098,7 +7088,7 @@ mod tests {
         let enc = enc_xy("cat", "val", Some("grp"));
         let pos = PositionAdjust::Jitter { axis: JitterAxis::X, width: 1.0, seed: Some(7) };
         let jitter = |layout| {
-            let out = apply_position(&b, Some(&pos), &scales(layout), &enc, false, &mut Vec::new())
+            let out = apply_position(&b, Some(&pos), &scales(layout), &enc, LayerFlip::as_written(false), &mut Vec::new())
                 .unwrap();
             offset_col(&out, "__pos_x_offset__")
         };
@@ -7193,7 +7183,7 @@ mod tests {
             value_axis: Some(StackValueAxis::X),
         };
 
-        let out = apply_position(&batch, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&batch, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
 
         // "count" (encoding.x, the value column) must be cumulated.
         let count_idx = out.schema().index_of("count").unwrap();
@@ -7235,7 +7225,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let out = apply_position(&b, Some(&pos), &s, &enc, false, &mut Vec::new()).unwrap();
+        let out = apply_position(&b, Some(&pos), &s, &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let ya = out.column(1).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(ya.value(0), 10.0);
         assert_eq!(ya.value(1), 30.0);
@@ -7279,7 +7269,7 @@ mod tests {
             value_axis: None,
         };
 
-        let out = apply_position(&batch, Some(&pos), &s, &enc, true, &mut Vec::new()).unwrap();
+        let out = apply_position(&batch, Some(&pos), &s, &enc, LayerFlip::as_written(true), &mut Vec::new()).unwrap();
 
         let val_idx = out.schema().index_of("val").unwrap();
         let va = out.column(val_idx).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -7348,7 +7338,7 @@ mod tests {
     /// produces, in row order.
     fn mixed_sign_segments(offset: StackOffset) -> Vec<(f64, f64)> {
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
-        let out = apply_position(&batch_mixed_sign_xyg(), Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut Vec::new()).unwrap();
+        let out = apply_position(&batch_mixed_sign_xyg(), Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         stack_bases(&out).into_iter().zip(stack_tops(&out, 1)).collect()
     }
 
@@ -7412,7 +7402,7 @@ mod tests {
         )
         .unwrap();
         let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
-        let out = apply_position(&batch, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), false, &mut Vec::new()).unwrap();
+        let out = apply_position(&batch, Some(&pos), &dummy_scales(), &enc_xy("x", "y", Some("g")), LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         stack_bases(&out).into_iter().zip(stack_tops(&out, 1)).collect()
     }
 
@@ -7448,7 +7438,7 @@ mod tests {
         let raw = [10.0_f64, 20.0, 30.0, 40.0];
         for offset in [StackOffset::Zero, StackOffset::Normalize, StackOffset::Center] {
             let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
-            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, false, &mut Vec::new()).unwrap();
+            let out = apply_position(&b, Some(&pos), &dummy_scales(), &enc, LayerFlip::as_written(false), &mut Vec::new()).unwrap();
             let mut expected_tops = Vec::new();
             let mut expected_bases = Vec::new();
             for bin in raw.chunks(2) {

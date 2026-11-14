@@ -366,17 +366,14 @@ fn reprepare_log_overlay_members(
 
     let mut groups: Vec<(Vec<usize>, Channel, crate::spec::encoding::ScaleSpec)> = Vec::new();
     {
-        // Each leaf's spec with the routes its prepare recorded (a layer the
-        // null-key drop gave rows of its own), so the shared resolve reads
-        // the rows every layer draws.
-        let routed: Vec<std::borrow::Cow<'_, ChartSpec>> =
-            leaves.iter().zip(prepared.iter()).map(|(leaf, prep)| prep.routed_spec(leaf.spec)).collect();
+        // Each leaf's prepared spec, which carries the routes its prepare
+        // recorded (a layer the null-key drop gave rows of its own), so the
+        // shared resolve reads the rows every layer draws.
         let views: Vec<LeafResolveInput<'_>> = leaves
             .iter()
             .zip(prepared.iter())
-            .zip(&routed)
-            .map(|((leaf, prep), spec)| LeafResolveInput {
-                spec,
+            .map(|(leaf, prep)| LeafResolveInput {
+                spec: prep.spec(),
                 encoding: prep.rendering_encoding(),
                 final_batch: prep.final_batch(),
                 transform_outputs: &prep.transform_outputs,
@@ -588,14 +585,11 @@ pub(crate) fn render_composite_scene(
     // statistic, re-prepares nothing (`reprepare_log_overlay_members`
     // returns `Ok(())` with `prepared` untouched).
     reprepare_log_overlay_members(tree, leaves, &pass_one, &mut prepared, &leaf_refusal)?;
-    let routed: Vec<std::borrow::Cow<'_, ChartSpec>> =
-        leaves.iter().zip(&prepared).map(|(leaf, prep)| prep.routed_spec(leaf.spec)).collect();
     let resolve_inputs: Vec<LeafResolveInput<'_>> = leaves
         .iter()
         .zip(&prepared)
-        .zip(&routed)
-        .map(|((leaf, prep), spec)| LeafResolveInput {
-            spec,
+        .map(|(leaf, prep)| LeafResolveInput {
+            spec: prep.spec(),
             encoding: prep.rendering_encoding(),
             final_batch: prep.final_batch(),
             transform_outputs: &prep.transform_outputs,
@@ -890,7 +884,6 @@ fn render_leaf(
         _ => None,
     };
     let scene = scene_build::build_scene(
-        leaf.spec,
         &po.prep,
         &po.layout,
         &po.applied.effective_theme,
@@ -917,7 +910,6 @@ fn capture_leaf_bundle(
     ctx: &LeafScaleContext,
 ) -> Result<LeafLegendBundle, RenderError> {
     let color_scale = scene_build::resolve_legend_color_scale(
-        leaf.spec,
         &po.prep,
         &po.applied.effective_theme,
         leaf.chart_config,
@@ -7024,7 +7016,7 @@ mod tests {
                 None,
             )
             .expect("the flat spec prepares");
-            crate::render::scene_build::build_scene(&flat, &prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
+            crate::render::scene_build::build_scene(&prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
                 .expect("the flat spec builds a scene");
             count_left_out(&warnings)
         };
@@ -7146,7 +7138,7 @@ mod tests {
                     None,
                 )
                 .unwrap_or_else(|e| panic!("(iii) {channel} flat: expected to prepare, refused with {e}"));
-                crate::render::scene_build::build_scene(&flat, &prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
+                crate::render::scene_build::build_scene(&prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
                     .unwrap_or_else(|e| panic!("(iii) {channel} flat: expected to build a scene, refused with {e}"));
                 assert_eq!(count_left_out(&warnings), vec![2], "(iii) {channel} flat: {warnings:?}");
             }
@@ -7199,7 +7191,7 @@ mod tests {
             None,
         )
         .expect("the faceted spec prepares");
-        let scene = crate::render::scene_build::build_scene(&facet_spec, &prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
+        let scene = crate::render::scene_build::build_scene(&prep, &layout, &applied.effective_theme, &RenderConfig::default(), &mut warnings, &chart_config, None)
             .expect("the faceted spec builds a scene");
         assert_eq!(scene.panels.len(), 2);
         assert_eq!(scene.panels[0].marks[0].data_indices, Some(vec![0]), "panel a's own panel-local source row");

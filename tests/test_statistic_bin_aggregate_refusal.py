@@ -5160,7 +5160,7 @@ def test_a_marginal_histograms_categorical_refusal_ends_in_drop_the_type(kind: s
 
 
 def test_a_pairplot_diagonal_categorical_refusal_ends_in_drop_the_type():
-    """pairplot's diagonal shares the same ``chains_transform=False`` row,
+    """pairplot's diagonal shares the same ``remedy_binding="drop"`` row,
     on both its default histogram diagonal and a kde diagonal.
     """
     rows = pl.DataFrame(

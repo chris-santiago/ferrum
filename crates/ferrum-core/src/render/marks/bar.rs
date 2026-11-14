@@ -1142,7 +1142,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: Some(StackValueAxis::X),
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
 
         let spec = ChartSpec {
             mark: Mark::Bar,
@@ -3320,7 +3320,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: Some(StackValueAxis::X),
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
 
         let spec = ChartSpec {
             mark: Mark::Bar,
@@ -3398,7 +3398,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         // No STACK_VALUE_ON_X_KEY on this batch: value_axis=None + coord_flipped=false → value on y.
         assert!(!crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "vertical Stack must not stamp the horizontal-value marker");
 
@@ -3485,7 +3485,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: None,
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         // value_axis=None + coord_flipped=false → value on y, not x.
         assert!(!crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "vertical Stack must not stamp the horizontal-value marker");
 
@@ -3565,7 +3565,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: Some(StackValueAxis::X),
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         assert!(crate::render::position::BatchPositionMeta::from_batch(&adjusted).stack_value_on_x(), "explicit value_axis: X must stamp the horizontal-value marker");
 
         let spec = ChartSpec {
@@ -4082,7 +4082,7 @@ mod tests {
             anchor: StackAnchor::Top,
             value_axis: Some(StackValueAxis::X),
         };
-        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+        let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
         let spec = ChartSpec { mark: Mark::Bar, encoding: enc, position: Some(pos), ..Default::default() };
         let rects = baseline_rects(&spec, &adjusted, &scales);
         assert_spans(
@@ -4125,7 +4125,7 @@ mod tests {
         // spans [0, 1] (50px to 95px).
         for (offset, p_top) in [(StackOffset::Zero, 5.0), (StackOffset::Normalize, 50.0)] {
             let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
-            let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+            let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
             let spec = ChartSpec { mark: Mark::Bar, encoding: enc.clone(), position: Some(pos), ..Default::default() };
             let rects = baseline_rects(&spec, &adjusted, &scales);
             assert_spans(
@@ -4174,7 +4174,7 @@ mod tests {
         for (offset, domain, expected) in cases {
             let scales = baseline_scales(abc_ordinal([0.0, 300.0]), linear(domain, [95.0, 5.0], false));
             let pos = PositionAdjust::Stack { by: Some("g".into()), offset, anchor: StackAnchor::Top, value_axis: None };
-            let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, false, &mut Vec::new()).unwrap();
+            let adjusted = apply_position(&raw, Some(&pos), &scales, &enc, crate::render::position::LayerFlip::as_written(false), &mut Vec::new()).unwrap();
             let spec = ChartSpec { mark: Mark::Bar, encoding: enc.clone(), position: Some(pos), ..Default::default() };
             assert_spans(&baseline_rects(&spec, &adjusted, &scales), &expected, |r| (r.1, r.3), &format!("{offset:?}"));
         }

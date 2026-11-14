@@ -1393,6 +1393,7 @@ def desugar_function(
     fn,
     parent_chart_x_data=None,
     *,
+    parent_chart_x_name: str = "x",
     domain: Optional[tuple] = None,
     n: int = 200,
     clip: bool = True,
@@ -1407,7 +1408,8 @@ def desugar_function(
     -------------
     Input: no input DataFrame required.  If ``domain`` is ``None``, the
     x-range is inferred from ``parent_chart_x_data`` (the parent chart's x column as a
-    float64 pyarrow ChunkedArray in its axis's units; see :func:`_parent_axis_values`).
+    pyarrow ChunkedArray; the function reads it in its axis's units, see
+    :func:`_parent_axis_values`).
 
     Output (synthetic table): columns ``x`` (Float64), ``y`` (Float64)
     with ``n`` rows.
@@ -1425,9 +1427,13 @@ def desugar_function(
     fn : callable
         A function accepting a numpy array of shape ``(n,)`` and returning
         a numpy array of the same shape.
-    parent_chart_x_data : numpy.ndarray or None, default None
-        x-column values from the parent chart; used to infer ``domain``
-        when ``domain`` is not supplied.
+    parent_chart_x_data : pyarrow.ChunkedArray or None, default None
+        The parent chart's x column, floating, integer, decimal or timestamp;
+        used to infer ``domain`` when ``domain`` is not supplied. Read as float64
+        in the units its axis reads (a timestamp in epoch milliseconds).
+    parent_chart_x_name : str, default "x"
+        The parent column's name, for the refusal of a column holding neither
+        numbers nor times.
     domain : tuple[float, float] or None, default None
         Explicit ``(x_min, x_max)`` range to evaluate over.  Required if
         there is no parent chart with x data.
@@ -1456,7 +1462,7 @@ def desugar_function(
     ------
     ValueError
         If ``domain`` is ``None`` and ``parent_chart_x_data`` is empty or
-        ``None``, or if ``fn`` does not return a numpy array of shape
+        ``None``, or holds neither numbers nor times, or if ``fn`` does not return a numpy array of shape
         ``(n,)``.
 
     Examples
@@ -1474,19 +1480,24 @@ def desugar_function(
 
     if domain is not None:
         d = domain
-    elif parent_chart_x_data is not None and len(parent_chart_x_data) > 0:
+    else:
+        parent = (
+            None
+            if parent_chart_x_data is None
+            else _parent_axis_values(parent_chart_x_data, parent_chart_x_name)
+        )
+        if parent is None or len(parent) == 0:
+            raise ValueError(
+                "mark_function requires explicit domain when chart has no other data layers"
+            )
         # The parent's usable values (present and finite), as every statistic reads them; a
         # parent with none has no domain, so the curve draws nothing, as an all-null parent's
         # does.
-        finite = usable_values(pl.from_arrow(parent_chart_x_data))
+        finite = usable_values(pl.from_arrow(parent))
         d = (
             (float(finite.min()), float(finite.max()))
             if len(finite)
             else (float("nan"), float("nan"))
-        )
-    else:
-        raise ValueError(
-            "mark_function requires explicit domain when chart has no other data layers"
         )
 
     xs = np.linspace(d[0], d[1], n)
