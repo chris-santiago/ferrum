@@ -26,7 +26,8 @@ from typing import Any
 # Re-imported (not re-defined) here so the ``to_dict()`` methods below and any
 # caller importing ``ferrum.annotation.primitives._coord`` keep working.
 from ferrum.annotation.coords import CoordValue, _coord  # noqa: F401
-from ferrum._validate import validate_choice
+from ferrum._entry import _voiced
+from ferrum._validate import is_none_color_sentinel, validate_choice, validate_str
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,28 @@ _VALID_ANNOTATION_Z = ("above_marks", "below_marks")
 _VALID_BRACKET_DIRECTIONS = ("above", "below", "up", "down", "left", "right")
 
 
+def _validate_paint(entry: str, field: str, value: Any) -> None:
+    """Refuse *value* as the colour *field* of the public call *entry*.
+
+    Only ``None`` and the paint-clear words ``"none"`` and ``"transparent"``
+    skip the colour parser; these are the paint words the annotation renderer
+    draws. The marks' literal-colour gate also lets the internal theme tokens
+    (``"theme:font"``, ``"theme:label"``) through, but the renderer does not
+    draw them on an annotation, so this gate refuses them. A non-string is
+    refused as the marks refuse it, and any other string must parse as a
+    colour. The refusal is an ``EntryRefusal`` voiced as *entry*, so an
+    ``annotate_*`` helper re-voices it as itself.
+    """
+    from ferrum.marks.base import _validate_literal_color
+
+    if value is None:
+        return
+    _voiced(entry, lambda voice: validate_str(voice, field, value))
+    if is_none_color_sentinel(value):
+        return
+    _voiced(entry, lambda voice: _validate_literal_color(voice, field, value))
+
+
 # ---------------------------------------------------------------------------
 # Dataclass types
 # ---------------------------------------------------------------------------
@@ -101,6 +124,7 @@ class AnnotationText:
         validate_choice("AnnotationText.anchor", "anchor", self.anchor, _VALID_TEXT_ANCHORS)
         validate_choice("AnnotationText.baseline", "baseline", self.baseline, _VALID_TEXT_BASELINES)
         validate_choice("AnnotationText.z", "z", self.z, _VALID_ANNOTATION_Z)
+        _validate_paint("annotation.text", "color", self.color)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -134,6 +158,9 @@ class AnnotationArrow:
     stroke_width: float
     head_size: float
 
+    def __post_init__(self) -> None:
+        _validate_paint("annotation.arrow", "stroke", self.stroke)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
         d: dict[str, Any] = {
@@ -163,6 +190,10 @@ class AnnotationRect:
     stroke: str | None
     corner_radius: float
 
+    def __post_init__(self) -> None:
+        _validate_paint("annotation.rect", "fill", self.fill)
+        _validate_paint("annotation.rect", "stroke", self.stroke)
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
         d: dict[str, Any] = {
@@ -191,6 +222,9 @@ class AnnotationLine:
     stroke: str | None
     stroke_width: float
     dash: list[float] | None
+
+    def __post_init__(self) -> None:
+        _validate_paint("annotation.line", "stroke", self.stroke)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -229,6 +263,7 @@ class AnnotationSpan:
             self.label_position,
             ("top", "middle", "bottom"),
         )
+        _validate_paint("annotation.span", "fill", self.fill)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -263,6 +298,7 @@ class AnnotationBracket:
         validate_choice(
             "AnnotationBracket.direction", "direction", self.direction, _VALID_BRACKET_DIRECTIONS
         )
+        _validate_paint("annotation.bracket", "stroke", self.stroke)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
@@ -300,6 +336,8 @@ class AnnotationCallout:
         validate_choice(
             "AnnotationCallout.arrow", "arrow", self.arrow, ("curved", "straight", "none")
         )
+        _validate_paint("annotation.callout", "background", self.background)
+        _validate_paint("annotation.callout", "border_color", self.border_color)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""

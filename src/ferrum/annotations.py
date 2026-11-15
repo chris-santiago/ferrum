@@ -8,7 +8,8 @@ for backward compatibility.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
+from functools import wraps
+from typing import Callable, Optional, TypeVar
 
 import polars as pl
 
@@ -17,6 +18,7 @@ from ferrum.annotation.coords import (
     _coerce_coord,
     _coerce_coord_to_numeric,
 )
+from ferrum._entry import voiced_as
 from ferrum.chart import Chart
 from ferrum.marks.base import THEME_FONT_PAINT, _normalize_stroke_dash
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
@@ -33,6 +35,23 @@ _AnnotationCoord = CoordValue
 # the Rust triangle-geometry constant in `render/annotation/mod.rs` and
 # `render/marks/segment.rs`, which draw the same arrowhead shape.
 _DEFAULT_ARROW_HEAD_SIZE = 8.0
+
+_Helper = TypeVar("_Helper", bound=Callable[..., Chart])
+
+
+def _as_helper(build: _Helper) -> _Helper:
+    """Make every ``EntryRefusal`` *build* raises name the helper the caller wrote.
+
+    A refusal raised by a mark the helper builds (``mark_rule``) or by an
+    annotation primitive (``annotation.line``) is voiced as ``build.__name__``.
+    """
+
+    @wraps(build)
+    def voiced(*args, **kwargs):
+        with voiced_as(build.__name__):
+            return build(*args, **kwargs)
+
+    return voiced  # type: ignore[return-value]
 
 
 @dataclass(frozen=True)
@@ -137,6 +156,7 @@ def _attach_primitive_with_label(
     return chart
 
 
+@_as_helper
 def annotate_hline(
     y: _AnnotationCoord,
     *,
@@ -220,6 +240,7 @@ def annotate_hline(
     )
 
 
+@_as_helper
 def annotate_vline(
     x: _AnnotationCoord,
     *,
@@ -301,6 +322,7 @@ def annotate_vline(
     )
 
 
+@_as_helper
 def annotate_rect(
     x1: _AnnotationCoord,
     x2: _AnnotationCoord,
@@ -428,6 +450,7 @@ def _resolve_text_alignment(*, anchor: Optional[str], align: Optional[str]) -> t
     return "center", "middle"
 
 
+@_as_helper
 def annotate_text(
     x: _AnnotationCoord,
     y: _AnnotationCoord,
@@ -502,14 +525,8 @@ def annotate_text(
     x_coord, y_coord = _coerce_coord(x), _coerce_coord(y)
     x_num, y_num = _coerce_coord_to_numeric(x_coord), _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_x": [x_num], "_y": [y_num], "_text": [text]})
-    kwargs: dict = {"dx": dx, "dy": dy, "align": mark_align, "baseline": baseline}
-    if font_size is not None:
-        kwargs["font_size"] = font_size
-    if color is not None:
-        kwargs["fill"] = color
-    if angle is not None:
-        kwargs["angle"] = angle
-    chart = Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
+    # Built before the mark so a bad ``color`` is refused under the name the
+    # caller wrote (the mark spells the same colour ``fill``).
     prim = AnnotationText(
         x=x_coord,
         y=y_coord,
@@ -523,9 +540,18 @@ def annotate_text(
         dy=dy,
         z="above_marks",
     )
+    kwargs: dict = {"dx": dx, "dy": dy, "align": mark_align, "baseline": baseline}
+    if font_size is not None:
+        kwargs["font_size"] = font_size
+    if color is not None:
+        kwargs["fill"] = color
+    if angle is not None:
+        kwargs["angle"] = angle
+    chart = Chart(df).mark_text(**kwargs).encode(x="_x", y="_y", text="_text")
     return _attach_annotation_primitive(chart, prim)
 
 
+@_as_helper
 def annotate_abline(
     slope: float,
     intercept: float,
@@ -605,6 +631,7 @@ def annotate_abline(
     return _attach_annotation_primitive(chart, prim)
 
 
+@_as_helper
 def annotate_arrow(
     x1: _AnnotationCoord,
     y1: _AnnotationCoord,
@@ -665,8 +692,11 @@ def annotate_arrow(
     Chart(mark='segment', encoding=['x', 'y', 'x2', 'y2'])
     """
     from ferrum.annotation.coords import NormCoord, OrdinalCategoryCoord, PixelCoord
-    from ferrum.annotation.primitives import AnnotationArrow
+    from ferrum.annotation.primitives import AnnotationArrow, _validate_paint
 
+    # The all-numeric unlabelled route builds no primitive, so the colour is
+    # checked here: every route of one call accepts and refuses the same strings.
+    _validate_paint("annotate_arrow", "stroke", stroke)
     x1_coord, y1_coord = _coerce_coord(x1), _coerce_coord(y1)
     x2_coord, y2_coord = _coerce_coord(x2), _coerce_coord(y2)
     x1_num = _coerce_coord_to_numeric(x1_coord)

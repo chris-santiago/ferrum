@@ -61,6 +61,20 @@ pub enum AnnotationRefusal {
     /// A span with one category end and one non-category end, on a categorical
     /// axis. `category_end` is the end that holds `label`.
     MixedSpanEnds { axis: AlignAxis, category_end: SpanEnd, label: String },
+    /// A colour string the parser rejects and that is not a paint sentinel.
+    /// Boxed so this one wide payload does not size every `RenderError`.
+    InvalidColor(Box<InvalidColor>),
+}
+
+/// The payload of [`AnnotationRefusal::InvalidColor`]: `kind` and `field` name
+/// the spec's `type` tag and the field that holds `value`; `reason` is the
+/// parser's own message.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvalidColor {
+    pub kind: &'static str,
+    pub field: &'static str,
+    pub value: String,
+    pub reason: String,
 }
 
 /// One end of a span, named as the caller's `start`/`end` argument.
@@ -106,6 +120,11 @@ impl std::fmt::Display for AnnotationRefusal {
                  pass categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends",
                 category_end.name(),
                 category_end.other().name()
+            ),
+            Self::InvalidColor(c) => write!(
+                f,
+                "annotation {}: {}='{}' is not a valid color ({})",
+                c.kind, c.field, c.value, c.reason
             ),
         }
     }
@@ -690,18 +709,80 @@ enum Shape {
 
 // ── Color helpers ───────────────────────────────────────────────────────────
 
-/// Parse a color string to a scene Color. Falls back to dark gray (#333) on failure.
-fn resolve_color(s: &str) -> Color {
-    match parse_color_str(s) {
-        Ok(c) => to_scene_color(c),
-        Err(_) => Color::rgb(51, 51, 51),
+/// What an annotation's `none` / `transparent` paint word draws: dark gray.
+/// These words never parse as colours, and an annotation has always drawn them
+/// as this fixed paint; the byte output is kept as it is.
+const PAINT_WORD_COLOR: Color = Color { r: 51, g: 51, b: 51, a: 255 };
+
+/// Whether `s` is one of the paint words the Python side accepts in place of a
+/// colour (trimmed, case-insensitive, as `draw::resolve_paint_color` reads them).
+fn is_paint_word(s: &str) -> bool {
+    let word = s.trim();
+    word.eq_ignore_ascii_case("none") || word.eq_ignore_ascii_case("transparent")
+}
+
+/// The scene colour of `value`, the string held by `field` of a `kind`
+/// annotation: a parsed colour, or [`PAINT_WORD_COLOR`] for a paint word. A
+/// string that is neither is refused.
+fn resolve_color(kind: &'static str, field: &'static str, value: &str) -> Result<Color, AnnotationRefusal> {
+    if is_paint_word(value) {
+        return Ok(PAINT_WORD_COLOR);
+    }
+    parse_color_str(value).map(to_scene_color).map_err(|e| {
+        AnnotationRefusal::InvalidColor(Box::new(InvalidColor {
+            kind,
+            field,
+            value: value.to_string(),
+            reason: e.to_string(),
+        }))
+    })
+}
+
+/// Every colour string `spec` carries, as `(field, value)`; the annotation kind
+/// is [`kind_name`]`(spec)`.
+///
+/// Exhaustive over `AnnotationSpec`, so a new variant is a compile error here
+/// rather than a colour that skips the check.
+fn colour_fields(spec: &AnnotationSpec) -> Vec<(&'static str, &str)> {
+    match spec {
+        AnnotationSpec::Text { color, .. } => color.iter().map(|c| ("color", c.as_str())).collect(),
+        AnnotationSpec::Arrow { stroke, .. }
+        | AnnotationSpec::Line { stroke, .. }
+        | AnnotationSpec::Bracket { stroke, .. } => stroke.iter().map(|c| ("stroke", c.as_str())).collect(),
+        AnnotationSpec::Rect { fill, stroke, .. } => std::iter::once(("fill", fill.as_str()))
+            .chain(stroke.iter().map(|c| ("stroke", c.as_str())))
+            .collect(),
+        AnnotationSpec::Span { fill, .. } => vec![("fill", fill.as_str())],
+        AnnotationSpec::Callout { background, border_color, .. } => {
+            vec![("background", background.as_str()), ("border_color", border_color.as_str())]
+        }
+        AnnotationSpec::Image { .. } => Vec::new(),
     }
 }
 
-/// The colour an annotation primitive draws: the caller's when given, else the
-/// theme's text colour (the text mark's rule), so unset ink reads on every theme.
-fn ink(color: Option<&str>, ctx: &ScaleContext) -> Color {
-    color.map_or_else(|| theme_ink(ctx), resolve_color)
+/// Refuse the first colour string of `specs` that is neither a colour nor a
+/// paint word, whatever a break later does with its annotation, so no
+/// annotation draws a colour the caller did not write.
+fn check_colors(specs: &[AnnotationSpec]) -> Result<(), AnnotationRefusal> {
+    for spec in specs {
+        let kind = kind_name(spec);
+        for (field, value) in colour_fields(spec) {
+            resolve_color(kind, field, value)?;
+        }
+    }
+    Ok(())
+}
+
+/// The colour a `kind` annotation primitive draws for `field`: the caller's
+/// when given, else the theme's text colour (the text mark's rule), so unset
+/// ink reads on every theme.
+fn ink(
+    kind: &'static str,
+    field: &'static str,
+    color: Option<&str>,
+    ctx: &ScaleContext,
+) -> Result<Color, AnnotationRefusal> {
+    color.map_or_else(|| Ok(theme_ink(ctx)), |c| resolve_color(kind, field, c))
 }
 
 /// The theme's text colour, for the labels an annotation draws with no colour
@@ -753,15 +834,18 @@ pub struct AnnotationNodes {
 /// carries breaks would place every extent annotation endpoint-by-endpoint —
 /// painting a straddling rect as one solid block across the gap — which is the
 /// defect the break routing exists to prevent (#228).
-fn build_annotations(specs: &[AnnotationSpec], ctx: &ScaleContext) -> AnnotationNodes {
+fn build_annotations(
+    specs: &[AnnotationSpec],
+    ctx: &ScaleContext,
+) -> Result<AnnotationNodes, AnnotationRefusal> {
     let mut result = AnnotationNodes {
         below_marks: Vec::new(),
         above_marks: Vec::with_capacity(specs.len()),
     };
     for spec in specs {
-        build_one(spec, ctx, z_bucket(spec, &mut result));
+        build_one(spec, ctx, z_bucket(spec, &mut result))?;
     }
-    result
+    Ok(result)
 }
 
 /// The z-order bucket `spec`'s nodes belong in — the partition rule
@@ -775,7 +859,11 @@ fn z_bucket<'n>(spec: &AnnotationSpec, nodes: &'n mut AnnotationNodes) -> &'n mu
 }
 
 /// Dispatch a single annotation spec to its builder, appending nodes to `out`.
-fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>) {
+fn build_one(
+    spec: &AnnotationSpec,
+    ctx: &ScaleContext,
+    out: &mut Vec<SceneNode>,
+) -> Result<(), AnnotationRefusal> {
     match spec {
         AnnotationSpec::Text {
             x,
@@ -803,7 +891,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                     anchor: parse_anchor(anchor),
                     baseline: parse_baseline(baseline),
                     angle: *angle,
-                    color: Some(ink(color.as_deref(), ctx)),
+                    color: Some(ink("text", "color", color.as_deref(), ctx)?),
                     opacity: 1.0,
                     font_family: "Inter, system-ui, sans-serif".to_string(),
                 },
@@ -828,7 +916,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 y1_px,
                 x2_px,
                 y2_px,
-                ink(stroke.as_deref(), ctx),
+                ink("arrow", "stroke", stroke.as_deref(), ctx)?,
                 *stroke_width,
                 *head_size,
                 out,
@@ -852,8 +940,8 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
             let y = py1.min(py2);
             let w = (px2 - px1).abs();
             let h = (py2 - py1).abs();
-            let fill_color = resolve_color(fill);
-            let stroke_color = stroke.as_deref().map(resolve_color);
+            let fill_color = resolve_color("rect", "fill", fill)?;
+            let stroke_color = stroke.as_deref().map(|c| resolve_color("rect", "stroke", c)).transpose()?;
             out.push(SceneNode::Rect {
                 x,
                 y,
@@ -891,7 +979,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 x2: ctx.resolve_x(x2),
                 y2: ctx.resolve_y(y2),
                 style: StrokeStyle {
-                    color: Some(ink(stroke.as_deref(), ctx)),
+                    color: Some(ink("line", "stroke", stroke.as_deref(), ctx)?),
                     width: *stroke_width,
                     opacity: 1.0,
                     dash: dash.as_deref().map(|d| d.to_vec()),
@@ -920,7 +1008,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 label_position.as_str(),
                 ctx,
                 out,
-            );
+            )?;
         }
         AnnotationSpec::Bracket {
             x1,
@@ -939,7 +1027,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 ctx.resolve_y(y2),
                 label,
                 direction,
-                ink(stroke.as_deref(), ctx),
+                ink("bracket", "stroke", stroke.as_deref(), ctx)?,
                 theme_ink(ctx),
                 *tip_length,
                 out,
@@ -970,7 +1058,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 text_x.as_ref(),
                 text_y.as_ref(),
                 out,
-            );
+            )?;
         }
         AnnotationSpec::Image {
             x,
@@ -1011,6 +1099,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
             });
         }
     }
+    Ok(())
 }
 
 // ── Emitter helpers (extracted to stay under clippy's argument limit) ────────
@@ -1064,12 +1153,12 @@ fn emit_span(
     label_position: &str,
     ctx: &ScaleContext,
     out: &mut Vec<SceneNode>,
-) {
+) -> Result<(), AnnotationRefusal> {
     let (x, y, w, h) = if axis == "x" {
         let (x_start, x_end) = ctx.resolve_span(AlignAxis::X, start, end);
         // Guard NaN: either coordinate being NaN produces NaN width — skip emission.
         if !x_start.is_finite() || !x_end.is_finite() {
-            return;
+            return Ok(());
         }
         let x = x_start.min(x_end);
         let w = (x_end - x_start).abs();
@@ -1078,7 +1167,7 @@ fn emit_span(
         let (y_start, y_end) = ctx.resolve_span(AlignAxis::Y, start, end);
         // Guard NaN: either coordinate being NaN produces NaN height — skip emission.
         if !y_start.is_finite() || !y_end.is_finite() {
-            return;
+            return Ok(());
         }
         let y = y_start.min(y_end);
         let h = (y_end - y_start).abs();
@@ -1091,7 +1180,7 @@ fn emit_span(
         w,
         h,
         style: FillStroke {
-            fill: Some(resolve_color(fill)),
+            fill: Some(resolve_color("span", "fill", fill)?),
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1106,6 +1195,7 @@ fn emit_span(
     if let Some(node) = span_label_node(x, y, w, h, label, label_position, theme_ink(ctx)) {
         out.push(node);
     }
+    Ok(())
 }
 
 /// The label node for a span band occupying `(x, y, w, h)`, or `None` when the
@@ -1268,7 +1358,7 @@ fn emit_callout(
     text_x: Option<&CoordValue>,
     text_y: Option<&CoordValue>,
     out: &mut Vec<SceneNode>,
-) {
+) -> Result<(), AnnotationRefusal> {
     let data_x = ctx.resolve_x(x);
     let data_y = ctx.resolve_y(y);
 
@@ -1294,8 +1384,8 @@ fn emit_callout(
         w: text_w,
         h: text_h,
         style: FillStroke {
-            fill: Some(resolve_color(background)),
-            stroke: Some(resolve_color(border_color)),
+            fill: Some(resolve_color("callout", "background", background)?),
+            stroke: Some(resolve_color("callout", "border_color", border_color)?),
             stroke_width: 1.0,
             opacity: 1.0,
             stroke_dash: None,
@@ -1315,7 +1405,7 @@ fn emit_callout(
             x2: tx,
             y2: ty,
             style: StrokeStyle {
-                color: Some(resolve_color(border_color)),
+                color: Some(resolve_color("callout", "border_color", border_color)?),
                 width: 1.0,
                 opacity: 1.0,
                 dash: None,
@@ -1343,6 +1433,7 @@ fn emit_callout(
             font_family: "Inter, system-ui, sans-serif".to_string(),
         },
     });
+    Ok(())
 }
 
 // ── Break routing (#228 stratified clip) ────────────────────────────────────
@@ -1404,8 +1495,9 @@ pub fn build_annotations_through_breaks(
         specs
     };
     check_categories(specs, ctx, coord, names_unflipped, warnings)?;
+    check_colors(specs)?;
     if ctx.breaks.is_empty() {
-        return Ok(build_annotations(specs, ctx));
+        return build_annotations(specs, ctx);
     }
     // Per-axis rollup accumulators (#240-3): small `Vec`s, not `HashMap`s, so
     // the emitted warnings stay in first-seen-axis order — deterministic for a
@@ -1418,9 +1510,9 @@ pub fn build_annotations_through_breaks(
     };
     for spec in specs {
         match break_fate(spec, ctx.breaks) {
-            BreakFate::Untouched => build_one(spec, ctx, z_bucket(spec, &mut nodes)),
+            BreakFate::Untouched => build_one(spec, ctx, z_bucket(spec, &mut nodes))?,
             BreakFate::Cut { axes, routing } => {
-                build_cut(spec, ctx, &axes, routing, z_bucket(spec, &mut nodes))
+                build_cut(spec, ctx, &axes, routing, z_bucket(spec, &mut nodes))?
             }
             BreakFate::Suppressed(BreakConflict::Point { axis, kind }) => {
                 accumulate_by_axis(&mut in_gap, axis, kind)
@@ -1431,12 +1523,24 @@ pub fn build_annotations_through_breaks(
         }
     }
     for (axis, kinds) in in_gap {
+        let axis = callers_axis(names_unflipped, axis);
         warnings.push(RenderWarning::AnnotationSuppressedByBreak { axis, kinds });
     }
     for (axis, kinds) in spanning {
+        let axis = callers_axis(names_unflipped, axis);
         warnings.push(RenderWarning::AnnotationSpansBreakGap { axis, kinds });
     }
     Ok(nodes)
+}
+
+/// The caller's letter for a drawn `axis`: the other letter when the caller's
+/// own `CoordFlip` exchanged the specs' coordinates, else `axis` itself.
+fn callers_axis(exchanged: bool, axis: AlignAxis) -> AlignAxis {
+    match (exchanged, axis.is_y()) {
+        (false, _) => axis,
+        (true, true) => AlignAxis::X,
+        (true, false) => AlignAxis::Y,
+    }
 }
 
 /// Every coordinate `spec` carries, with the axis it is measured on.
@@ -1483,11 +1587,7 @@ fn check_categories(
     exchanged: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), AnnotationRefusal> {
-    let callers = |axis: AlignAxis| match (exchanged, axis.is_y()) {
-        (false, _) => axis,
-        (true, true) => AlignAxis::X,
-        (true, false) => AlignAxis::Y,
-    };
+    let callers = |axis: AlignAxis| callers_axis(exchanged, axis);
     let mut unknown: Vec<(AlignAxis, &str)> = Vec::new();
     for spec in specs {
         for (axis, value) in coords_with_axes(spec) {
@@ -1558,7 +1658,7 @@ fn build_cut(
     axes: &[usize],
     routing: CutRouting,
     out: &mut Vec<SceneNode>,
-) {
+) -> Result<(), AnnotationRefusal> {
     let unrouted: Vec<break_axis::BreakRemap<'_>> = ctx
         .breaks
         .iter()
@@ -1578,7 +1678,7 @@ fn build_cut(
     // A span's label is held back and re-anchored below, on the piece that
     // survives largest; every other kind's nodes all go through the machinery.
     let band_only = span_band_only(spec);
-    build_one(band_only.as_ref().unwrap_or(spec), &unrouted_ctx, &mut nodes);
+    build_one(band_only.as_ref().unwrap_or(spec), &unrouted_ctx, &mut nodes)?;
     for &i in axes {
         nodes = routing.place(&ctx.breaks[i], nodes);
     }
@@ -1586,6 +1686,7 @@ fn build_cut(
         nodes.push(label);
     }
     out.append(&mut nodes);
+    Ok(())
 }
 
 /// How a `BreakAxis` gap re-places one annotation kind's geometry (#228, D1).

@@ -195,7 +195,7 @@ fn build_text_annotation() {
         dy: 0.0,
         z: "above_marks".to_string(),
     }];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
     // Default z="above_marks" lands in above_marks, not below_marks.
     assert!(ann.below_marks.is_empty());
     assert_eq!(ann.above_marks.len(), 1);
@@ -236,7 +236,7 @@ fn build_line_annotation() {
         stroke_width: 2.0,
         dash: Some(vec![4.0, 2.0]),
     }];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
     // Non-Text specs always land in above_marks.
     assert!(ann.below_marks.is_empty());
     assert_eq!(ann.above_marks.len(), 1);
@@ -279,7 +279,7 @@ fn build_arrow_annotation() {
         stroke_width: 1.5,
         head_size: 8.0,
     }];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
     // Arrow (non-Text) always lands in above_marks.
     assert!(ann.below_marks.is_empty());
     // Arrow produces a line + arrowhead path.
@@ -307,7 +307,7 @@ fn build_span_annotation() {
         label_position: "center".to_string(),
         label: Some("span".to_string()),
     }];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
     // Non-Text specs always land in above_marks.
     assert!(ann.below_marks.is_empty());
     // Span produces a rect + label text.
@@ -330,10 +330,114 @@ fn deser_annotation_spec_line() {
     assert!(matches!(spec, AnnotationSpec::Line { .. }));
 }
 
+/// A parsed colour as the renderer draws it; the string must be a colour.
+fn colour(s: &str) -> Color {
+    resolve_color("test", "color", s).unwrap()
+}
+
+/// The refusal (or nodes) of building one annotation spec on a plain panel.
+fn build_on_plain_panel(json: &str) -> Result<AnnotationNodes, AnnotationRefusal> {
+    let (x_scale, y_scale, plot_area) = test_ctx();
+    let ctx = ScaleContext {
+        plot_area,
+        x_scale: &x_scale,
+        y_scale: &y_scale,
+        breaks: &[],
+        theme: &ThemeInputs::default(),
+    };
+    let mut warnings = Vec::new();
+    build_annotations_through_breaks(&[spec(json)], &ctx, None, false, &mut warnings)
+}
+
+const POINT: &str = r#""x":{"px":10},"y":{"px":20}"#;
+const SEGMENT: &str = r#""x1":{"px":10},"y1":{"px":20},"x2":{"px":60},"y2":{"px":70}"#;
+
+/// Every colour field of every spec that draws one, as `(spec json, message)`
+/// with `notacolor` in that field.
+fn bad_colour_specs() -> Vec<(String, &'static str)> {
+    let bad = r#""notacolor""#;
+    vec![
+        (format!(r#"{{"type":"text",{POINT},"text":"t","color":{bad}}}"#), "text: color"),
+        (format!(r#"{{"type":"arrow","x":{{"px":1}},"y":{{"px":2}},"x2":{{"px":9}},"y2":{{"px":9}},"stroke":{bad}}}"#), "arrow: stroke"),
+        (format!(r#"{{"type":"rect",{SEGMENT},"fill":{bad}}}"#), "rect: fill"),
+        (format!(r#"{{"type":"rect",{SEGMENT},"stroke":{bad}}}"#), "rect: stroke"),
+        (format!(r#"{{"type":"line",{SEGMENT},"stroke":{bad}}}"#), "line: stroke"),
+        (format!(r#"{{"type":"span","axis":"x","start":{{"px":1}},"end":{{"px":9}},"fill":{bad}}}"#), "span: fill"),
+        (format!(r#"{{"type":"bracket",{SEGMENT},"label":"b","stroke":{bad}}}"#), "bracket: stroke"),
+        (format!(r#"{{"type":"callout",{POINT},"text":"t","background":{bad}}}"#), "callout: background"),
+        (format!(r#"{{"type":"callout",{POINT},"text":"t","border_color":{bad}}}"#), "callout: border_color"),
+    ]
+}
+
 #[test]
-fn color_fallback_on_invalid() {
-    let c = resolve_color("not-a-valid-color-xyz");
-    assert_eq!(c, Color::rgb(51, 51, 51));
+fn an_unparseable_colour_on_any_field_is_refused_naming_the_kind_field_and_value() {
+    for (json, field) in bad_colour_specs() {
+        let refused = build_on_plain_panel(&json).expect_err(&json);
+        let parser = parse_color_str("notacolor").unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            format!("annotation {field}='notacolor' is not a valid color ({parser})"),
+            "{json}"
+        );
+    }
+}
+
+/// `none` and `transparent` are accepted paint words, in any case and padding.
+/// They draw the bytes they have always drawn (the `#333` paint), not a refusal.
+#[test]
+fn the_paint_sentinels_are_accepted_and_draw_what_they_always_drew() {
+    for word in ["none", "transparent", "None", " TRANSPARENT "] {
+        let json = format!(r#"{{"type":"rect",{SEGMENT},"fill":"{word}","stroke":"{word}"}}"#);
+        let nodes = build_on_plain_panel(&json).expect(word);
+        match nodes.above_marks.as_slice() {
+            [SceneNode::Rect { style, .. }] => {
+                assert_eq!(style.fill, Some(Color::rgb(51, 51, 51)), "{word}");
+                assert_eq!(style.stroke, Some(Color::rgb(51, 51, 51)), "{word}");
+            }
+            other => panic!("expected one rect, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_parseable_colour_draws_as_parsed() {
+    let json = format!(r##"{{"type":"rect",{SEGMENT},"fill":"#123"}}"##);
+    let nodes = build_on_plain_panel(&json).unwrap();
+    match nodes.above_marks.as_slice() {
+        [SceneNode::Rect { style, .. }] => assert_eq!(style.fill, Some(Color::rgb(0x11, 0x22, 0x33))),
+        other => panic!("expected one rect, got {other:?}"),
+    }
+}
+
+/// Under a caller's `CoordFlip` the break remap measures the exchanged
+/// (drawn) axis; both rollups name the caller's letter for it.
+#[test]
+fn break_rollups_name_the_callers_axis_under_a_flip() {
+    for (lo, hi, expect_suppressed) in [(300.0, 700.0, true), (150.0, 850.0, false)] {
+        let panel = broken_panel(&[[150.0, 850.0]]);
+        let y = panel.remap(AlignAxis::Y);
+        let breaks = [y];
+        let ctx = ScaleContext {
+            plot_area: panel.plot_area,
+            x_scale: &panel.x_scale,
+            y_scale: &panel.y_scale,
+            breaks: &breaks,
+            theme: &ThemeInputs::default(),
+        };
+        // The caller wrote an x extent; the flip draws it on the broken y axis.
+        let callers_spec = y_rect(lo, hi).exchanged();
+        let mut warnings = Vec::new();
+        build_annotations_through_breaks(&[callers_spec], &ctx, None, true, &mut warnings).unwrap();
+        match warnings.as_slice() {
+            [RenderWarning::AnnotationSuppressedByBreak { axis, .. }] if expect_suppressed => {
+                assert_eq!(*axis, AlignAxis::X)
+            }
+            [RenderWarning::AnnotationSpansBreakGap { axis, .. }] if !expect_suppressed => {
+                assert_eq!(*axis, AlignAxis::X)
+            }
+            other => panic!("expected one rollup naming x, got {other:?}"),
+        }
+    }
 }
 
 #[test]
@@ -346,7 +450,7 @@ fn empty_specs_returns_empty_vecs() {
         breaks: &[],
         theme: &ThemeInputs::default(),
     };
-    let ann = build_annotations(&[], &ctx);
+    let ann = build_annotations(&[], &ctx).unwrap();
     assert!(ann.below_marks.is_empty());
     assert!(ann.above_marks.is_empty());
 }
@@ -384,7 +488,7 @@ fn text_z_routing_below_and_above() {
     };
 
     let specs = vec![mk_text("below_marks"), mk_text("above_marks")];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
 
     // Exactly one node in each bucket.
     assert_eq!(
@@ -436,7 +540,7 @@ fn text_unknown_z_falls_to_above_marks() {
         dy: 0.0,
         z: "front".to_string(), // old default — must still go above
     }];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
     assert!(
         ann.below_marks.is_empty(),
         "unrecognized z must not go to below_marks"
@@ -477,7 +581,7 @@ fn non_text_specs_always_above_marks() {
             head_size: 0.0, // no arrowhead → 1 node only
         },
     ];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
     assert!(
         ann.below_marks.is_empty(),
         "non-Text annotations must never go to below_marks"
@@ -508,7 +612,7 @@ fn image_annotation_raw_node_has_data_anchor() {
         height: 30.0,
         anchor: "middle".to_string(),
     }];
-    let ann = build_annotations(&specs, &ctx);
+    let ann = build_annotations(&specs, &ctx).unwrap();
     assert!(
         ann.below_marks.is_empty(),
         "image annotation should not go to below_marks"
@@ -567,7 +671,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
         "middle",
         &ctx,
         &mut out,
-    );
+    ).unwrap();
     assert!(
         out.is_empty(),
         "non-finite span coordinate must skip emission entirely"
@@ -585,7 +689,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
         "middle",
         &ctx,
         &mut out2,
-    );
+    ).unwrap();
     assert_eq!(out2.len(), 1, "finite span must emit exactly one rect");
 }
 
@@ -595,7 +699,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
 #[test]
 fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
     let mut out = Vec::new();
-    emit_arrow(100.0, 100.0, 100.001, 100.0, resolve_color("#000000"), 1.0, 8.0, &mut out);
+    emit_arrow(100.0, 100.0, 100.001, 100.0, colour("#000000"), 1.0, 8.0, &mut out);
     assert_eq!(out.len(), 2, "expected shaft line + arrowhead path");
     let SceneNode::Path { commands, .. } = &out[1] else {
         panic!("expected arrowhead Path node");
@@ -623,7 +727,7 @@ fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
 fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
     let (x1, y1, x2, y2, head_size) = (10.0, 20.0, 130.0, 65.0, 8.0);
     let mut out = Vec::new();
-    emit_arrow(x1, y1, x2, y2, resolve_color("#123456"), 1.0, head_size, &mut out);
+    emit_arrow(x1, y1, x2, y2, colour("#123456"), 1.0, head_size, &mut out);
     let SceneNode::Path { commands, .. } = &out[1] else {
         panic!("expected arrowhead Path node");
     };
@@ -650,7 +754,7 @@ fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
 fn emit_bracket_below_draws_like_down_and_above_like_up() {
     let drawn = |direction: &str| {
         let mut out = Vec::new();
-        emit_bracket(0.0, 100.0, 100.0, 100.0, "n", direction, resolve_color("#000000"), resolve_color("#111111"), 6.0, &mut out);
+        emit_bracket(0.0, 100.0, 100.0, 100.0, "n", direction, colour("#000000"), colour("#111111"), 6.0, &mut out);
         format!("{out:?}")
     };
     assert_eq!(drawn("below"), drawn("down"));
@@ -670,8 +774,8 @@ fn emit_bracket_unknown_direction_defaults_to_up() {
         100.0,
         "",
         "up",
-        resolve_color("#000000"),
-        resolve_color("#000000"),
+        colour("#000000"),
+        colour("#000000"),
         6.0,
         &mut out_up,
     );
@@ -683,8 +787,8 @@ fn emit_bracket_unknown_direction_defaults_to_up() {
         100.0,
         "",
         "diagonal",
-        resolve_color("#000000"),
-        resolve_color("#000000"),
+        colour("#000000"),
+        colour("#000000"),
         6.0,
         &mut out_unknown,
     );
@@ -747,7 +851,7 @@ fn emit_callout_width_uses_char_count_not_byte_len() {
             None,
             None,
             &mut out,
-        );
+        ).unwrap();
         let SceneNode::Rect { w, .. } = out[0] else {
             panic!("expected background Rect")
         };
@@ -787,7 +891,7 @@ fn emit_callout_arrow_none_suppresses_leader_line() {
             None,
             None,
             &mut out,
-        );
+        ).unwrap();
         out.iter()
             .filter(|n| matches!(n, SceneNode::Line { .. }))
             .count()
@@ -1986,7 +2090,7 @@ fn no_breaks_routes_straight_to_the_plain_build() {
     };
     let mut warnings = Vec::new();
     let routed = build_annotations_through_breaks(&specs, &ctx, None, false, &mut warnings).unwrap();
-    let plain = build_annotations(&specs, &ctx);
+    let plain = build_annotations(&specs, &ctx).unwrap();
 
     assert_eq!(routed.above_marks, plain.above_marks);
     assert_eq!(routed.below_marks, plain.below_marks);
@@ -2657,7 +2761,7 @@ mod categories {
         let specs = [text(data(30.0), data(0.5)), span("x", data(0.2), data(0.6))];
         let (a, _) = run(&specs, &x, &y, None);
         let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[], theme: &ThemeInputs::default() };
-        assert_eq!(shown(&a.unwrap()), shown(&build_annotations(&specs, &ctx)));
+        assert_eq!(shown(&a.unwrap()), shown(&build_annotations(&specs, &ctx).unwrap()));
     }
 
     #[test]
@@ -2731,7 +2835,7 @@ mod theme_ink {
     fn build(json: &str, theme: &ThemeInputs) -> AnnotationNodes {
         let (x_scale, y_scale, plot_area) = test_ctx();
         let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale, breaks: &[], theme };
-        build_annotations(&[spec(json)], &ctx)
+        build_annotations(&[spec(json)], &ctx).unwrap()
     }
 
     /// `json` with one more `"key":value` member appended to its outer object.
@@ -2841,5 +2945,33 @@ mod theme_ink {
         let drawn = inks(&nodes);
         assert!(drawn.len() >= 2, "a label and at least one line piece: {drawn:?}");
         assert!(drawn.iter().all(|c| *c == (0x1f, 0x29, 0x37)), "{drawn:?}");
+    }
+}
+
+/// A bad colour is refused whatever a break would do with the annotation: one
+/// the gap drops whole and one it clips are both refused, as on a plain panel.
+#[test]
+fn an_unparseable_colour_is_refused_on_a_panel_with_breaks() {
+    let panel = broken_panel(&[[150.0, 850.0]]);
+    let y = panel.remap(AlignAxis::Y);
+    let breaks = [y];
+    let ctx = ScaleContext {
+        plot_area: panel.plot_area,
+        x_scale: &panel.x_scale,
+        y_scale: &panel.y_scale,
+        breaks: &breaks,
+        theme: &ThemeInputs::default(),
+    };
+    for (y1, y2, how) in [(300.0, 700.0, "dropped whole"), (100.0, 400.0, "clipped")] {
+        let json = format!(
+            r#"{{"type":"rect","x1":{{"norm":0.0}},"y1":{y1},"x2":{{"norm":1.0}},"y2":{y2},"fill":"notacolor"}}"#
+        );
+        let mut warnings = Vec::new();
+        let refused = build_annotations_through_breaks(&[spec(&json)], &ctx, None, false, &mut warnings)
+            .expect_err(how);
+        assert!(
+            matches!(&refused, AnnotationRefusal::InvalidColor(c) if c.kind == "rect" && c.field == "fill"),
+            "{how}: {refused:?}"
+        );
     }
 }
