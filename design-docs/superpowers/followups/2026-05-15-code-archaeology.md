@@ -254,7 +254,7 @@ All FA follow-ups and five cross-cutting synthesis items (SYNTHESIS §C-D) fixed
 | ID | Commit | Resolution |
 |---|---|---|
 | C1 | 2bfe629 | `title=None` AND `Axis(title="")` truly suppress (no reserved margin, no phantom `<text>`); empty title resolves to None at the prepare boundary (Python forwards `""`, Rust skips the field fallback). |
-| C2 | 7dfb0c9 | annotations anchor to categorical/ordinal axes (non-ISO strings → ordinal category coords, not force-parsed temporal); `fm.annotate_*` accept `fm.px`/`fm.norm`; unresolved category warns before center-fallback. |
+| C2 | 7dfb0c9 | annotations anchor to categorical/ordinal axes (non-ISO strings → ordinal category coords, not force-parsed temporal); `fm.annotate_*` accept `fm.px`/`fm.norm`; unresolved category warns before center-fallback. **2026-11-14: reversed for a continuous axis and extended.** A category on an axis that is not categorical (numeric, temporal, log) no longer falls back to the plot centre with a `UserWarning`; it raises `ValueError: annotation category 'b' on the x axis: the x scale is continuous, so it holds no categories; ...` (likewise under `CoordPolar`/`CoordGeo`). Categories now resolve in the renderer through the axis's own scale on every annotation kind (the Python `(i + 0.5) / n` resolver is deleted), a span between categories shades whole bands, and an unknown category on a categorical axis keeps the centre fallback as a render warning naming `x`/`y`. See `ferrum-spec.md` §3.11 and the 2026-11-14 entry in `design-docs/spec-history.md`. |
 | C3 | d731f07 | typed continuous scales (Linear/Log/Pow/Sqrt/Symlog) accept optional `domain` and auto-infer from data like the dict form. |
 | C4 | 3a2ee59 | `resolve=` on `vconcat`/`hconcat`; `pairplot(hue=)` shares one color domain. **Residual resolved (2026-07-12, [#16](https://github.com/chris-santiago/ferrum/issues/16)):** the compositor renders one figure-level legend band when color/size resolve shared (per-panel legends suppressed at layout; band reuses the panel legend primitives); `fm.Resolve(scale=, legend=)` ships the opt-out, `jointplot(hue=)` opts in, and the fix also repaired hole-cell grids (`corner=True`, jointplot) silently skipping domain union. |
 | C5 | 5e2dd63 | 2-D density splits by categorical hue (`Kde2D groupby` → per-group surfaces; `Contour` iterates surfaces; `jointplot(kind='kde', hue=)` + `mark_contour(groupby=)`). **Note:** grouped contours render as isolines colored by group; filled per-group isobands are blocked by per-group `level_id` collision (group A and B both start `level_id=0` → polygon renderer merges them). |
@@ -329,7 +329,7 @@ filed as a GitHub issue. **Three were found already resolved and were NOT filed*
 below.
 
 **Found RESOLVED (no issue; this doc was stale):**
-- **FA-14** — StringView/`Utf8View` (and `LargeUtf8`) are now explicitly converted to `Utf8` in `render/prepare.rs` `normalize_string_views` before the `_ => {}` catch-all; no silent skip.
+- **FA-14** — StringView/`Utf8View` (and `LargeUtf8`) are now explicitly converted to `Utf8` in `render/prepare.rs` `normalize_string_views` before the `_ => {}` catch-all; no silent skip. **2026-11-14:** the Rust side was never the crash. `pl.from_arrow` segfaulted on a pyarrow-cast `string_view` or `binary_view` column before any Rust ran; `to_arrow_table` now rewrites every view type to its plain twin at ingest (`ferrum-spec.md` §3.18, **View-typed columns**).
 - **D6-1** — superseded by **FA-18** (`f44b72d`): per-panel transform slots (`MarkMeshPanel.panel_id`) bind each panel's own affine and every panel's affine is uploaded per frame, so multi-panel simultaneous reactive rescale no longer shears siblings.
 - **`fm.Gradient` custom continuous palettes** (SYNTHESIS §C-D) — already public: `fm.Gradient(stops)` is exported in `ferrum.__all__` (`src/ferrum/schemes.py` → Rust `continuous.rs`). Only a usage doc is missing.
 
@@ -805,3 +805,15 @@ Source: direct reproduction against bare `Chart`/`mark_point`/`mark_boxen` (inde
 | WAVE1-6 | S3 | **`text.rs`'s and `rect.rs::build_heatmap`'s `text` channel readers share a ~5-line reader shape but diverge in per-value formatting** (finite-value filtering, time-format branching) in a way that predates #166 and wasn't confirmed deliberate vs. accidental — left un-hoisted, both sites named for a future hoist-or-declare-intentional decision. |
 
 Source: `.sdd/task-3-report.md` §4/§6 (concerns 1-2, 7), `.sdd/task-11-report.md` (concern 1, #183 root cause), `.sdd/task-14-report.md` (X-side rank blindness), `.sdd/task-16-report.md` (override registry gap), `.sdd/task-10-report.md` (text/rect reader divergence), and the decision record's non-goals (§3).
+
+## 2026-11-14 — structural-wave close batch (zero-row statistics, log reports, annotations, ingest)
+
+The batch closed eleven defects (see `design-docs/spec-history.md`, entries dated 2026-11-14 under §3.2, §3.4, §3.5, §3.6, §3.11, §3.12 and §3.18). Rows above that it closed or changed are updated in place (C2, FA-14). Follow-ups it logged, not built:
+
+| ID | Sev | Item |
+|---|---|---|
+| SWB-1 | S2 | **Numeric annotations under `CoordPolar`/`CoordGeo` are cartesian overlays, silently.** Only a category coordinate is refused there. Needs polar annotation geometry or a per-kind refusal. |
+| SWB-2 | S2 | **`Axis(label_map=...)` is a data rewrite, not a tick relabel.** `sort=` and `domain=` read the display label while an annotation category reads either spelling (the data value wins under a swapping map). Making `label_map` presentation only (Vega-Lite `labelExpr`, ggplot2 `labels=`) reverses `sort=`/`domain=` on such an axis and needs a user ruling. |
+| SWB-3 | S3 | **Upstream polars report owed:** `pl.from_arrow` segfaults on a pyarrow-cast inline `string_view` (polars 1.40.1, pyarrow 24.0.0). Ferrum no longer depends on the fix. |
+| SWB-4 | S3 | **A log-axis remedy at extreme magnitudes prints a full decimal expansion** (`-0.0000...0001` for `1e-320`). It renders but is unreadable. |
+| SWB-5 | S3 | **Unverified:** a `Color` on `fm.LogScale()` over an all-negative column renders with no warning, while `log_no_value_on_side_reason`'s doc says numeric auxiliary channels refuse with the same words. |
