@@ -6,6 +6,66 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.25.0 — 2026-11-15
+
+The structural wave. Statistics and transforms now treat empty, null, infinite and date inputs by one rule on every mark and door, `impute=` works on every key dtype, and annotations are placed in the caller's channels.
+
+**Behavior changes to check when upgrading:** a bare-string `groupby` on a transform constructor (`fm.Kde`, `fm.Bin`, `fm.Smooth` and siblings) is refused (pass a list; a mark's own `groupby="g"` still means one column); a set, byte string or non-dict mapping on a sequence parameter is refused; a category annotation coordinate on a numeric or temporal axis is refused; an annotation with no colour draws the theme's text colour instead of `#333`; a zero-row frame through box, summary, error-extent and pivot statistics draws its frame and warns instead of raising; `impute` `keyvals` add to the observed keys and imputed rows are inserted at their key's place.
+
+### Added
+
+None
+
+### Fixed
+
+- residplot refuses an x2 or y2 no residual point can draw
+- a regression refusal's remedy names a door that renders
+- a regression refusal's remedy names a door that renders
+- the null census names an empty band slot in the caller's channels
+- an emptied histogram or boxen group keeps its legend entry, panel or slot and is named
+- a violin or QQ group that cannot be estimated keeps its place and is named
+- a 2-D statistic group or panel that cannot be estimated keeps its place and is named
+- a horizontal catplot's messages name the channels the caller wrote
+- a group a log axis empties is reported once, by the log warning
+- the density statistics give one reason for one cause, and a QQ with nothing to plot warns and draws empty
+- a boxen whose every group key is null warns and draws empty
+- a null category or hue is dropped and counted on every mark, and a faceted impute draws its imputed points
+- an infinite value is unusable on every statistic and data transform, as a null is
+- a Logistic or Glm fit that cannot be computed warns and draws, as its siblings do
+- a date or datetime column groups on every grouped transform and statistic
+- a date or datetime key splits a mark into series on every grouping partition, and a key column no reader takes is refused instead of merged
+- one impute rule serves transform_impute and the encoding options, with imputed rows inserted at their key's place
+- impute= on a value channel completes every series a layer draws, on every key dtype, option and layer door, and an impute that cannot be honoured is refused
+- a hue-by-category cell whose rows are all unusable is named by a warning, and LayerChart reports a shared impute fallback once
+- a layer's routed rows, its series keys and a log axis's emptied groups each have one owner, so the drop, the impute and the draw agree on every layer
+- the impute docstring states the continuous-colour rule as its own sentence
+- a zero-row frame through a box, summary or error-extent statistic draws its frame and warns once instead of raising
+- a set, mapping or byte string is refused wherever a transform or impute option reads order from it
+- an Arrow column of a view type loads as its plain twin at ingest instead of crashing the process
+- a log-axis warning calls infinite values infinite and suggests only a domain that renders, and a facet-sort warning names the caller's channel
+- the Logistic, Robust, GLM and Smooth docstring examples run and render as written, and a test holds every example to that
+- a zero-row frame through a pivot draws its frame and warns once, publishing exactly the names later steps and drawn channels read
+- an annotation coordinate given as a category lands on that category's band on every route, a span between categories covers whole bands, and a category the axis cannot place is refused or warned
+- under a caller's CoordFlip an annotation's coordinates, refusals and warnings mean the caller's channels, and a bracket's below direction draws down
+- an annotation with no colour given draws the theme's text colour on every route, every groupby door refuses a bare string, bytes, set or mapping in one voice, and dict views are read in order like a list
+
+### Changed
+
+None
+
+### Other
+
+- build the macOS wheel on macos-latest and pin the docs build to the locked zensical
+- build the docs with the toolchain uv.lock pins, transitive dependencies included
+- Revert "fix(api): a regression refusal's remedy names a door that renders"
+- each shared warning sentence is spelled once across the test files
+- the impute completion tests live in the one impute tests module
+- the contract text states the close batch's zero-row, log-axis, sequence-refusal, view-type and annotation rules as shipped
+- the batch's test modules share one svg digest helper and one interactive-scene accessor
+- five configure goldens carry the theme text colour on default-coloured annotation text
+- every groupby constructor's docstring states the forms it accepts and that a bare string, bytes, set or mapping is refused
+- a groupby docstring says a mapping other than a dict is refused
+
 ## 0.24.0 — 2026-11-09
 
 Wave-1 hardening closes 24 issues (#92, #107, #118, #122, #126, #133, #136, #140, #148, #152, #162, #166, #179, #183, #190, #197, #198, #204, #208, #216, #220, #238, #240, #243) under one standing policy: **refuse malformed, warn degraded**. Every reported silent accept/degrade becomes a typed refusal or a named warning; four changes are disclosed as user-visible behavior changes (see Breaking, below); everything else is additive (a new error message, a new `UserWarning`) with no other rendered geometry moving.
