@@ -759,7 +759,7 @@ impl PyGlm {
             None => canonical_link(family),
         };
         validate_pair(family, link)?;
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("Glm", groupby)?;
 
         Ok(PyGlm(TransformSpec::Glm(GlmSpec {
             x: x.to_string(),

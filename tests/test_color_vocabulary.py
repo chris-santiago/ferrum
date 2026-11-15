@@ -280,3 +280,23 @@ class TestSentinelsAreNotColors:
         )
         circle_fills = re.findall(r'<circle[^>]*fill="(#[0-9a-fA-F]{6})"', svg)
         assert circle_fills == ["#0f0f0f"]
+
+    def test_theme_font_sentinel_is_not_a_color(self) -> None:
+        with pytest.raises(ValueError, match="CSS color name"):
+            fm.color.to_hex("theme:font")
+
+    def test_theme_font_sentinel_construction_does_not_raise(self) -> None:
+        """The mark gate lets ``"theme:font"`` through by exact match, as it does ``"theme:label"``."""
+        df = pl.DataFrame({"x": [0.0], "y": [0.0]})
+        fm.Chart(df).mark_point(color="theme:font").encode(x="x", y="y")
+        fm.Chart(df).mark_point(fill="theme:font").encode(x="x", y="y")
+        with pytest.raises(ValueError, match="invalid color"):
+            fm.Chart(df).mark_point(fill="Theme:Font").encode(x="x", y="y")
+
+    def test_theme_font_sentinel_renders_theme_font_color(self) -> None:
+        """The rendered fill is the theme's ``font_color``, not ``label_color``."""
+        df = pl.DataFrame({"x": [0.0], "y": [0.0]})
+        chart = fm.Chart(df).mark_point(color="theme:font").encode(x="x", y="y")
+        theme = fm.Theme(font_color="#0a0b0c", label_color="#0d0e0f")
+        svg = chart.theme(theme).to_svg()
+        assert re.findall(r'<circle[^>]*fill="(#[0-9a-fA-F]{6})"', svg) == ["#0a0b0c"]

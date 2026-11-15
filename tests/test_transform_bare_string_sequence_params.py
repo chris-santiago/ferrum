@@ -47,6 +47,7 @@ import pytest
 
 import ferrum as fm
 import ferrum.transforms as _transforms_mod
+from ferrum import _core
 from ferrum.parameter import Parameter
 
 #: The value the tests pass for a derived parameter's "real sequence" case.
@@ -255,8 +256,6 @@ def _mapping_text(door: str, param: str, noun: str, value: object) -> str:
 _REFUSED = [
     ("set", {"zzz_col_a", "zzz_col_b"}, _set_text),
     ("frozenset", frozenset({"zzz_col_a", "zzz_col_b"}), _set_text),
-    ("dict_keys", {"zzz_col_a": 1, "zzz_col_b": 2}.keys(), _set_text),
-    ("dict_items", {"zzz_col_a": 1, "zzz_col_b": 2}.items(), _set_text),
     ("abc_set", _SetSubclass("zzz_col_a", "zzz_col_b"), _set_text),
     ("bytes", b"ab", _bytes_text),
     ("bytearray", bytearray(b"ab"), _bytes_text),
@@ -268,7 +267,7 @@ _REFUSED = [
 @pytest.mark.parametrize("name, param", _DERIVED_PARAMS, ids=lambda v: v)
 @pytest.mark.parametrize("value, builder", [v[1:] for v in _REFUSED], ids=[v[0] for v in _REFUSED])
 def test_an_unordered_or_byte_collection_is_refused_across_the_family(name, param, value, builder):
-    """A set, a dict view, a non-dict mapping and a byte string refuse at
+    """A set, a non-dict mapping and a byte string refuse at
     construction in the door's own words, never read in hash order or as integers."""
     with pytest.raises(ValueError) as excinfo:
         _call_with(name, param, value)
@@ -311,12 +310,62 @@ def test_the_remedy_a_mapping_refusal_names_is_accepted(name, param):
         assert _call_with(name, param, form)[param] == {"start": 0, "stop": 3}
 
 
-def test_dict_values_is_read_in_insertion_order():
-    values = {"z": 2, "a": 0, "m": 1}.values()
-    assert fm.transform_impute("v", key="t", keyvals=values)["keyvals"] == [2, 0, 1]
+def _outcome(call):
+    """The value a call returns, or the type of the error it raises."""
+    try:
+        return ("ok", call())
+    except Exception as exc:  # the comparison is between two outcomes, whatever they are
+        return ("raised", type(exc))
+
+
+_VIEWS = {
+    "keys": lambda d: d.keys(),
+    "values": lambda d: d.values(),
+    "items": lambda d: d.items(),
+}
+
+
+@pytest.mark.parametrize("name, param", _DERIVED_PARAMS, ids=lambda v: v)
+@pytest.mark.parametrize("view", sorted(_VIEWS))
+def test_a_dict_view_is_read_in_order_like_a_list(name, param, view):
+    """``keys()``, ``values()`` and ``items()`` are ordered, so each is read exactly as
+    ``list(view)`` is, on every sequence parameter: same result, or the same refusal."""
+    source = {"zzz_col_b": "y", "zzz_col_a": "x"}
+    as_view = _outcome(lambda: _call_with(name, param, _VIEWS[view](source)))
+    as_list = _outcome(lambda: _call_with(name, param, list(_VIEWS[view](source))))
+    assert as_view == as_list
+    assert not (as_view[0] == "raised" and "has no order" in str(as_view[1]))
+
+
+def test_a_dict_view_reaches_the_wire_in_insertion_order():
+    assert _call_with("transform_fold", "fields", {"zzz_col_b": 1, "zzz_col_a": 2}.keys())[
+        "fields"
+    ] == ["zzz_col_b", "zzz_col_a"]
     assert _call_with("transform_fold", "fields", {"zzz_col_b": 1, "zzz_col_a": 2}.values())[
         "fields"
     ] == [1, 2]
+    assert _call_with("transform_stack", "groupby", {"g": 1, "h": 2}.keys())["groupby"] == [
+        "g",
+        "h",
+    ]
+
+
+def test_impute_snapshot_reads_a_dict_view_once_into_a_list():
+    """A view is copied into a list by the snapshot, so a later change to the dict it came
+    from cannot move the channel's key order."""
+    from ferrum.transforms import _impute_snapshot
+
+    source = {2: 10, 0: 11}
+    snapshot = _impute_snapshot({"keyvals": source.keys()})
+    source[9] = 1
+    assert snapshot["keyvals"] == [2, 0]
+
+
+def test_a_set_keyvals_is_still_refused_on_both_impute_doors():
+    with pytest.raises(ValueError, match="has no order"):
+        fm.transform_impute("v", key="t", keyvals={1, 2})
+    with pytest.raises(ValueError, match="has no order"):
+        fm.Y("v", impute={"keyvals": frozenset({1, 2})})
 
 
 def test_a_range_keyvals_is_read_once_and_unchanged():
@@ -390,3 +439,115 @@ def test_reject_helper_is_the_single_shared_mechanism():
     _reject_bare_string_groupby(None, where="transform_regression")
     _reject_bare_string_groupby(["cat"], where="transform_regression")
     _reject_bare_string_groupby(("cat", "dog"), where="transform_regression")
+
+
+# ---------------------------------------------------------------------------
+# The written-step constructors speak in the same voice
+# ---------------------------------------------------------------------------
+
+#: Every constructor that takes ``groupby=``, with the arguments its minimal call needs.
+_CONSTRUCTORS: dict[str, tuple[tuple, dict]] = {
+    "Aggregate": (([_core.AggregateOp("x", "mean", "m")],), {}),
+    "Bin": (("x",), {}),
+    "BoxStats": (("x",), {}),
+    "ErrorExtent": (("x",), {}),
+    "Glm": (("x", "y"), {}),
+    "Kde": (("x",), {}),
+    "Kde2D": (("x", "y"), {}),
+    "LetterValue": (("x",), {}),
+    "Logistic": (("x", "y"), {}),
+    "Outliers": (("x",), {}),
+    "QQ": (("x",), {}),
+    "Robust": (("x", "y"), {}),
+    "Smooth": (("x", "y"), {}),
+    "Summary": (("x",), {}),
+    "TopK": ((3, "x"), {}),
+    "Violin": (("x",), {}),
+}
+
+
+def _construct(name: str, groupby: object):
+    args, kwargs = _CONSTRUCTORS[name]
+    return getattr(_core, name)(*args, **kwargs, groupby=groupby)
+
+
+def test_every_constructor_that_takes_groupby_is_in_the_table():
+    """A constructor added later with a ``groupby=`` parameter fails here until it is covered."""
+    declared = sorted(
+        name
+        for name in dir(_core)
+        if name[:1].isupper()
+        and isinstance(getattr(_core, name), type)
+        and "groupby" in (getattr(getattr(_core, name), "__text_signature__", None) or "")
+    )
+    assert set(declared) <= set(_CONSTRUCTORS)
+
+
+@pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
+@pytest.mark.parametrize(
+    "value, builder",
+    [
+        v[1:]
+        for v in _REFUSED
+        if v[0]
+        in {"set", "frozenset", "abc_set", "bytes", "bytearray", "memoryview", "mappingproxy"}
+    ],
+    ids=["set", "frozenset", "abc_set", "bytes", "bytearray", "memoryview", "mappingproxy"],
+)
+def test_a_constructor_refuses_an_unordered_or_byte_groupby_in_the_transform_words(
+    name, value, builder
+):
+    with pytest.raises(ValueError) as excinfo:
+        _construct(name, value)
+    assert str(excinfo.value) == builder(name, "groupby", "column names", value)
+
+
+@pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
+def test_a_constructor_refuses_a_bare_string_groupby_in_the_transform_words(name):
+    with pytest.raises(ValueError) as excinfo:
+        _construct(name, "cat")
+    assert str(excinfo.value) == (
+        f"{name}: groupby must be a sequence of column names (list or tuple), "
+        "got a bare string 'cat'; iterating a string yields individual characters"
+    )
+
+
+@pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
+@pytest.mark.parametrize("make", [list, tuple], ids=["list", "tuple"])
+def test_a_constructor_still_takes_an_ordered_groupby(name, make):
+    _construct(name, make(["g", "h"]))
+
+
+@pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
+def test_a_constructor_takes_no_groupby_by_default(name):
+    args, kwargs = _CONSTRUCTORS[name]
+    getattr(_core, name)(*args, **kwargs)
+
+
+@pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
+def test_a_constructor_reads_a_dict_view_groupby_like_a_list(name):
+    _construct(name, {"g": 1, "h": 2}.keys())
+
+
+@pytest.mark.parametrize(
+    "mark, kwargs, encoding",
+    [
+        ("mark_density", {}, {"x": "x"}),
+        ("mark_histogram", {}, {"x": "x"}),
+        ("mark_smooth", {"method": "lm"}, {"x": "x", "y": "y"}),
+        ("mark_contour", {}, {"x": "x", "y": "y"}),
+    ],
+)
+def test_a_mark_groupby_keeps_one_column_as_a_string_and_refuses_a_set(mark, kwargs, encoding):
+    """A mark's own ``groupby=`` documents ``str or list``; a bare string is one column."""
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [1.0, 2.0, 2.5, 4.0, 3.0, 6.0],
+            "g": list("aaabbb"),
+        }
+    )
+    base = fm.Chart(df).encode(**encoding, color="g:N")
+    getattr(base, mark)(groupby="g", **kwargs).to_svg()
+    with pytest.raises(ValueError, match=f"{mark}: groupby must be an ordered sequence"):
+        getattr(base, mark)(groupby={"g"}, **kwargs).to_svg()

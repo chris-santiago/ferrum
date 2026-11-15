@@ -509,11 +509,11 @@ pub(crate) struct PyViolin(pub(crate) crate::transform::core::TransformSpec);
 #[pymethods]
 impl PyViolin {
     #[new]
-    #[pyo3(signature = (field, *, groupby = vec![], bandwidth = None, bw_adjust = 1.0, n = 256, width = 0.4, shared_extent = false, horizontal = false, name = None))]
+    #[pyo3(signature = (field, *, groupby = None, bandwidth = None, bw_adjust = 1.0, n = 256, width = 0.4, shared_extent = false, horizontal = false, name = None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         field: &str,
-        groupby: Vec<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         bandwidth: Option<&Bound<'_, PyAny>>,
         bw_adjust: f64,
         n: usize,
@@ -567,6 +567,7 @@ impl PyViolin {
         // transform enforces, in the shared words — still refused here, at the
         // earliest boundary that has the facts, and again inside the
         // partitioner for the wire path that has no constructor (GH #179).
+        let groupby = crate::transform::group_key::parse_groupby_pyany("Violin", groupby)?;
         crate::transform::group_key::refuse_repeated_groupby_names("Violin", &groupby)?;
         Ok(Self(crate::transform::core::TransformSpec::Violin(
             ViolinSpec {

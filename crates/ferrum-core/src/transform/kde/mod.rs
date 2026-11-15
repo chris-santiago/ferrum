@@ -1020,7 +1020,7 @@ impl PyKde {
         }
         crate::transform::vocabulary::check_declared(KERNELS, "Kde", "kernel", kernel)?;
         let kernel_str = kernel.to_string();
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("Kde", groupby)?;
         let count_scale = count_scale.map(|obj| parse_bin_axis(obj, "stat_kde")).transpose()?;
         Ok(PyKde(TransformSpec::Kde(KdeSpec {
             field: field.to_string(),

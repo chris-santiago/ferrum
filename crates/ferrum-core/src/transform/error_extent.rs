@@ -308,11 +308,11 @@ pub(crate) struct PyErrorExtent(pub(crate) crate::transform::core::TransformSpec
 #[pymethods]
 impl PyErrorExtent {
     #[new]
-    #[pyo3(signature = (field, *, method = "ci", groupby = vec![], seed = 0, n_boot = 1000, name = None))]
+    #[pyo3(signature = (field, *, method = "ci", groupby = None, seed = 0, n_boot = 1000, name = None))]
     fn new(
         field: &str,
         method: &str,
-        groupby: Vec<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         seed: u64,
         n_boot: usize,
         name: Option<String>,
@@ -331,6 +331,7 @@ impl PyErrorExtent {
         // transform enforces, in the shared words — still refused here, at the
         // earliest boundary that has the facts, and again inside the
         // partitioner for the wire path that has no constructor (GH #179).
+        let groupby = crate::transform::group_key::parse_groupby_pyany("ErrorExtent", groupby)?;
         crate::transform::group_key::refuse_repeated_groupby_names("ErrorExtent", &groupby)?;
         Ok(Self(crate::transform::core::TransformSpec::ErrorExtent(
             ErrorExtentSpec {

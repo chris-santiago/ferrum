@@ -260,7 +260,7 @@ impl PySummary {
     #[pyo3(signature = (field, *, groupby = None, error_fn = "ci", ci = 0.95, n_boot = 1000, seed = 0, name = None))]
     fn new(
         field: &str,
-        groupby: Option<Vec<String>>,
+        groupby: Option<&Bound<'_, PyAny>>,
         error_fn: &str,
         ci: f64,
         n_boot: usize,
@@ -286,7 +286,7 @@ impl PySummary {
                 "Summary: unknown error_fn '{other}'; expected ci|stderr|stdev"
             ))),
         };
-        let gb = groupby.unwrap_or_default();
+        let gb = crate::transform::group_key::parse_groupby_pyany("Summary", groupby)?;
         // The duplicate-groupby refusal is the shared rule every grouped
         // transform enforces, in the shared words — still refused here, at the
         // earliest boundary that has the facts, and again inside the

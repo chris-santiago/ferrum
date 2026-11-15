@@ -830,7 +830,7 @@ impl PyRobust {
         // Smooth's policy (post-C5 audit-rework, 2026-05-12). On Fitted the
         // metrics annotation lands on the fit-grid output via
         // ``residuals::append_metrics_columns`` after the IRLS converges.
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("Robust", groupby)?;
         Ok(PyRobust(TransformSpec::Robust(RobustSpec {
             x: x.to_string(),
             y: y.to_string(),

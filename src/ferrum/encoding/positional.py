@@ -125,10 +125,11 @@ class Y(ChannelBase):
       checks it when the channel is built: a value that is not a dict, an option
       not in that list, a non-finite ``value`` and a malformed ``keyvals`` or
       ``frame`` raise ``ValueError``. ``keyvals`` is an ordered sequence (list,
-      tuple, ``range``, array, Series, a generator, ``dict.values()``) or a
+      tuple, ``range``, array, Series, a generator, a dict's ``keys()``, ``values()``
+      or ``items()`` view, read in insertion order) or a
       ``{"start", "stop", "step"}`` dict. A bare string (it iterates into
-      characters), a byte string (it iterates into integers), a set or a dict's
-      ``keys()`` or ``items()`` view (no order, so the output would change from run
+      characters), a byte string (it iterates into integers), or a set
+      (no order, so the output would change from run
       to run; pass a list, e.g. ``sorted(keys)``) and a mapping that is not a
       ``dict`` (pass a list, or ``dict(...)`` for the sequence form) are refused. Written on the value channel, it completes
       every series the layer draws along ``x``: a series that lacks an ``x``

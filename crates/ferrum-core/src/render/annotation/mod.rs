@@ -17,7 +17,9 @@ use super::marks::arrowhead::{arrowhead_path, arrowhead_triangle, DEFAULT_ARROW_
 use super::scale_resolve::{data_pixel_x, data_pixel_y, ScaleKind};
 use super::RenderWarning;
 use crate::layout::geometry::Rect;
+use crate::layout::ThemeInputs;
 use crate::spec::axis::AlignAxis;
+use crate::spec::coord::{public_spelling, suppresses_cartesian_axes, CoordKind};
 
 // ── Coordinate types ────────────────────────────────────────────────────────
 
@@ -134,8 +136,9 @@ pub enum AnnotationSpec {
         text: String,
         #[serde(default = "default_font_size")]
         font_size: f64,
-        #[serde(default = "default_color_str")]
-        color: String,
+        /// `None` draws the panel theme's text colour ([`ink`]).
+        #[serde(default)]
+        color: Option<String>,
         #[serde(default = "default_anchor")]
         anchor: String,
         #[serde(default = "default_baseline")]
@@ -159,8 +162,9 @@ pub enum AnnotationSpec {
         y: CoordValue,
         x2: CoordValue,
         y2: CoordValue,
-        #[serde(default = "default_color_str")]
-        stroke: String,
+        /// `None` draws the panel theme's text colour ([`ink`]).
+        #[serde(default)]
+        stroke: Option<String>,
         #[serde(default = "default_stroke_width")]
         stroke_width: f64,
         #[serde(default = "default_head_size")]
@@ -187,8 +191,9 @@ pub enum AnnotationSpec {
         y1: CoordValue,
         x2: CoordValue,
         y2: CoordValue,
-        #[serde(default = "default_color_str")]
-        stroke: String,
+        /// `None` draws the panel theme's text colour ([`ink`]).
+        #[serde(default)]
+        stroke: Option<String>,
         #[serde(default = "default_stroke_width")]
         stroke_width: f64,
         #[serde(default)]
@@ -218,8 +223,9 @@ pub enum AnnotationSpec {
         label: String,
         #[serde(default = "default_direction")]
         direction: String,
-        #[serde(default = "default_color_str")]
-        stroke: String,
+        /// `None` draws the panel theme's text colour ([`ink`]).
+        #[serde(default)]
+        stroke: Option<String>,
         #[serde(default = "default_tip_length")]
         tip_length: f64,
     },
@@ -377,9 +383,6 @@ pub(crate) fn accepted_keys_for_annotation_variant(type_tag: &str) -> Option<&'s
 fn default_font_size() -> f64 {
     12.0
 }
-fn default_color_str() -> String {
-    "#333333".to_string()
-}
 fn default_anchor() -> String {
     "middle".to_string()
 }
@@ -445,6 +448,10 @@ pub struct ScaleContext<'a> {
     /// `scene_build.rs`). Empty for every chart without an active break — the
     /// byte-identical default.
     pub breaks: &'a [break_axis::BreakRemap<'a>],
+    /// The panel's effective theme: an annotation given no colour draws the
+    /// theme's text colour ([`ink`]), so it follows `.theme()` and
+    /// `set_default_theme` like the text mark does.
+    pub theme: &'a ThemeInputs,
 }
 
 impl<'a> ScaleContext<'a> {
@@ -691,6 +698,18 @@ fn resolve_color(s: &str) -> Color {
     }
 }
 
+/// The colour an annotation primitive draws: the caller's when given, else the
+/// theme's text colour (the text mark's rule), so unset ink reads on every theme.
+fn ink(color: Option<&str>, ctx: &ScaleContext) -> Color {
+    color.map_or_else(|| theme_ink(ctx), resolve_color)
+}
+
+/// The theme's text colour, for the labels an annotation draws with no colour
+/// parameter of their own.
+fn theme_ink(ctx: &ScaleContext) -> Color {
+    to_scene_color(ctx.theme.colors.font_color)
+}
+
 // ── Anchor / baseline parsing ───────────────────────────────────────────────
 
 fn parse_anchor(s: &str) -> TextAnchor {
@@ -784,7 +803,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                     anchor: parse_anchor(anchor),
                     baseline: parse_baseline(baseline),
                     angle: *angle,
-                    color: Some(resolve_color(color)),
+                    color: Some(ink(color.as_deref(), ctx)),
                     opacity: 1.0,
                     font_family: "Inter, system-ui, sans-serif".to_string(),
                 },
@@ -809,7 +828,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 y1_px,
                 x2_px,
                 y2_px,
-                stroke,
+                ink(stroke.as_deref(), ctx),
                 *stroke_width,
                 *head_size,
                 out,
@@ -872,7 +891,7 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 x2: ctx.resolve_x(x2),
                 y2: ctx.resolve_y(y2),
                 style: StrokeStyle {
-                    color: Some(resolve_color(stroke)),
+                    color: Some(ink(stroke.as_deref(), ctx)),
                     width: *stroke_width,
                     opacity: 1.0,
                     dash: dash.as_deref().map(|d| d.to_vec()),
@@ -920,7 +939,8 @@ fn build_one(spec: &AnnotationSpec, ctx: &ScaleContext, out: &mut Vec<SceneNode>
                 ctx.resolve_y(y2),
                 label,
                 direction,
-                stroke,
+                ink(stroke.as_deref(), ctx),
+                theme_ink(ctx),
                 *tip_length,
                 out,
             );
@@ -1001,12 +1021,11 @@ fn emit_arrow(
     y1: f64,
     x2: f64,
     y2: f64,
-    stroke: &str,
+    color: Color,
     stroke_width: f64,
     head_size: f64,
     out: &mut Vec<SceneNode>,
 ) {
-    let color = resolve_color(stroke);
 
     // Line shaft.
     out.push(SceneNode::Line {
@@ -1084,7 +1103,7 @@ fn emit_span(
         corner_radius: 0.0,
     });
 
-    if let Some(node) = span_label_node(x, y, w, h, label, label_position) {
+    if let Some(node) = span_label_node(x, y, w, h, label, label_position, theme_ink(ctx)) {
         out.push(node);
     }
 }
@@ -1103,6 +1122,7 @@ fn span_label_node(
     h: f64,
     label: Option<&str>,
     label_position: &str,
+    color: Color,
 ) -> Option<SceneNode> {
     let label_text = label.filter(|t| !t.is_empty())?;
 
@@ -1138,7 +1158,7 @@ fn span_label_node(
             anchor: TextAnchor::Middle,
             baseline,
             angle: 0.0,
-            color: Some(Color::rgb(51, 51, 51)),
+            color: Some(color),
             opacity: 1.0,
             font_family: "Inter, system-ui, sans-serif".to_string(),
         },
@@ -1153,11 +1173,11 @@ fn emit_bracket(
     py2: f64,
     label: &str,
     direction: &str,
-    stroke: &str,
+    color: Color,
+    label_color: Color,
     tip_length: f64,
     out: &mut Vec<SceneNode>,
 ) {
-    let color = resolve_color(stroke);
     let stroke_style = StrokeStyle {
         color: Some(color),
         width: 1.5,
@@ -1226,7 +1246,7 @@ fn emit_bracket(
                 anchor: TextAnchor::Middle,
                 baseline: TextBaseline::Middle,
                 angle: 0.0,
-                color: Some(Color::rgb(51, 51, 51)),
+                color: Some(label_color),
                 opacity: 1.0,
                 font_family: "Inter, system-ui, sans-serif".to_string(),
             },
@@ -1359,7 +1379,8 @@ fn emit_callout(
 ///
 /// A category coordinate is checked first ([`check_categories`]): it refuses
 /// where the panel cannot place it and warns once per label the axis lacks.
-/// `projected_coord` names a `CoordPolar`/`CoordGeo` panel ([`projected_coord_name`]).
+/// `coord` is the panel's coord: a projected one (`CoordPolar`/`CoordGeo`, per
+/// [`suppresses_cartesian_axes`]) holds no category.
 ///
 /// `names_unflipped` says the caller's own `CoordFlip` put the caller's x on the
 /// drawn vertical axis (`prepare::names_unflipped`). The specs then hold the
@@ -1371,7 +1392,7 @@ fn emit_callout(
 pub fn build_annotations_through_breaks(
     specs: &[AnnotationSpec],
     ctx: &ScaleContext<'_>,
-    projected_coord: Option<&'static str>,
+    coord: Option<&CoordKind>,
     names_unflipped: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<AnnotationNodes, AnnotationRefusal> {
@@ -1382,7 +1403,7 @@ pub fn build_annotations_through_breaks(
     } else {
         specs
     };
-    check_categories(specs, ctx, projected_coord, names_unflipped, warnings)?;
+    check_categories(specs, ctx, coord, names_unflipped, warnings)?;
     if ctx.breaks.is_empty() {
         return Ok(build_annotations(specs, ctx));
     }
@@ -1416,17 +1437,6 @@ pub fn build_annotations_through_breaks(
         warnings.push(RenderWarning::AnnotationSpansBreakGap { axis, kinds });
     }
     Ok(nodes)
-}
-
-/// The public spelling of a coord a category annotation cannot be placed
-/// under, or `None` for a coord whose axes can hold one.
-pub fn projected_coord_name(coord: Option<&crate::spec::coord::CoordKind>) -> Option<&'static str> {
-    use crate::spec::coord::CoordKind;
-    match coord {
-        Some(CoordKind::Polar { .. }) => Some("CoordPolar"),
-        Some(CoordKind::Geo { .. }) => Some("CoordGeo"),
-        Some(CoordKind::Cartesian { .. } | CoordKind::Flip | CoordKind::Fixed { .. }) | None => None,
-    }
 }
 
 /// Every coordinate `spec` carries, with the axis it is measured on.
@@ -1469,7 +1479,7 @@ fn coords_with_axes(spec: &AnnotationSpec) -> Vec<(AlignAxis, &CoordValue)> {
 fn check_categories(
     specs: &[AnnotationSpec],
     ctx: &ScaleContext<'_>,
-    projected_coord: Option<&'static str>,
+    coord: Option<&CoordKind>,
     exchanged: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), AnnotationRefusal> {
@@ -1482,11 +1492,11 @@ fn check_categories(
     for spec in specs {
         for (axis, value) in coords_with_axes(spec) {
             let Some(label) = value.category() else { continue };
-            if let Some(coord) = projected_coord {
+            if let Some(coord) = coord.filter(|c| suppresses_cartesian_axes(Some(c))) {
                 return Err(AnnotationRefusal::CategoryUnderCoord {
                     label: label.to_string(),
                     axis: callers(axis),
-                    coord,
+                    coord: public_spelling(coord).trim_start_matches("fm."),
                 });
             }
             let scale = if axis.is_y() { ctx.y_scale } else { ctx.x_scale };
@@ -1561,6 +1571,7 @@ fn build_cut(
         x_scale: ctx.x_scale,
         y_scale: ctx.y_scale,
         breaks: &unrouted,
+        theme: ctx.theme,
     };
 
     let mut nodes: Vec<SceneNode> = Vec::new();
@@ -1571,7 +1582,7 @@ fn build_cut(
     for &i in axes {
         nodes = routing.place(&ctx.breaks[i], nodes);
     }
-    if let Some(label) = clipped_span_label(spec, &nodes) {
+    if let Some(label) = clipped_span_label(spec, &nodes, theme_ink(ctx)) {
         nodes.push(label);
     }
     out.append(&mut nodes);
@@ -1816,7 +1827,11 @@ fn span_band_only(spec: &AnnotationSpec) -> Option<AnnotationSpec> {
 /// order. `None` when the span carries no label, when `spec` is not a span at
 /// all, or when no piece survived (in which case the caller has nothing to draw
 /// a label on).
-fn clipped_span_label(spec: &AnnotationSpec, pieces: &[SceneNode]) -> Option<SceneNode> {
+fn clipped_span_label(
+    spec: &AnnotationSpec,
+    pieces: &[SceneNode],
+    color: Color,
+) -> Option<SceneNode> {
     let AnnotationSpec::Span { axis, label, label_position, .. } = spec else {
         return None;
     };
@@ -1827,7 +1842,7 @@ fn clipped_span_label(spec: &AnnotationSpec, pieces: &[SceneNode]) -> Option<Sce
         .iter()
         .filter_map(rect_extent)
         .reduce(|a, b| if along(&b) > along(&a) { b } else { a })?;
-    span_label_node(x, y, w, h, Some(label), label_position)
+    span_label_node(x, y, w, h, Some(label), label_position, color)
 }
 
 /// `(x, y, w, h)` of a `Rect` node — the shape a clipped span piece has.

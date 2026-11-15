@@ -727,7 +727,7 @@ impl PyKde2D {
                 ));
             }
         }
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("Kde2D", groupby)?;
         Ok(PyKde2D(TransformSpec::Kde2D(Kde2DSpec {
             x: x.to_string(),
             y: y.to_string(),

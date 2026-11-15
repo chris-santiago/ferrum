@@ -1336,7 +1336,7 @@ impl PyBin {
         let agg = agg.map(|m| AggFn::parse_or_refuse("agg", &m)).transpose().map_err(bin_err)?;
         let aggregates =
             aggregates.map(|ops| extract_aggregate_ops("Bin: aggregates", ops)).transpose()?;
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("Bin", groupby)?;
         // `bins` names the whole decision in one value — the rule-bearing
         // spelling `Bin2D(bins_x=)` and `Kde(count_scale=)` already accept,
         // parsed by the same shared owner (#193). It is mutually exclusive with
@@ -4229,8 +4229,9 @@ mod tests {
 
             let refused = |r: PyResult<PyBin>| r.expect_err("refused").value(py).to_string();
             let g = PyString::new(py, "g").into_any();
+            let by_g = PyList::new(py, ["g"]).unwrap().into_any();
             assert_eq!(
-                refused(build(true, Some(&g), None)),
+                refused(build(true, Some(&by_g), None)),
                 "Bin: per_row cannot be combined with groupby"
             );
             assert_eq!(
@@ -4238,7 +4239,7 @@ mod tests {
                 "Bin: aggregates must hold at least one entry"
             );
             assert_eq!(
-                refused(build(false, Some(&g), Some(&entries(&[("w", "mean", "g")])))),
+                refused(build(false, Some(&by_g), Some(&entries(&[("w", "mean", "g")])))),
                 "Bin: aggregates output name 'g' collides with groupby column 'g'"
             );
             assert_eq!(

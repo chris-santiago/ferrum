@@ -356,10 +356,10 @@ pub(crate) struct PyOutliers(pub(crate) crate::transform::core::TransformSpec);
 #[pymethods]
 impl PyOutliers {
     #[new]
-    #[pyo3(signature = (field, *, groupby = vec![], extent = 1.5, name = None))]
+    #[pyo3(signature = (field, *, groupby = None, extent = 1.5, name = None))]
     fn new(
         field: String,
-        groupby: Vec<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         extent: f64,
         name: Option<String>,
     ) -> PyResult<Self> {
@@ -371,6 +371,7 @@ impl PyOutliers {
                 "Outliers: extent must be a non-negative finite number",
             ));
         }
+        let groupby = crate::transform::group_key::parse_groupby_pyany("Outliers", groupby)?;
         Ok(Self(crate::transform::core::TransformSpec::Outliers(
             OutliersSpec {
                 field,

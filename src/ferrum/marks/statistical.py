@@ -12,7 +12,7 @@ from ferrum._layer import MarkDesugarResult, _Layer
 from ferrum._overrides import register_layer_names
 from ferrum._registry import registry_output_columns
 from ferrum._validate import validate_choice
-from ferrum.marks._desugar_helpers import with_grouping
+from ferrum.marks._desugar_helpers import mark_groupby, with_grouping
 from ferrum.transforms import transform_window
 from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks._multiple import MULTIPLE_MODES as _MULTIPLE_MODES
@@ -201,7 +201,7 @@ def desugar_density(
         kernel=kernel or "gaussian",
     )
     if groupby is not None:
-        kde_kwargs["groupby"] = groupby
+        kde_kwargs["groupby"] = mark_groupby(groupby, where="mark_density")
     transforms = [Kde(field, **kde_kwargs)]
     # Kde produces columns ("value", "density") — remap both x and y.
     # With groupby, output also contains the group column for color encoding.
@@ -420,7 +420,7 @@ def desugar_histogram(
         shared_extent=semantics.shared_extent,
     )
     if groupby is not None:
-        bin_kwargs["groupby"] = groupby
+        bin_kwargs["groupby"] = mark_groupby(groupby, where="mark_histogram")
     transforms = [Bin(field, **bin_kwargs)]
     # Phase 5 Bin produces columns (bin_start, bin_end, count, density).
     # Derived from the registry (spec §4.6 / M6a) rather than hardcoded, so a
@@ -735,7 +735,7 @@ def desugar_smooth(
         if x_estimator is not None:
             smooth_kwargs["x_estimator"] = x_estimator
         if groupby is not None:
-            smooth_kwargs["groupby"] = groupby
+            smooth_kwargs["groupby"] = mark_groupby(groupby, where="mark_smooth")
         if name is not None:
             smooth_kwargs["name"] = name
         if x_range is not None:
@@ -775,7 +775,7 @@ def desugar_smooth(
     if x_estimator is not None:
         smooth_kwargs["x_estimator"] = x_estimator
     if groupby is not None:
-        smooth_kwargs["groupby"] = groupby
+        smooth_kwargs["groupby"] = mark_groupby(groupby, where="mark_smooth")
     if x_range is not None:
         smooth_kwargs["x_range"] = x_range
     if x_range_pad is not None:

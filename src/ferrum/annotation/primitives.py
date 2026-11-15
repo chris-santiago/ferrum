@@ -43,11 +43,11 @@ from ferrum._validate import validate_choice
 # ``ValueError``. Each constant below is cross-checked against its Rust
 # match arm; see the per-field comment for the exact source location.
 
-# render/annotation.rs::parse_anchor -- "start"|"left" -> Start,
+# render/annotation/mod.rs::parse_anchor -- "start"|"left" -> Start,
 # "end"|"right" -> End, anything else (including "middle") -> Middle.
 _VALID_TEXT_ANCHORS = ("start", "left", "end", "right", "middle")
 
-# render/annotation.rs::parse_baseline -> render/draw.rs::parse_text_baseline
+# render/annotation/mod.rs::parse_baseline -> render/draw.rs::parse_text_baseline
 # -- four DISTINCT rendered variants, not three: Top ("top"/"hanging"/
 # "text-before-edge"), Middle ("middle"/"central", also the default for any
 # unrecognized string), Bottom ("bottom"/"text-after-edge"/"ideographic"),
@@ -65,12 +65,12 @@ _VALID_TEXT_BASELINES = (
     "alphabetic",
 )
 
-# render/annotation.rs::build_annotations -- exact-match "below_marks" routes
+# render/annotation/mod.rs::build_annotations -- exact-match "below_marks" routes
 # to the pre-marks bucket; every other string (including "above_marks")
 # routes to the post-marks bucket. No further Rust-recognized alias exists.
 _VALID_ANNOTATION_Z = ("above_marks", "below_marks")
 
-# render/annotation.rs::emit_bracket -- "up"/"down"/"left"/"right" are the tip directions the
+# render/annotation/mod.rs::emit_bracket -- "up"/"down"/"left"/"right" are the tip directions the
 # renderer draws. "above" is the documented default and the synonym of "up"; "below" is the
 # synonym of "down".
 _VALID_BRACKET_DIRECTIONS = ("above", "below", "up", "down", "left", "right")
@@ -89,7 +89,7 @@ class AnnotationText:
     y: CoordValue
     text: str
     font_size: float
-    color: str
+    color: str | None
     anchor: str
     baseline: str
     angle: float
@@ -104,13 +104,12 @@ class AnnotationText:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
-        return {
+        d: dict[str, Any] = {
             "type": "text",
             "x": _coord(self.x),
             "y": _coord(self.y),
             "text": self.text,
             "font_size": self.font_size,
-            "color": self.color,
             "anchor": self.anchor,
             "baseline": self.baseline,
             "angle": self.angle,
@@ -118,6 +117,9 @@ class AnnotationText:
             "dy": self.dy,
             "z": self.z,
         }
+        if self.color is not None:
+            d["color"] = self.color
+        return d
 
 
 @dataclass(frozen=True)
@@ -128,22 +130,24 @@ class AnnotationArrow:
     y: CoordValue
     x2: CoordValue
     y2: CoordValue
-    stroke: str
+    stroke: str | None
     stroke_width: float
     head_size: float
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
-        return {
+        d: dict[str, Any] = {
             "type": "arrow",
             "x": _coord(self.x),
             "y": _coord(self.y),
             "x2": _coord(self.x2),
             "y2": _coord(self.y2),
-            "stroke": self.stroke,
             "stroke_width": self.stroke_width,
             "head_size": self.head_size,
         }
+        if self.stroke is not None:
+            d["stroke"] = self.stroke
+        return d
 
 
 @dataclass(frozen=True)
@@ -184,7 +188,7 @@ class AnnotationLine:
     y1: CoordValue
     x2: CoordValue
     y2: CoordValue
-    stroke: str
+    stroke: str | None
     stroke_width: float
     dash: list[float] | None
 
@@ -196,9 +200,10 @@ class AnnotationLine:
             "y1": _coord(self.y1),
             "x2": _coord(self.x2),
             "y2": _coord(self.y2),
-            "stroke": self.stroke,
             "stroke_width": self.stroke_width,
         }
+        if self.stroke is not None:
+            d["stroke"] = self.stroke
         if self.dash is not None:
             d["dash"] = self.dash
         return d
@@ -251,7 +256,7 @@ class AnnotationBracket:
     y2: CoordValue
     label: str
     direction: str
-    stroke: str
+    stroke: str | None
     tip_length: float
 
     def __post_init__(self) -> None:
@@ -261,7 +266,7 @@ class AnnotationBracket:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""
-        return {
+        d: dict[str, Any] = {
             "type": "bracket",
             "x1": _coord(self.x1),
             "y1": _coord(self.y1),
@@ -269,9 +274,11 @@ class AnnotationBracket:
             "y2": _coord(self.y2),
             "label": self.label,
             "direction": self.direction,
-            "stroke": self.stroke,
             "tip_length": self.tip_length,
         }
+        if self.stroke is not None:
+            d["stroke"] = self.stroke
+        return d
 
 
 @dataclass(frozen=True)
@@ -349,7 +356,7 @@ def text(
     text: str,
     *,
     font_size: float = 12,
-    color: str = "#333",
+    color: str | None = None,
     anchor: str = "start",
     baseline: str = "middle",
     angle: float = 0,
@@ -368,8 +375,8 @@ def text(
         Label text.
     font_size : float, default 12
         Font size in points.
-    color : str, default "#333"
-        Text color.
+    color : str, optional
+        Text color. Defaults to the theme's text colour (``font_color``).
     anchor : str, default "start"
         Horizontal anchor: ``"start"``, ``"middle"``, or ``"end"`` (SVG
         vocabulary); ``"left"`` and ``"right"`` are accepted aliases for
@@ -414,7 +421,7 @@ def arrow(
     x2: CoordValue,
     y2: CoordValue,
     *,
-    stroke: str = "#333",
+    stroke: str | None = None,
     stroke_width: float = 1.5,
     head_size: float = 8,
 ) -> AnnotationArrow:
@@ -426,8 +433,8 @@ def arrow(
         Arrow tail position.
     x2, y2 : CoordValue
         Arrow head position.
-    stroke : str, default "#333"
-        Arrow stroke color.
+    stroke : str, optional
+        Arrow stroke color. Defaults to the theme's text colour (``font_color``).
     stroke_width : float, default 1.5
         Stroke width in pixels.
     head_size : float, default 8
@@ -498,7 +505,7 @@ def line(
     x2: CoordValue,
     y2: CoordValue,
     *,
-    stroke: str = "#333",
+    stroke: str | None = None,
     stroke_width: float = 1,
     dash: list[float] | None = None,
 ) -> AnnotationLine:
@@ -510,8 +517,8 @@ def line(
         Start position.
     x2, y2 : CoordValue
         End position.
-    stroke : str, default "#333"
-        Stroke color.
+    stroke : str, optional
+        Stroke color. Defaults to the theme's text colour (``font_color``).
     stroke_width : float, default 1
         Stroke width in pixels.
     dash : list[float], optional
@@ -587,7 +594,7 @@ def bracket(
     *,
     label: str,
     direction: str = "above",
-    stroke: str = "#333",
+    stroke: str | None = None,
     tip_length: float = 6,
 ) -> AnnotationBracket:
     """Create a bracket annotation with a label.
@@ -607,8 +614,8 @@ def bracket(
         caller's ``CoordFlip`` the direction exchanges with the coordinate
         pair, so a bracket's tips and label still point away from its
         baseline.
-    stroke : str, default "#333"
-        Bracket stroke color.
+    stroke : str, optional
+        Bracket stroke color. Defaults to the theme's text colour (``font_color``).
     tip_length : float, default 6
         Length of the bracket end ticks in pixels.
 

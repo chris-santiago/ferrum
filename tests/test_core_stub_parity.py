@@ -244,9 +244,10 @@ def test_kde_accepts_new_kwargs() -> None:
 
 
 def test_kde2d_accepts_groupby() -> None:
-    """Kde2D(groupby=) accepts a single string (Optional[str] in the real Rust type)."""
-    k = _core.Kde2D(x="a", y="b", groupby="g")
-    assert k is not None
+    """Kde2D(groupby=) accepts an ordered sequence of strings and refuses a bare string."""
+    assert _core.Kde2D(x="a", y="b", groupby=["g"]) is not None
+    with pytest.raises(ValueError, match="Kde2D: groupby must be a sequence of column names"):
+        _core.Kde2D(x="a", y="b", groupby="g")
 
 
 def test_smooth_accepts_new_kwargs() -> None:
@@ -266,15 +267,13 @@ def test_robust_accepts_new_kwargs() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_violin_groupby_rejects_none() -> None:
-    """Violin groupby is Vec<String> (non-Optional); None must raise TypeError.
+def test_violin_groupby_accepts_none() -> None:
+    """Violin groupby is ``Optional[List[str]] = None`` like every other grouped transform.
 
-    The old stub declared ``Optional[List[str]] = None`` — a fiction that would
-    have allowed ``groupby=None`` to look valid.  The corrected stub uses
-    ``List[str] = ...`` matching the real Rust binding.
+    The stub and the binding agree: no grouping is ``None`` (the default), not a required list.
     """
-    with pytest.raises(TypeError):
-        _core.Violin(field="v", groupby=None)  # type: ignore[arg-type]
+    assert _core.Violin(field="v", groupby=None) is not None
+    assert _core.Violin(field="v") is not None
 
 
 def test_violin_groupby_accepts_list() -> None:

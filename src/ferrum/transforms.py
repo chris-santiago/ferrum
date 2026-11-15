@@ -25,7 +25,7 @@ contract.  Do not change the inner-dict key.
 from __future__ import annotations
 
 import datetime
-from collections.abc import Mapping, Set
+from collections.abc import ItemsView, KeysView, Mapping, Set
 from typing import TYPE_CHECKING, Any, Sequence, cast
 
 import numpy as np
@@ -96,15 +96,10 @@ def _validate_as_pair(value: tuple[str, str], *, where: str) -> list[str]:
         If *value* is not a length-2 sequence of non-empty strings.
         A bare string is rejected even if it has exactly 2 characters,
         because iterating a string yields individual characters, not
-        column names. A byte string, a set (including a dict's ``keys()`` or
-        ``items()`` view) and a non-``dict`` mapping are refused through
-        :func:`_reject_bare_string`.
+        column names. A byte string, a set and a non-``dict`` mapping are
+        refused through :func:`_reject_bare_string`, which also words the
+        bare-string refusal.
     """
-    if isinstance(value, str):
-        raise ValueError(
-            f"{where}: as_ must be a pair of non-empty strings (tuple or list),"
-            f" got a bare string {value!r}"
-        )
     _reject_bare_string(value, where=where, param="as_", noun="output-column names")
     try:
         items = list(value)
@@ -148,12 +143,13 @@ def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> 
     Beside the bare string it refuses the values whose order the output would
     take from something other than the caller: ``bytes``, ``bytearray`` and
     ``memoryview`` (they iterate into integers), any ``collections.abc.Set``
-    (``set``, ``frozenset``, a dict's ``keys()`` or ``items()`` view: no defined
-    order, so the output would change from run to run; ``dict.values()`` is not
-    a ``Set`` and is read in insertion order) and any ``Mapping`` that is not a ``dict`` (only a
+    (``set``, ``frozenset``: no defined order, so the output would change from run
+    to run) and any ``Mapping`` that is not a ``dict`` (only a
     ``dict`` is ``keyvals``' ``{'start', 'stop', 'step'}`` form; the other
-    parameters name ``list(...)`` of its keys as the remedy). Nothing is
-    iterated before it refuses.
+    parameters name ``list(...)`` of its keys as the remedy). A dict's
+    ``keys()``, ``values()`` and ``items()`` views are ordered (insertion
+    order), so they are read like a list. Nothing is iterated before it
+    refuses.
 
     Raises
     ------
@@ -170,7 +166,7 @@ def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> 
             f"{where}: {param} must be a sequence of {noun} (list or tuple), "
             f"got {type(value).__name__} {value!r}; iterating it yields integers"
         )
-    if isinstance(value, Set):
+    if _is_unordered_set(value):
         raise ValueError(
             f"{where}: {param} must be an ordered sequence of {noun}, "
             f"got {type(value).__name__} {value!r}; a set has no order, so the output "
@@ -192,6 +188,15 @@ def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> 
 def _is_byte_string(value: object) -> bool:
     """Whether *value* is ``bytes``, ``bytearray`` or ``memoryview``."""
     return isinstance(value, (bytes, bytearray, memoryview))
+
+
+def _is_unordered_set(value: object) -> bool:
+    """Whether *value* is a set with no defined order.
+
+    A dict's ``keys()`` and ``items()`` views are ``Set`` instances but keep the
+    dict's insertion order, so they are not unordered.
+    """
+    return isinstance(value, Set) and not isinstance(value, (KeysView, ItemsView))
 
 
 def _is_non_dict_mapping(value: object) -> bool:
@@ -1157,7 +1162,7 @@ def _impute_snapshot(options: object) -> object:
     A channel keeps the dict its caller wrote, in the caller's spelling, so this
     copy is what it stores: a fresh dict. ``keyvals`` that is a ``dict`` (the
     ``{'start', 'stop', 'step'}`` form) is copied; any other ``keyvals`` that is
-    not a string, a byte string, a set or a non-``dict`` mapping is read once into a list (a generator, ``map``, numpy
+    not a string, a byte string, a set or a non-``dict`` mapping (a dict view is read like a list) is read once into a list (a generator, ``map``, numpy
     array or Series would otherwise be drained by the first validation). A
     ``frame`` list is copied and a 1-D numpy array of two integers becomes a tuple; a
     tuple or ``range`` is immutable and kept, and anything else (including the refused ``keyvals`` kinds) is left as it is
@@ -1174,7 +1179,8 @@ def _impute_snapshot(options: object) -> object:
         snapshot["keyvals"] = dict(keyvals)
     elif (
         keyvals is not None
-        and not isinstance(keyvals, (str, Set))
+        and not isinstance(keyvals, str)
+        and not _is_unordered_set(keyvals)
         and not _is_byte_string(keyvals)
         and not _is_non_dict_mapping(keyvals)
     ):
@@ -1278,10 +1284,11 @@ def transform_impute(
         without ``key`` raises ``ValueError`` at render time, since there
         is no key column for the universe to apply to. Must be an ordered
         sequence (list, tuple, ``range``, 1-D array, Series, or another
-        iterable that yields in order, such as a generator or ``dict.values()``).
+        iterable that yields in order, such as a generator or a dict's ``keys()``,
+        ``values()`` or ``items()`` view, read in insertion order).
         These raise ``ValueError`` at construction time: a bare string (it
         iterates into characters), a byte string (it iterates into integers), a
-        set, a dict's ``keys()`` or ``items()`` view (no order, so the output
+        set (no order, so the output
         would change from run to run; pass a list, e.g. ``sorted(keys)``) and a
         mapping that is not a ``dict`` (pass a list, or ``dict(...)`` for the
         sequence form below). A ``datetime.date``,
@@ -1319,8 +1326,7 @@ def transform_impute(
     ------
     ValueError
         If ``groupby`` or ``keyvals`` is a bare string, a byte string, a set
-        (including a dict's ``keys()`` or ``items()`` view) or a non-``dict``
-        mapping; or if
+        or a non-``dict`` mapping; or if
         ``value``, ``keyvals`` or ``frame`` is malformed, or a literal (a
         ``value`` or a ``keyvals`` element) is of no accepted kind.
 

@@ -1135,7 +1135,8 @@ pub enum PaintSource {
     /// this slot.
     Inherited,
     /// Resolved from an explicit user override that named a color — anything
-    /// [`parse_color`] accepts, or the `"theme:label"` theme-lookup sentinel.
+    /// [`parse_color`] accepts, or the `"theme:label"` / `"theme:font"`
+    /// theme-lookup sentinels.
     UserColor,
     /// Resolved from the explicit `"none"`/`"transparent"` paint clear.
     ///
@@ -1466,10 +1467,11 @@ pub(crate) const CONTRAST_SENTINEL: &str = "theme:contrast";
 /// Resolve one user-supplied `fill=` / `stroke=` string to a paint color.
 ///
 /// Three shapes are accepted, checked in this order:
-/// 1. the `"theme:label"` sentinel — a theme lookup token, not a color, so it
-///    is matched *before* parsing (`parse_color("theme:label")` is an error).
-///    Matched exactly: it is an internal token emitted verbatim by ferrum's own
-///    desugars, never something a user types;
+/// 1. the `"theme:label"` and `"theme:font"` sentinels (axis-label ink and text
+///    ink) — theme lookup tokens, not colors, so they are matched *before*
+///    parsing (`parse_color("theme:font")` is an error). Matched exactly: they
+///    are internal tokens emitted verbatim by ferrum's own desugars and
+///    annotation helpers, never something a user types;
 /// 2. the literal `"none"` or `"transparent"` — an explicit paint clear,
 ///    resolved to [`color::TRANSPARENT`](super::color::TRANSPARENT) so the
 ///    clear travels as an ordinary color that no downstream fill fallback can
@@ -1494,6 +1496,9 @@ pub(crate) const CONTRAST_SENTINEL: &str = "theme:contrast";
 fn resolve_paint_color(value: &str, theme: &ThemeInputs) -> Result<Color, RenderError> {
     if value == "theme:label" {
         return Ok(theme.colors.label_color);
+    }
+    if value == "theme:font" {
+        return Ok(theme.colors.font_color);
     }
     if is_paint_clear_sentinel(value) {
         return Ok(super::color::TRANSPARENT);
@@ -1635,7 +1640,7 @@ fn set_style_fields(o: &MarkKwargsSpec) -> Result<Vec<&'static str>, RenderError
 /// and the call cannot refuse, since only the override block refuses.
 ///
 /// String color fields (stroke, fill) resolve through [`resolve_paint_color`]:
-/// full CSS vocabulary, the `"theme:label"` sentinel, and the two clearing
+/// full CSS vocabulary, the `"theme:label"` / `"theme:font"` sentinels, and the two clearing
 /// spellings `"none"`/`"transparent"` (spec §4.1) honored, and an unparseable
 /// value refused as [`RenderError::InvalidColor`]. The sole production caller
 /// is `scene_build::resolve_layer_styles`, which resolves every layer's style
@@ -3249,6 +3254,19 @@ mod tests {
         assert_eq!(stroke.red,   0x11, "sentinel stroke.red must be label_color.red");
         assert_eq!(stroke.green, 0x22, "sentinel stroke.green must be label_color.green");
         assert_eq!(stroke.blue,  0x33, "sentinel stroke.blue must be label_color.blue");
+    }
+
+    #[test]
+    fn resolve_mark_style_theme_font_sentinel_uses_font_color_and_is_a_user_color() {
+        let mut theme = ThemeInputs::default();
+        theme.colors.font_color = palette::Srgba::new(0x0a, 0x0b, 0x0c, 0xFF);
+        theme.colors.label_color = palette::Srgba::new(0x11, 0x22, 0x33, 0xFF);
+        assert!(crate::render::color::parse_color("theme:font").is_err());
+        let overrides = MarkKwargsSpec { stroke: Some("theme:font".into()), ..Default::default() };
+        let style = resolve_mark_style(Some(&overrides), &theme, &Mark::Rule).unwrap();
+        let stroke = style.paint.stroke.expect("stroke must be set by sentinel");
+        assert_eq!((stroke.red, stroke.green, stroke.blue), (0x0a, 0x0b, 0x0c));
+        assert_eq!(style.paint.stroke_source, PaintSource::UserColor);
     }
 
     #[test]

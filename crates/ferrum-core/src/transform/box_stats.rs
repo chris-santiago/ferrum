@@ -268,10 +268,10 @@ pub(crate) struct PyBoxStats(pub(crate) crate::transform::core::TransformSpec);
 #[pymethods]
 impl PyBoxStats {
     #[new]
-    #[pyo3(signature = (field, *, groupby = vec![], whisker_extent = WhiskerExtentArg::default(), name = None))]
+    #[pyo3(signature = (field, *, groupby = None, whisker_extent = WhiskerExtentArg::default(), name = None))]
     fn new(
         field: &str,
-        groupby: Vec<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         whisker_extent: WhiskerExtentArg,
         name: Option<String>,
     ) -> PyResult<Self> {
@@ -282,6 +282,7 @@ impl PyBoxStats {
         // transform enforces, in the shared words — still refused here, at the
         // earliest boundary that has the facts, and again inside the
         // partitioner for the wire path that has no constructor (GH #179).
+        let groupby = crate::transform::group_key::parse_groupby_pyany("BoxStats", groupby)?;
         crate::transform::group_key::refuse_repeated_groupby_names("BoxStats", &groupby)?;
         let we = whisker_extent.into_spec()?;
         Ok(Self(crate::transform::core::TransformSpec::BoxStats(

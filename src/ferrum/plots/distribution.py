@@ -304,7 +304,7 @@ def _kde_overlay(
         # name. This helper takes the unresolved `hue` because its color
         # ENCODING below wants the channel itself; `_displot_build` resolves
         # the same name once for its own consumers (see `hue_field` there).
-        kde_kwargs["groupby"] = _field_name(hue)
+        kde_kwargs["groupby"] = [_field_name(hue)]
     # count_scale may only be requested when the histogram's value axis is
     # measured IN COUNTS. That is the whole of this predicate's question --
     # its UNIT, not its baseline -- and the three clauses are the complete

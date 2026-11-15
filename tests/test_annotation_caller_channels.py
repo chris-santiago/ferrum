@@ -768,25 +768,25 @@ _NO_FLIP = {
 _FIGURE_FLIP_DIGESTS: dict[str, str] = {
     "arrow": "0c998162fe1d83b4f7035b4d4c52bfddbf7f41d7ea52f5f72ffb96a52e9068bd",
     "hline_category": "198fdaa45b2f8a6429be194c81b558f3591898903692c663fdb8fbc7bdaeb223",
-    "norm_and_pixel": "4c7c15764ccef1878cb64c9e5fb30a6679a17264fe8095198b02625fffcbc917",
+    "norm_and_pixel": "20fbd902d4c7c07013fb0a9327a11e1ab6c0bbef4491222d11c2db67c07e0d12",
     "rect": "d7c28e2fafd9ff27f4e9f09077a129173b1e6b18dbb30ff0321d0502dcd6ac0c",
     "span_x_numbers": "4283f6b201c2538d961c7b26f1fe405b19d329c08ae41a2fa6d4230581601d9b",
     "span_y_categories": "ab20bf8567da928552fab4ab3f558d63598bdd894387649ebda37c6439b75900",
-    "text_category_on_y": "d90482911483fa51c9796ead2bfffa55613cc7a3c849ddb87cbb8972945686b6",
-    "text_number": "ceabca3e9f22bc2d9c742dd239fa8e92921f3d8229388c348607e31c518f64b7",
+    "text_category_on_y": "94807e77cb1c2e0678af5367cbcc8c5c4f83ac3d94e8972d64ba0a9d1dd0946a",
+    "text_number": "4a2f9c589ee6933e78fe03fd2207dee2de910a992e790346bb66cfe8eab5f204",
     "vline_number": "dc169ea201550db0b8a0733171d0913754abef7581590f972db18beba3d5bf15",
 }
 _NO_FLIP_DIGESTS: dict[str, str] = {
     "abline": "0286023814c11f69c650289b57b0e0dd03466be3ab85be086d017fbf91a676c1",
-    "bracket": "37661c9ce428c2df4459ac16f23c0cb85fb9d96744a9b181feda601cf5385af6",
+    "bracket": "5bf0e565a6344966e8626b37bd04aaea5021b47c1d718a8f0f11a9e1a5a88aca",
     "callout": "e56cf2204ccac52a336f070bf27389fda7d25f6782ea80497bb997396d8f1f9f",
     "hline": "77c822a873c7174355083e8a1bb3a4e1479ddc58445b03ee5817af4650077b94",
-    "norm_and_pixel": "679f67cb220f47546a19962b0b5a1dd51a262e055756f02707798f206e15034c",
+    "norm_and_pixel": "2493602171140a14b6b4fa168c43f0839e4053fc2afc1ff6cd83353315e76bb2",
     "rect": "d2740fc78bb402b15483480745c9fc4fb2b8279c863d1a258d83b3d263779547",
     "span_x_numbers": "3e45faac8b9de0910b620c47729e6f8f10ff51166c331c143b6e8382bfcff6e1",
     "span_y_categories": "ab20bf8567da928552fab4ab3f558d63598bdd894387649ebda37c6439b75900",
-    "text_category": "d90482911483fa51c9796ead2bfffa55613cc7a3c849ddb87cbb8972945686b6",
-    "text_number": "9bb9c6c2042ee2df0a2526a04f819d4b39819b3e4af79f3785548e45f611bcfb",
+    "text_category": "94807e77cb1c2e0678af5367cbcc8c5c4f83ac3d94e8972d64ba0a9d1dd0946a",
+    "text_number": "73cd36c6f471887c2027d613f9f54cc1cf6832affa522733dd3cfbe5e516868a",
 }
 
 

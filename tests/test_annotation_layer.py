@@ -142,7 +142,7 @@ class TestAnnotationText:
         assert t.y == 2.0
         assert t.text == "label"
         assert t.font_size == 12
-        assert t.color == "#333"
+        assert t.color is None
         assert t.anchor == "start"
         assert t.baseline == "middle"
         assert t.angle == 0
@@ -184,7 +184,7 @@ class TestAnnotationArrow:
     def test_defaults(self):
         a = arrow(0, 0, 1, 1)
         assert isinstance(a, AnnotationArrow)
-        assert a.stroke == "#333"
+        assert a.stroke is None
         assert a.stroke_width == 1.5
         assert a.head_size == 8
 
@@ -273,7 +273,7 @@ class TestAnnotationLine:
     def test_defaults(self):
         ln = line(0, 0, 1, 1)
         assert isinstance(ln, AnnotationLine)
-        assert ln.stroke == "#333"
+        assert ln.stroke is None
         assert ln.stroke_width == 1
         assert ln.dash is None
 
@@ -355,7 +355,7 @@ class TestAnnotationBracket:
         assert isinstance(b, AnnotationBracket)
         assert b.label == "group"
         assert b.direction == "above"
-        assert b.stroke == "#333"
+        assert b.stroke is None
         assert b.tip_length == 6
 
     def test_frozen(self):

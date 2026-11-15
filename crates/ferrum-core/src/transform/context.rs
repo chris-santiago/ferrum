@@ -814,7 +814,7 @@ pub struct TransformContext {
     /// above falls back to a fixed default in that case; those fallbacks are
     /// unaffected by this field's production population.
     pub panel_pixel_size: Option<(u32, u32)>,
-    /// Named outputs produced by earlier transforms in the same `apply_transforms_named`
+    /// Named outputs produced by earlier transforms in the same `apply_transforms_reading`
     /// run. Used by Reorder(from='<name>') to access a sibling order column.
     pub named_outputs: HashMap<String, RecordBatch>,
     /// True when `batch` (the argument to `apply`/`apply_with_context`) is one
@@ -845,7 +845,7 @@ pub struct TransformContext {
     /// one dataframe per `compare=` model, sliced in Python before crossing
     /// the PyO3 boundary — and `prepare_render_inputs` is called exactly
     /// once per leaf with no further slicing (`grep` over the crate finds
-    /// no other `TransformContext` construction or `apply_transforms_named`
+    /// no other `TransformContext` construction or `apply_transforms_reading`
     /// call outside `run_transforms_with_facet` and the `apply()`
     /// fallbacks). `false` for a composite leaf is therefore the correct
     /// whole-frame-for-that-leaf answer, not an unaudited gap:
@@ -864,7 +864,7 @@ pub struct TransformContext {
     /// every row in it (`transform::project`'s doc).
     pub facet_fields: Vec<String>,
     /// The degrade-warning sink (GH #162). `Rc<RefCell<_>>`, not a bare
-    /// `RefCell<Vec<_>>`, because `apply_transforms_named` (`run.rs`) does
+    /// `RefCell<Vec<_>>`, because `apply_transforms_reading` (`run.rs`) does
     /// `let mut step_ctx = ctx.clone();` once per transform in the pipeline —
     /// a bare `RefCell` field would clone into a fresh, independent, and
     /// ultimately discarded sink for every step, silently dropping every
@@ -1413,7 +1413,7 @@ mod tests {
         );
     }
 
-    /// The keystone gotcha the design doc calls out: `apply_transforms_named`
+    /// The keystone gotcha the design doc calls out: `apply_transforms_reading`
     /// (`run.rs`) does `let mut step_ctx = ctx.clone();` once per transform.
     /// A push through the CLONE must still be visible through the ORIGINAL —
     /// proof that `Rc<RefCell<_>>` (not a bare `RefCell`) is load-bearing.

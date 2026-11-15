@@ -352,7 +352,7 @@ impl PySmooth {
         // inject_metrics is allowed on both Fitted and Residuals — see
         // SB-followup 2026-05-12 (3a rework). Top-right anchor semantics
         // are documented on SmoothSpec.inject_metrics.
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("Smooth", groupby)?;
         Ok(PySmooth(TransformSpec::Smooth(SmoothSpec {
             x: x.to_string(), y: y.to_string(),
             method, ci, bandwidth, degree: degree_for_spec, k, n, seed,

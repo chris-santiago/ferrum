@@ -12,6 +12,7 @@
 
 use super::*;
 use crate::render::scale_resolve::ScaleKind;
+use crate::spec::coord::CoordKind;
 use crate::scale::linear::LinearScale;
 // Batch H Task 1 fix: `PathCmd` is only referenced by test assertions
 // (production code now goes through `marks::arrowhead::arrowhead_path`,
@@ -136,6 +137,7 @@ fn resolve_data_coord_x() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     // Data value 50 should map to the center of the x pixel range.
     let px = ctx.resolve_x(&CoordValue::Data(50.0));
@@ -150,6 +152,7 @@ fn resolve_pixel_coord() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let px = ctx.resolve_x(&CoordValue::Pixel { px: 100.0 });
     assert!((px - 150.0).abs() < f64::EPSILON, "expected 150, got {px}");
@@ -163,6 +166,7 @@ fn resolve_norm_coord() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let px = ctx.resolve_x(&CoordValue::Norm { norm: 0.5 });
     assert!((px - 300.0).abs() < f64::EPSILON, "expected 300, got {px}");
@@ -176,13 +180,14 @@ fn build_text_annotation() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let specs = vec![AnnotationSpec::Text {
         x: CoordValue::Norm { norm: 0.5 },
         y: CoordValue::Norm { norm: 0.5 },
         text: "hello".to_string(),
         font_size: 14.0,
-        color: "#ff0000".to_string(),
+        color: Some("#ff0000".to_string()),
         anchor: "middle".to_string(),
         baseline: "middle".to_string(),
         angle: 0.0,
@@ -220,13 +225,14 @@ fn build_line_annotation() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let specs = vec![AnnotationSpec::Line {
         x1: CoordValue::Norm { norm: 0.0 },
         y1: CoordValue::Norm { norm: 0.5 },
         x2: CoordValue::Norm { norm: 1.0 },
         y2: CoordValue::Norm { norm: 0.5 },
-        stroke: "#000000".to_string(),
+        stroke: Some("#000000".to_string()),
         stroke_width: 2.0,
         dash: Some(vec![4.0, 2.0]),
     }];
@@ -261,6 +267,7 @@ fn build_arrow_annotation() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     // `curve` is no longer a field on AnnotationSpec::Arrow (dropped as dead code).
     let specs = vec![AnnotationSpec::Arrow {
@@ -268,7 +275,7 @@ fn build_arrow_annotation() {
         y: CoordValue::Norm { norm: 0.0 },
         x2: CoordValue::Norm { norm: 1.0 },
         y2: CoordValue::Norm { norm: 1.0 },
-        stroke: "#333333".to_string(),
+        stroke: Some("#333333".to_string()),
         stroke_width: 1.5,
         head_size: 8.0,
     }];
@@ -289,6 +296,7 @@ fn build_span_annotation() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let specs = vec![AnnotationSpec::Span {
         axis: "x".to_string(),
@@ -336,6 +344,7 @@ fn empty_specs_returns_empty_vecs() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let ann = build_annotations(&[], &ctx);
     assert!(ann.below_marks.is_empty());
@@ -357,6 +366,7 @@ fn text_z_routing_below_and_above() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
 
     let mk_text = |z: &str| AnnotationSpec::Text {
@@ -364,7 +374,7 @@ fn text_z_routing_below_and_above() {
         y: CoordValue::Norm { norm: 0.5 },
         text: z.to_string(),
         font_size: 12.0,
-        color: "#000000".to_string(),
+        color: Some("#000000".to_string()),
         anchor: "middle".to_string(),
         baseline: "middle".to_string(),
         angle: 0.0,
@@ -410,6 +420,7 @@ fn text_unknown_z_falls_to_above_marks() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
 
     let specs = vec![AnnotationSpec::Text {
@@ -417,7 +428,7 @@ fn text_unknown_z_falls_to_above_marks() {
         y: CoordValue::Norm { norm: 0.5 },
         text: "unknown".to_string(),
         font_size: 12.0,
-        color: "#000000".to_string(),
+        color: Some("#000000".to_string()),
         anchor: "middle".to_string(),
         baseline: "middle".to_string(),
         angle: 0.0,
@@ -443,6 +454,7 @@ fn non_text_specs_always_above_marks() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
 
     let specs = vec![
@@ -451,7 +463,7 @@ fn non_text_specs_always_above_marks() {
             y1: CoordValue::Norm { norm: 0.5 },
             x2: CoordValue::Norm { norm: 1.0 },
             y2: CoordValue::Norm { norm: 0.5 },
-            stroke: "#000000".to_string(),
+            stroke: Some("#000000".to_string()),
             stroke_width: 1.0,
             dash: None,
         },
@@ -460,7 +472,7 @@ fn non_text_specs_always_above_marks() {
             y: CoordValue::Norm { norm: 0.0 },
             x2: CoordValue::Norm { norm: 1.0 },
             y2: CoordValue::Norm { norm: 1.0 },
-            stroke: "#000000".to_string(),
+            stroke: Some("#000000".to_string()),
             stroke_width: 1.5,
             head_size: 0.0, // no arrowhead → 1 node only
         },
@@ -486,6 +498,7 @@ fn image_annotation_raw_node_has_data_anchor() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let specs = vec![AnnotationSpec::Image {
         x: CoordValue::Norm { norm: 0.5 },
@@ -541,6 +554,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let mut out = Vec::new();
     emit_span(
@@ -581,7 +595,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
 #[test]
 fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
     let mut out = Vec::new();
-    emit_arrow(100.0, 100.0, 100.001, 100.0, "#000000", 1.0, 8.0, &mut out);
+    emit_arrow(100.0, 100.0, 100.001, 100.0, resolve_color("#000000"), 1.0, 8.0, &mut out);
     assert_eq!(out.len(), 2, "expected shaft line + arrowhead path");
     let SceneNode::Path { commands, .. } = &out[1] else {
         panic!("expected arrowhead Path node");
@@ -609,7 +623,7 @@ fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
 fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
     let (x1, y1, x2, y2, head_size) = (10.0, 20.0, 130.0, 65.0, 8.0);
     let mut out = Vec::new();
-    emit_arrow(x1, y1, x2, y2, "#123456", 1.0, head_size, &mut out);
+    emit_arrow(x1, y1, x2, y2, resolve_color("#123456"), 1.0, head_size, &mut out);
     let SceneNode::Path { commands, .. } = &out[1] else {
         panic!("expected arrowhead Path node");
     };
@@ -636,7 +650,7 @@ fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
 fn emit_bracket_below_draws_like_down_and_above_like_up() {
     let drawn = |direction: &str| {
         let mut out = Vec::new();
-        emit_bracket(0.0, 100.0, 100.0, 100.0, "n", direction, "#000000", 6.0, &mut out);
+        emit_bracket(0.0, 100.0, 100.0, 100.0, "n", direction, resolve_color("#000000"), resolve_color("#111111"), 6.0, &mut out);
         format!("{out:?}")
     };
     assert_eq!(drawn("below"), drawn("down"));
@@ -656,7 +670,8 @@ fn emit_bracket_unknown_direction_defaults_to_up() {
         100.0,
         "",
         "up",
-        "#000000",
+        resolve_color("#000000"),
+        resolve_color("#000000"),
         6.0,
         &mut out_up,
     );
@@ -668,7 +683,8 @@ fn emit_bracket_unknown_direction_defaults_to_up() {
         100.0,
         "",
         "diagonal",
-        "#000000",
+        resolve_color("#000000"),
+        resolve_color("#000000"),
         6.0,
         &mut out_unknown,
     );
@@ -710,6 +726,7 @@ fn emit_callout_width_uses_char_count_not_byte_len() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let ascii = "resume"; // 6 chars, 6 bytes
     let unicode = "r\u{00e9}sum\u{00e9}"; // 6 chars, 8 bytes
@@ -753,6 +770,7 @@ fn emit_callout_arrow_none_suppresses_leader_line() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let count_lines = |arrow: &str| {
         let mut out = Vec::new();
@@ -798,7 +816,7 @@ fn kind_name_covers_every_shape() {
                 y: CoordValue::Data(2.0),
                 text: "t".into(),
                 font_size: 12.0,
-                color: "#000".into(),
+                color: Some("#000".into()),
                 anchor: "middle".into(),
                 baseline: "middle".into(),
                 angle: 0.0,
@@ -814,7 +832,7 @@ fn kind_name_covers_every_shape() {
                 y: CoordValue::Data(2.0),
                 x2: CoordValue::Data(3.0),
                 y2: CoordValue::Data(4.0),
-                stroke: "#000".into(),
+                stroke: Some("#000".into()),
                 stroke_width: 1.5,
                 head_size: 8.0,
             },
@@ -839,7 +857,7 @@ fn kind_name_covers_every_shape() {
                 y1: CoordValue::Data(2.0),
                 x2: CoordValue::Data(3.0),
                 y2: CoordValue::Data(4.0),
-                stroke: "#000".into(),
+                stroke: Some("#000".into()),
                 stroke_width: 1.5,
                 dash: None,
             },
@@ -865,7 +883,7 @@ fn kind_name_covers_every_shape() {
                 y2: CoordValue::Data(4.0),
                 label: "".into(),
                 direction: "up".into(),
-                stroke: "#000".into(),
+                stroke: Some("#000".into()),
                 tip_length: 6.0,
             },
             "bracket",
@@ -909,7 +927,7 @@ fn data_coords_on_axis_text() {
         y: CoordValue::Data(20.0),
         text: "t".into(),
         font_size: 12.0,
-        color: "#000".into(),
+        color: Some("#000".into()),
         anchor: "middle".into(),
         baseline: "middle".into(),
         angle: 0.0,
@@ -928,7 +946,7 @@ fn data_coords_on_axis_excludes_px_and_norm() {
         y: CoordValue::Norm { norm: 0.5 },
         text: "t".into(),
         font_size: 12.0,
-        color: "#000".into(),
+        color: Some("#000".into()),
         anchor: "middle".into(),
         baseline: "middle".into(),
         angle: 0.0,
@@ -947,7 +965,7 @@ fn data_coords_on_axis_arrow_both_endpoints() {
         y: CoordValue::Data(2.0),
         x2: CoordValue::Data(3.0),
         y2: CoordValue::Data(4.0),
-        stroke: "#000".into(),
+        stroke: Some("#000".into()),
         stroke_width: 1.5,
         head_size: 8.0,
     };
@@ -973,7 +991,7 @@ fn data_coords_on_axis_rect_line_bracket_share_shape() {
             y1: CoordValue::Data(2.0),
             x2: CoordValue::Data(3.0),
             y2: CoordValue::Data(4.0),
-            stroke: "#000".into(),
+            stroke: Some("#000".into()),
             stroke_width: 1.5,
             dash: None,
         },
@@ -984,7 +1002,7 @@ fn data_coords_on_axis_rect_line_bracket_share_shape() {
             y2: CoordValue::Data(4.0),
             label: "".into(),
             direction: "up".into(),
-            stroke: "#000".into(),
+            stroke: Some("#000".into()),
             tip_length: 6.0,
         },
     ];
@@ -1099,6 +1117,7 @@ fn resolve_x_data_coord_routes_through_break_when_present() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &breaks,
+        theme: &ThemeInputs::default(),
     };
     let broken_px = ctx.resolve_x(&CoordValue::Data(20.0));
     let expected = crate::render::break_axis::broken_scale_map(20.0, &result).unwrap();
@@ -1111,6 +1130,7 @@ fn resolve_x_data_coord_routes_through_break_when_present() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let unbroken_px = unbroken_ctx.resolve_x(&CoordValue::Data(20.0));
     assert!(
@@ -1170,12 +1190,14 @@ fn resolve_y_pixel_and_norm_coords_are_unaffected_by_a_break() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[remap],
+        theme: &ThemeInputs::default(),
     };
     let plain_ctx = ScaleContext {
         plot_area,
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     // Plot-area-relative coordinates are identical with or without an
     // active break on this axis — only `CoordValue::Data` routes through
@@ -1216,6 +1238,7 @@ fn resolve_y_out_of_domain_value_clamps_to_the_correct_side() {
         x_scale: &x_scale,
         y_scale: &y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
 
     // Domain is [0, 100]; both values are out of domain, so `to_pixel_f64`
@@ -1367,6 +1390,7 @@ impl BrokenPanel {
             x_scale: &self.x_scale,
             y_scale: &self.y_scale,
             breaks,
+            theme: &ThemeInputs::default(),
         };
         let mut warnings = Vec::new();
         let nodes = build_annotations_through_breaks(specs, &ctx, None, false, &mut warnings).unwrap();
@@ -1958,6 +1982,7 @@ fn no_breaks_routes_straight_to_the_plain_build() {
         x_scale: &panel.x_scale,
         y_scale: &panel.y_scale,
         breaks: &[],
+        theme: &ThemeInputs::default(),
     };
     let mut warnings = Vec::new();
     let routed = build_annotations_through_breaks(&specs, &ctx, None, false, &mut warnings).unwrap();
@@ -1984,7 +2009,7 @@ fn a_below_marks_text_untouched_by_the_break_still_routes_to_below_marks() {
         y: CoordValue::Data(100.0),
         text: "caption".to_string(),
         font_size: 12.0,
-        color: "#000000".to_string(),
+        color: Some("#000000".to_string()),
         anchor: "middle".to_string(),
         baseline: "middle".to_string(),
         angle: 0.0,
@@ -1997,6 +2022,7 @@ fn a_below_marks_text_untouched_by_the_break_still_routes_to_below_marks() {
         x_scale: &panel.x_scale,
         y_scale: &panel.y_scale,
         breaks: &[y],
+        theme: &ThemeInputs::default(),
     };
     let mut warnings = Vec::new();
     let nodes = build_annotations_through_breaks(&[text], &ctx, None, false, &mut warnings).unwrap();
@@ -2089,7 +2115,7 @@ mod categories {
             y,
             text: "t".to_string(),
             font_size: 12.0,
-            color: "#333333".to_string(),
+            color: Some("#333333".to_string()),
             anchor: "middle".to_string(),
             baseline: "middle".to_string(),
             angle: 0.0,
@@ -2103,9 +2129,9 @@ mod categories {
         specs: &[AnnotationSpec],
         x: &ScaleKind,
         y: &ScaleKind,
-        projected: Option<&'static str>,
+        projected: Option<&CoordKind>,
     ) -> (Result<AnnotationNodes, AnnotationRefusal>, Vec<RenderWarning>) {
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: x, y_scale: y, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: x, y_scale: y, breaks: &[], theme: &ThemeInputs::default() };
         let mut warnings = Vec::new();
         let built = build_annotations_through_breaks(specs, &ctx, projected, false, &mut warnings);
         (built, warnings)
@@ -2224,12 +2250,13 @@ mod categories {
     fn a_category_under_a_projected_coord_is_refused_before_the_axis_kind_is_read() {
         // A linear axis on both x and y: were the axis-kind check first, the
         // continuous-axis text would win here.
-        for coord in ["CoordPolar", "CoordGeo"] {
+        for (json, coord) in [(r#"{"kind": "polar"}"#, "CoordPolar"), (r#"{"kind": "geo"}"#, "CoordGeo")] {
+            let kind = coord_kind(json);
             for (x, y, axis) in [
                 (category("b"), CoordValue::Data(1.0), "x"),
                 (CoordValue::Data(1.0), category("b"), "y"),
             ] {
-                let (built, _) = run(&[text(x, y)], &linear(), &linear(), Some(coord));
+                let (built, _) = run(&[text(x, y)], &linear(), &linear(), Some(&kind));
                 assert_eq!(
                     built.unwrap_err().to_string(),
                     format!(
@@ -2245,7 +2272,7 @@ mod categories {
             &[text(CoordValue::Norm { norm: 0.5 }, CoordValue::Pixel { px: 40.0 })],
             &x,
             &linear(),
-            Some("CoordPolar"),
+            Some(&coord_kind(r#"{"kind": "polar"}"#)),
         );
         assert!(built.is_ok());
     }
@@ -2288,7 +2315,7 @@ mod categories {
             Err(AnnotationRefusal::CategoryOnContinuousAxis { axis: AlignAxis::X, .. })
         ));
         let x = band(&["a", "b"], [50.0, 450.0], 0.0);
-        let (built, _) = run(&[span("x", category("b"), CoordValue::Data(2.5))], &x, &linear(), Some("CoordPolar"));
+        let (built, _) = run(&[span("x", category("b"), CoordValue::Data(2.5))], &x, &linear(), Some(&coord_kind(r#"{"kind": "polar"}"#)));
         assert!(matches!(built, Err(AnnotationRefusal::CategoryUnderCoord { .. })));
     }
 
@@ -2361,22 +2388,34 @@ mod categories {
     }
 
     #[test]
-    fn a_projected_coord_name_covers_only_polar_and_geo() {
-        use crate::spec::coord::CoordKind;
-        let named = |json: &str| projected_coord_name(serde_json::from_str::<CoordKind>(json).ok().as_ref());
-        assert_eq!(named(r#"{"kind": "polar"}"#), Some("CoordPolar"));
-        assert_eq!(named(r#"{"kind": "geo"}"#), Some("CoordGeo"));
-        assert_eq!(named(r#"{"kind": "cartesian"}"#), None);
-        assert_eq!(named(r#"{"kind": "fixed"}"#), None);
-        assert_eq!(projected_coord_name(Some(&CoordKind::Flip)), None);
-        assert_eq!(projected_coord_name(None), None);
+    fn a_category_is_refused_only_under_a_projected_coord() {
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let spec = [text(category("b"), CoordValue::Data(1.0))];
+        for json in [r#"{"kind": "cartesian"}"#, r#"{"kind": "fixed"}"#, r#"{"kind": "flip"}"#] {
+            let (built, _) = run(&spec, &x, &linear(), Some(&coord_kind(json)));
+            assert!(built.is_ok(), "{json} must place a category");
+        }
+        let (built, _) = run(&spec, &x, &linear(), None);
+        assert!(built.is_ok());
+        for json in [r#"{"kind": "polar"}"#, r#"{"kind": "geo"}"#] {
+            let (built, _) = run(&spec, &x, &linear(), Some(&coord_kind(json)));
+            assert!(
+                matches!(built, Err(AnnotationRefusal::CategoryUnderCoord { .. })),
+                "{json} must refuse a category"
+            );
+        }
     }
+
+    fn coord_kind(json: &str) -> CoordKind {
+        serde_json::from_str(json).unwrap()
+    }
+
     fn run_flipped(
         specs: &[AnnotationSpec],
         x: &ScaleKind,
         y: &ScaleKind,
     ) -> (Result<AnnotationNodes, AnnotationRefusal>, Vec<RenderWarning>) {
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: x, y_scale: y, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: x, y_scale: y, breaks: &[], theme: &ThemeInputs::default() };
         let mut warnings = Vec::new();
         let built = build_annotations_through_breaks(specs, &ctx, None, true, &mut warnings);
         (built, warnings)
@@ -2399,7 +2438,7 @@ mod categories {
     #[test]
     fn a_flipped_text_places_the_callers_x_on_the_drawn_vertical_axis() {
         let (x, y) = unequal_axes();
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[], theme: &ThemeInputs::default() };
         let (built, _) = run_flipped(&[text(data(30.0), data(0.5))], &x, &y);
         let (px, py) = text_position(&built.unwrap());
         assert!((px - ctx.resolve_x(&data(0.5))).abs() < 1e-9, "x {px}");
@@ -2424,7 +2463,7 @@ mod categories {
         assert_eq!((*dx, *dy, anchor.as_str()), (7.0, -5.0, "end"));
         let (flipped, _) = run_flipped(&[spec], &x, &y);
         let (px, py) = text_position(&flipped.unwrap());
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[], theme: &ThemeInputs::default() };
         assert!((px - (ctx.resolve_x(&data(0.5)) + 7.0)).abs() < 1e-9);
         assert!((py - (ctx.resolve_y(&data(30.0)) - 5.0)).abs() < 1e-9);
     }
@@ -2450,7 +2489,7 @@ mod categories {
     #[test]
     fn a_flipped_numeric_span_runs_along_the_drawn_vertical_axis() {
         let (x, y) = unequal_axes();
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[], theme: &ThemeInputs::default() };
         let (built, _) = run_flipped(&[span("x", data(20.0), data(40.0))], &x, &y);
         let (rx, ry, rw, rh) = rect_extent_of(&built.unwrap());
         let (a, b) = (ctx.resolve_y(&data(20.0)), ctx.resolve_y(&data(40.0)));
@@ -2461,7 +2500,7 @@ mod categories {
     #[test]
     fn a_flipped_norm_and_pixel_measure_along_the_drawn_axis_their_field_lands_on() {
         let (x, y) = unequal_axes();
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[], theme: &ThemeInputs::default() };
         let (built, _) = run_flipped(&[text(CoordValue::Norm { norm: 0.1 }, data(0.5))], &x, &y);
         let (px, py) = text_position(&built.unwrap());
         assert!((py - (PLOT.y + 0.1 * PLOT.h)).abs() < 1e-9, "10% down from the top, got {py}");
@@ -2492,7 +2531,7 @@ mod categories {
             y: data(y),
             x2: data(x2),
             y2: data(y2),
-            stroke: "#000000".to_string(),
+            stroke: Some("#000000".to_string()),
             stroke_width: 1.0,
             head_size: 6.0,
         }
@@ -2517,7 +2556,7 @@ mod categories {
             y1: data(y1),
             x2: data(x2),
             y2: data(y2),
-            stroke: "#000000".to_string(),
+            stroke: Some("#000000".to_string()),
             stroke_width: 1.0,
             dash: None,
         }
@@ -2531,7 +2570,7 @@ mod categories {
             y2: data(y2),
             label: "b".to_string(),
             direction: direction.to_string(),
-            stroke: "#000000".to_string(),
+            stroke: Some("#000000".to_string()),
             tip_length: 4.0,
         }
     }
@@ -2617,7 +2656,7 @@ mod categories {
         let (x, y) = unequal_axes();
         let specs = [text(data(30.0), data(0.5)), span("x", data(0.2), data(0.6))];
         let (a, _) = run(&specs, &x, &y, None);
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[], theme: &ThemeInputs::default() };
         assert_eq!(shown(&a.unwrap()), shown(&build_annotations(&specs, &ctx)));
     }
 
@@ -2649,12 +2688,12 @@ mod categories {
     #[test]
     fn a_flipped_projected_refusal_names_the_callers_axis_letter() {
         let ctx_x = linear();
-        let ctx = ScaleContext { plot_area: PLOT, x_scale: &ctx_x, y_scale: &ctx_x, breaks: &[] };
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &ctx_x, y_scale: &ctx_x, breaks: &[], theme: &ThemeInputs::default() };
         let mut warnings = Vec::new();
         let built = build_annotations_through_breaks(
             &[text(category("b"), data(1.0))],
             &ctx,
-            Some("CoordPolar"),
+            Some(&coord_kind(r#"{"kind": "polar"}"#)),
             true,
             &mut warnings,
         );
@@ -2673,5 +2712,134 @@ mod categories {
             shown,
             ["annotation category 'zz' not found in x-axis domain ['a', 'b']; placing at plot center"]
         );
+    }
+}
+
+// ── Unset colour is the theme's text colour ─────────────────────────────────
+
+mod theme_ink {
+    use super::*;
+
+    const FONT: (u8, u8, u8) = (0x0a, 0x0b, 0x0c);
+
+    fn themed() -> ThemeInputs {
+        let mut theme = ThemeInputs::default();
+        theme.colors.font_color = palette::Srgba::new(FONT.0, FONT.1, FONT.2, 0xFF);
+        theme
+    }
+
+    fn build(json: &str, theme: &ThemeInputs) -> AnnotationNodes {
+        let (x_scale, y_scale, plot_area) = test_ctx();
+        let ctx = ScaleContext { plot_area, x_scale: &x_scale, y_scale: &y_scale, breaks: &[], theme };
+        build_annotations(&[spec(json)], &ctx)
+    }
+
+    /// `json` with one more `"key":value` member appended to its outer object.
+    fn extended(json: &str, member: &str) -> String {
+        let body = json.strip_suffix('}').expect("an object");
+        format!("{body},{member}}}")
+    }
+
+    /// Every stroke or text colour the nodes carry, in order.
+    fn inks(nodes: &[SceneNode]) -> Vec<(u8, u8, u8)> {
+        let rgb = |c: &Option<Color>| {
+            let c = c.expect("every annotation node is coloured");
+            (c.r, c.g, c.b)
+        };
+        nodes
+            .iter()
+            .filter_map(|n| match n {
+                SceneNode::Line { style, .. } => Some(rgb(&style.color)),
+                SceneNode::Text { style, .. } => Some(rgb(&style.color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    const TEXT: &str = r#"{"type":"text","x":{"px":10},"y":{"px":10},"text":"t"}"#;
+    const LINE: &str = r#"{"type":"line","x1":{"px":0},"y1":{"px":0},"x2":{"px":9},"y2":{"px":9}}"#;
+    const ARROW: &str = r#"{"type":"arrow","x":{"px":0},"y":{"px":0},"x2":{"px":90},"y2":{"px":9}}"#;
+    const BRACKET: &str =
+        r#"{"type":"bracket","x1":{"px":0},"y1":{"px":50},"x2":{"px":90},"y2":{"px":50},"label":"n"}"#;
+    const SPAN: &str = r#"{"type":"span","axis":"x","start":10.0,"end":20.0,"label":"s"}"#;
+
+    #[test]
+    fn an_absent_colour_deserializes_to_none_for_every_primitive() {
+        for json in [TEXT, LINE, ARROW, BRACKET] {
+            match spec(json) {
+                AnnotationSpec::Text { color, .. } => assert_eq!(color, None),
+                AnnotationSpec::Line { stroke, .. }
+                | AnnotationSpec::Arrow { stroke, .. }
+                | AnnotationSpec::Bracket { stroke, .. } => assert_eq!(stroke, None),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_unset_colour_draws_the_theme_text_colour_on_every_primitive() {
+        for json in [TEXT, LINE, ARROW, BRACKET, SPAN] {
+            let nodes = build(json, &themed());
+            let drawn = inks(&nodes.above_marks);
+            assert!(!drawn.is_empty(), "{json} drew nothing coloured");
+            assert!(drawn.iter().all(|c| *c == FONT), "{json} drew {drawn:?}, not the theme font colour");
+        }
+    }
+
+    #[test]
+    fn an_unset_colour_follows_the_theme_it_is_drawn_under() {
+        let mut dark = ThemeInputs::default();
+        dark.colors.font_color = palette::Srgba::new(0xe6, 0xe6, 0xe6, 0xFF);
+        let light = inks(&build(LINE, &ThemeInputs::default()).above_marks);
+        let on_dark = inks(&build(LINE, &dark).above_marks);
+        assert_eq!(light, vec![(0x1f, 0x29, 0x37)]);
+        assert_eq!(on_dark, vec![(0xe6, 0xe6, 0xe6)]);
+    }
+
+    #[test]
+    fn an_explicit_colour_wins_over_the_theme() {
+        let with = |json: &str, key: &str| extended(json, &format!(r##""{key}":"#ff0000""##));
+        let text = build(&with(TEXT, "color"), &themed());
+        assert_eq!(inks(&text.above_marks), vec![(255, 0, 0)]);
+        for json in [LINE, ARROW] {
+            let nodes = build(&with(json, "stroke"), &themed());
+            assert!(inks(&nodes.above_marks).iter().all(|c| *c == (255, 0, 0)), "{json}");
+        }
+    }
+
+    #[test]
+    fn a_bracket_label_is_theme_ink_even_with_an_explicit_stroke() {
+        let json = extended(BRACKET, r##""stroke":"#ff0000""##);
+        let drawn = inks(&build(&json, &themed()).above_marks);
+        // Baseline and two tips in the stroke, then the label.
+        assert_eq!(drawn, vec![(255, 0, 0), (255, 0, 0), (255, 0, 0), FONT]);
+    }
+
+    #[test]
+    fn a_below_marks_text_is_theme_ink_in_the_below_marks_slot() {
+        let json = extended(TEXT, r#""z":"below_marks""#);
+        let nodes = build(&json, &themed());
+        assert!(nodes.above_marks.is_empty());
+        assert_eq!(inks(&nodes.below_marks), vec![FONT]);
+    }
+
+    #[test]
+    fn a_callout_keeps_its_own_text_colour() {
+        let json = r#"{"type":"callout","x":{"px":10},"y":{"px":10},"text":"c"}"#;
+        let drawn = inks(&build(json, &themed()).above_marks);
+        assert!(!drawn.is_empty());
+        assert!(drawn.iter().all(|c| *c != FONT), "a callout bubble keeps its fixed ink: {drawn:?}");
+    }
+
+    #[test]
+    fn a_clipped_span_label_and_cut_pieces_are_theme_ink() {
+        let panel = broken_panel(&[[400.0, 600.0]]);
+        let y = panel.remap(AlignAxis::Y);
+        let span = spec(r#"{"type":"span","axis":"y","start":0.0,"end":1000.0,"label":"band"}"#);
+        let line = spec(r#"{"type":"line","x1":{"norm":0.0},"y1":0.0,"x2":{"norm":1.0},"y2":1000.0}"#);
+        let (nodes, _) = panel.build(&[span, line], &[y]);
+        let drawn = inks(&nodes);
+        assert!(drawn.len() >= 2, "a label and at least one line piece: {drawn:?}");
+        assert!(drawn.iter().all(|c| *c == (0x1f, 0x29, 0x37)), "{drawn:?}");
     }
 }

@@ -29,6 +29,7 @@ from ferrum._registry import (
 from ferrum._usable import usable_values
 from ferrum._validate import validate_choice
 from ferrum.marks._desugar_helpers import (
+    mark_groupby,
     nominal_color_channel,
     resolve_color_groupby,
     titled_positional_channel,
@@ -159,7 +160,7 @@ def desugar_contour(
     # Kde2D is UNNAMED so it advances the chain (current → Kde2D output);
     # Contour then runs on the chained Kde2D output. Contour is named so the
     # downstream layer can route through data_source="contour".
-    own_groups = [groupby] if isinstance(groupby, str) else list(groupby or [])
+    own_groups = [] if groupby is None else mark_groupby(groupby, where="mark_contour")
     groups = with_grouping(own_groups, grouping)
     kde_kwargs: dict = dict(x=x_field, y=y_field, bandwidth=bandwidth, n=128)
     if groups:

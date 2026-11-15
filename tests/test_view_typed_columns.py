@@ -786,6 +786,20 @@ def _warnings_of(builder: str, route: str) -> list[tuple[str, str]]:
     return ast.literal_eval(proc.stdout.strip().splitlines()[-1])
 
 
+@pytest.mark.parametrize("route", ["static", "interactive"])
+def test_the_view_storage_warning_names_the_users_frame(route):
+    """The warning is attributed to the caller's file, not to a frame inside ferrum."""
+    script = _WARNING_RUNNER.format(
+        builder=textwrap.dedent(_EXTENSION_BUILDERS["view_storage"]).strip(), route=route
+    ).replace("(w.category.__name__, str(w.message))", "(w.category.__name__, w.filename)")
+    proc = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=300
+    )
+    assert proc.returncode == 0, proc.stderr[-800:]
+    caught = ast.literal_eval(proc.stdout.strip().splitlines()[-1])
+    assert caught and {filename for _category, filename in caught} == {"<string>"}
+
+
 @pytest.mark.parametrize(
     ("route", "renders"),
     [("static", 1), ("interactive", 2)],

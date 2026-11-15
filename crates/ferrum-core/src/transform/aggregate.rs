@@ -575,14 +575,14 @@ impl PyAggregate {
     #[pyo3(signature = (ops, *, groupby = None, name = None))]
     fn new(
         ops: &Bound<'_, PyAny>,
-        groupby: Option<Vec<String>>,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         let parsed_ops = extract_aggregate_ops("Aggregate: ops", ops)?;
         if parsed_ops.is_empty() {
             return Err(PyValueError::new_err("Aggregate: ops must be non-empty"));
         }
-        let gb = groupby.unwrap_or_default();
+        let gb = crate::transform::group_key::parse_groupby_pyany("Aggregate", groupby)?;
         // The duplicate-groupby refusal (spec §6) is the shared rule every
         // grouped transform enforces, in the shared words — still refused here,
         // at the earliest boundary that has the facts, and again inside the

@@ -512,7 +512,7 @@ class Bin:
         nice: bool = True,
         cumulative: bool = False,
         shared_extent: bool = False,
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         agg_field: Optional[str] = None,
         agg: Optional[str] = None,
         per_row: bool = False,
@@ -539,7 +539,7 @@ class BoxStats:
         self,
         field: str,
         *,
-        groupby: List[str] = ...,
+        groupby: Optional[List[str]] = None,
         whisker_extent: Union[str, float] = 1.5,
         name: Optional[str] = None,
     ) -> None: ...
@@ -556,7 +556,7 @@ class Kde:
         cumulative: bool = False,
         shared_extent: bool = False,
         kernel: str = "gaussian",
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         count_scale: Optional[Union[str, int, float]] = None,
         name: Optional[str] = None,
     ) -> None: ...
@@ -570,7 +570,7 @@ class Kde2D:
         bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         n: int = 128,
         extent: Optional[Tuple[float, float, float, float]] = None,
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -602,7 +602,7 @@ class Smooth:
         output: str = "fitted",
         inject_zero_ref: bool = False,
         inject_metrics: bool = False,
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
         x_range: Optional[Tuple[float, float]] = None,
         x_range_pad: Optional[float] = None,
@@ -647,7 +647,7 @@ class Outliers:
         self,
         field: str,
         *,
-        groupby: List[str] = ...,
+        groupby: Optional[List[str]] = None,
         extent: float = 1.5,
         name: Optional[str] = None,
     ) -> None: ...
@@ -658,7 +658,7 @@ class ErrorExtent:
         field: str,
         *,
         method: str = "ci",
-        groupby: List[str] = ...,
+        groupby: Optional[List[str]] = None,
         seed: int = 0,
         n_boot: int = 1000,
         name: Optional[str] = None,
@@ -669,7 +669,7 @@ class Violin:
         self,
         field: str,
         *,
-        groupby: List[str] = ...,
+        groupby: Optional[List[str]] = None,
         bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         bw_adjust: float = 1.0,
         n: int = 256,
@@ -688,7 +688,7 @@ class QQ:
         dequantize: bool = False,
         emit_line: bool = True,
         seed: int = 0,
-        groupby: List[str] = ...,
+        groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -773,7 +773,7 @@ class LetterValue:
         value: str,
         *,
         group: Optional[str] = None,
-        groupby: List[str] = ...,
+        groupby: Optional[List[str]] = None,
         k_depth: str = "proportion",
         k_proportion: float = 0.007,
         outlier_threshold: float = 0.0,
@@ -791,7 +791,7 @@ class Logistic:
         ci: Optional[float] = None,
         max_iter: int = 25,
         tol: float = 1e-8,
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -807,7 +807,7 @@ class Glm:
         ci: Optional[float] = None,
         max_iter: int = 25,
         tol: float = 1e-8,
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -825,7 +825,7 @@ class Robust:
         output: str = "fitted",
         inject_zero_ref: bool = False,
         inject_metrics: bool = False,
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
         x_range: Optional[Tuple[float, float]] = None,
         x_range_pad: Optional[float] = None,
@@ -947,7 +947,7 @@ class TopK:
         *,
         op: str = "sum",
         sort: str = "descending",
-        groupby: Optional[Union[str, List[str]]] = None,
+        groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

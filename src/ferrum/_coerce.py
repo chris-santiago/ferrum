@@ -40,6 +40,8 @@ exactly once, by one function.
 
 from __future__ import annotations
 
+import os
+import sys
 import warnings
 from typing import Any
 
@@ -432,6 +434,22 @@ def _dropped_extension_names(t: "pyarrow.DataType", pa: object) -> list[str]:
     return names
 
 
+def _user_stacklevel() -> int:
+    """The ``stacklevel`` that names the first caller frame outside the ``ferrum`` package.
+
+    This module imports nothing from ``ferrum`` (the leaf invariant), so it cannot use
+    ``ferrum._warn.user_stacklevel``; this is the same walk, for a warning raised in the
+    function that calls it.
+    """
+    package_dir = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    frame = sys._getframe(1)
+    level = 1
+    while frame is not None and frame.f_code.co_filename.startswith(package_dir):
+        frame = frame.f_back
+        level += 1
+    return level
+
+
 def _rewrite_view_columns(tbl: "pyarrow.Table", pa: object) -> "pyarrow.Table":
     """Rewrite every column whose type tree holds a view type to its plain twin.
 
@@ -451,7 +469,7 @@ def _rewrite_view_columns(tbl: "pyarrow.Table", pa: object) -> "pyarrow.Table":
                     f"Extension type {name!r} holds a view type; loading as its plain "
                     f"storage type.",
                     UserWarning,
-                    stacklevel=2,
+                    stacklevel=_user_stacklevel(),
                 )
         except _CannotCast as e:
             raise TypeError(

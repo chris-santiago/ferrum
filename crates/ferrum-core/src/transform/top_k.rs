@@ -411,7 +411,7 @@ impl PyTopK {
         // Normalized through the same boundary helper as PyBin/PyKde/PyKde2d/
         // PySmooth so `str | list[str] | None` is accepted uniformly across
         // the transform family (quality-review finding, cycle 2).
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("TopK", groupby)?;
         let groupby = (!groupby.is_empty()).then_some(groupby);
         Ok(PyTopK(TransformSpec::TopK(TopKSpec {
             n,

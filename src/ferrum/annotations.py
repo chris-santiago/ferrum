@@ -18,7 +18,7 @@ from ferrum.annotation.coords import (
     _coerce_coord_to_numeric,
 )
 from ferrum.chart import Chart
-from ferrum.marks.base import _normalize_stroke_dash
+from ferrum.marks.base import THEME_FONT_PAINT, _normalize_stroke_dash
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
 from ferrum._validate import validate_choice
 
@@ -39,15 +39,16 @@ _DEFAULT_ARROW_HEAD_SIZE = 8.0
 class _LineStyle:
     """A single capture of line style feeding both the mark and the primitive.
 
-    ``mark_kwargs`` carries only the style the user explicitly supplied (so the
-    mark falls back to its own defaults when omitted, exactly as before).
-    ``stroke`` / ``dash`` carry the same style with the primitive's documented
-    defaults applied.  Deriving both from one capture keeps the mark-Chart and
-    the annotation primitive from drifting.
+    ``mark_kwargs`` carries the style for the mark: the stroke the caller gave,
+    or the theme text colour token when none was given, and the dash only when
+    supplied. ``stroke`` / ``dash`` carry the primitive's fields: ``stroke`` is
+    ``None`` when the caller gave none (the renderer then draws the theme text
+    colour). Deriving both from one capture keeps the mark-Chart and the
+    annotation primitive from drifting.
     """
 
     mark_kwargs: dict
-    stroke: str
+    stroke: Optional[str]
     dash: Optional[list]
 
 
@@ -64,17 +65,17 @@ def _capture_line_style(*, stroke: Optional[str], stroke_dash, context: str) -> 
     string) is traceable to that call rather than to the internal
     ``mark_rule`` construction it used to surface from.
 
-    The mark receives ``stroke``/``stroke_dash`` only when supplied; the
-    primitive receives the defaulted ``stroke`` (``"#333"``) and the
-    normalized ``stroke_dash`` as its ``dash``.
+    With no ``stroke`` the mark takes :data:`~ferrum.marks.base.THEME_FONT_PAINT`
+    and the primitive takes ``None``; both resolve to the theme's text colour at
+    render time, so every route draws the same ink. The mark receives
+    ``stroke_dash`` only when supplied; the primitive receives the normalized
+    value as its ``dash``.
     """
     dash = _normalize_stroke_dash(stroke_dash, context=f"{context}: stroke_dash")
-    mark_kwargs: dict = {}
-    if stroke is not None:
-        mark_kwargs["stroke"] = stroke
+    mark_kwargs: dict = {"stroke": stroke if stroke is not None else THEME_FONT_PAINT}
     if dash is not None:
         mark_kwargs["stroke_dash"] = dash
-    return _LineStyle(mark_kwargs=mark_kwargs, stroke=stroke or "#333", dash=dash)
+    return _LineStyle(mark_kwargs=mark_kwargs, stroke=stroke, dash=dash)
 
 
 def _attach_annotation_primitive(chart: Chart, primitive: object) -> Chart:
@@ -161,8 +162,8 @@ def annotate_hline(
         (``.to_svg()``) and when layered with ``+`` onto another chart.
         When omitted, no text is rendered.
     stroke : str, optional
-        Line color as a CSS color string. Defaults to the mark default when
-        omitted.
+        Line color as a CSS color string. Defaults to the theme's text colour
+        (``font_color``) on every route; an explicit colour always wins.
     stroke_dash : list of float, comma-separated str, or named linetype, optional
         SVG dash array, e.g. ``[4, 4]`` for evenly dashed. Also accepts a
         comma-separated numeric string (``"4,4"``) or a named linetype
@@ -191,9 +192,8 @@ def annotate_hline(
     y_coord = _coerce_coord(y)
     y_num = _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_y": [y_num]})
-    # Single style capture: collect only the explicitly-supplied style once,
-    # then derive the mark kwargs (only-if-supplied) and the primitive fields
-    # (defaulted) from it so the two representations cannot drift.
+    # Single style capture: read the caller's style once, then derive the mark
+    # kwargs and the primitive fields from it so the two cannot drift.
     style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash, context="annotate_hline")
     chart = Chart(df).mark_rule(**style.mark_kwargs).encode(y="_y")
     # Attach annotation primitive: horizontal line spanning the full x-axis
@@ -245,7 +245,8 @@ def annotate_vline(
         Renders both standalone (``.to_svg()``) and when layered with ``+``
         onto another chart.  When omitted, no text is rendered.
     stroke : str, optional
-        Line color as a CSS color string.
+        Line color as a CSS color string. Defaults to the theme's text colour
+        (``font_color``) on every route; an explicit colour always wins.
     stroke_dash : list of float, comma-separated str, or named linetype, optional
         SVG dash array, e.g. ``[4, 4]``. Also accepts a comma-separated
         numeric string (``"4,4"``) or a named linetype (``"solid"``,
@@ -477,7 +478,8 @@ def annotate_text(
     font_size : float, optional
         Font size in points.
     color : str, optional
-        Text fill color as a CSS color string.
+        Text fill color as a CSS color string. Defaults to the theme's text
+        colour (``font_color``) on every route; an explicit colour wins.
     angle : float, optional
         Rotation angle in degrees (clockwise).
 
@@ -513,7 +515,7 @@ def annotate_text(
         y=y_coord,
         text=text,
         font_size=font_size or 12,
-        color=color or "#333",
+        color=color,
         anchor=prim_anchor,
         baseline=baseline,
         angle=angle or 0,
@@ -528,7 +530,7 @@ def annotate_abline(
     slope: float,
     intercept: float,
     *,
-    stroke: str = "black",
+    stroke: Optional[str] = None,
     stroke_width: float = 1.0,
     stroke_dash: "list[float] | None" = None,
     opacity: float = 1.0,
@@ -547,8 +549,9 @@ def annotate_abline(
         Line slope (rise over run).
     intercept : float
         Y-intercept (value of y when x = 0).
-    stroke : str, default "black"
-        Line color as a CSS color string.
+    stroke : str, optional
+        Line color as a CSS color string. Defaults to the theme's text colour
+        (``font_color``) on every route; an explicit colour always wins.
     stroke_width : float, default 1.0
         Line width in pixels.
     stroke_dash : list of float, comma-separated str, or named linetype, optional
@@ -584,16 +587,10 @@ def annotate_abline(
     )
     # stroke_dash routes through the same _capture_line_style normalization
     # as annotate_hline/annotate_vline (#124) -- unlike those two, abline
-    # always sets stroke/stroke_width/opacity on the mark unconditionally
-    # (it has no "let the mark use its own default" behavior), so it reads
-    # style.stroke/style.dash directly rather than style.mark_kwargs' own
-    # only-if-supplied dict shape (style.stroke never falls back to that
-    # dict's "#333" default here either: *stroke* is always a non-empty str,
-    # never None, since its parameter default is "black").
+    # always sets stroke_width and opacity on the mark on top of the captured
+    # stroke and dash.
     style = _capture_line_style(stroke=stroke, stroke_dash=stroke_dash, context="annotate_abline")
-    mark_kwargs: dict = {"stroke": style.stroke, "stroke_width": stroke_width, "opacity": opacity}
-    if style.dash is not None:
-        mark_kwargs["stroke_dash"] = style.dash
+    mark_kwargs: dict = {**style.mark_kwargs, "stroke_width": stroke_width, "opacity": opacity}
     chart = Chart(df).mark_line(**mark_kwargs).encode(x="__abline_x:Q", y="__abline_y:Q")
     # Attach annotation primitive: line from extreme data coords (clipped by renderer)
     prim = AnnotationLine(
@@ -645,9 +642,8 @@ def annotate_arrow(
         the text at ``(x1, y1)``; ``"end"`` places it at ``(x2, y2)``.
     stroke : str, optional
         Hex colour string for the arrow line (e.g. ``"#ff0000"``). When omitted,
-        an unlabelled arrow with numeric or date ends takes the theme's
-        foreground colour; a labelled arrow, or one with a category,
-        ``fm.NormCoord`` or ``fm.PixelCoord`` end, draws ``"#333"``.
+        the arrow (shaft, head and label) draws the theme's text colour
+        (``font_color``) on every route, whatever the type of its coordinates.
 
     Returns
     -------
@@ -678,9 +674,11 @@ def annotate_arrow(
     x2_num = _coerce_coord_to_numeric(x2_coord)
     y2_num = _coerce_coord_to_numeric(y2_coord)
     df = pl.DataFrame({"_x1": [x1_num], "_y1": [y1_num], "_x2": [x2_num], "_y2": [y2_num]})
-    seg_kwargs: dict = {"arrow": True, "arrow_size": _DEFAULT_ARROW_HEAD_SIZE}
-    if stroke is not None:
-        seg_kwargs["stroke"] = stroke
+    seg_kwargs: dict = {
+        "arrow": True,
+        "arrow_size": _DEFAULT_ARROW_HEAD_SIZE,
+        "stroke": stroke if stroke is not None else THEME_FONT_PAINT,
+    }
     arrow_chart = (
         Chart(df)
         .mark_segment(**seg_kwargs)
@@ -696,12 +694,13 @@ def annotate_arrow(
         for c in (x1_coord, y1_coord, x2_coord, y2_coord)
     ):
         # All-numeric (data or temporal) ends: no annotation primitive attached, so an
-        # unlabelled `+` overlay merges the `mark_segment` layer directly. `AnnotationArrow`
-        # hardcodes a stroke default ("#333") the way `AnnotationLine` does for hline/vline,
-        # whereas the mark falls back to the chart's *themed* stroke color when `stroke` is
-        # omitted, so this case stays on the mark-merge path. A category, pixel or norm end
-        # has no data value for the mark layer (it would be a zero placeholder), so those
-        # take the primitive route below, which carries the real coordinates.
+        # unlabelled `+` overlay merges the `mark_segment` layer directly. That merge is
+        # what makes the arrow's ends widen the chart's domains (spec 3.11), which the
+        # primitive does not do. Colour does not depend on this route: the mark carries the
+        # theme text colour token, the primitive carries no colour, and both draw `font_color`.
+        # A category, pixel or norm end has no data value for the mark layer (it would be a
+        # zero placeholder), so those take the primitive route below, which carries the real
+        # coordinates.
         return arrow_chart
     lx: CoordValue = x1_coord if label_side == "start" else x2_coord
     ly: CoordValue = y1_coord if label_side == "start" else y2_coord
@@ -712,7 +711,7 @@ def annotate_arrow(
         y=y1_coord,
         x2=x2_coord,
         y2=y2_coord,
-        stroke=stroke or "#333",
+        stroke=stroke,
         stroke_width=1.5,
         head_size=_DEFAULT_ARROW_HEAD_SIZE,
     )

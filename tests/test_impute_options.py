@@ -1544,8 +1544,6 @@ _UNORDERED_DOORS: dict[str, Callable[[Any], Any]] = {
     [
         (lambda: {"a", "b", "c"}, _set_text),
         (lambda: frozenset({"a", "b", "c"}), _set_text),
-        (lambda: {"a": 1, "b": 2}.keys(), _set_text),
-        (lambda: {"a": 1, "b": 2}.items(), _set_text),
         (lambda: _SetSubclass("a", "b"), _set_text),
         (lambda: MappingProxyType({"start": 0, "stop": 3}), _mapping_text),
         (lambda: b"abc", _bytes_text),
@@ -1555,8 +1553,6 @@ _UNORDERED_DOORS: dict[str, Callable[[Any], Any]] = {
     ids=[
         "set",
         "frozenset",
-        "dict keys",
-        "dict items",
         "abc Set subclass",
         "mappingproxy",
         "bytes",
@@ -1584,10 +1580,39 @@ def test_a_dict_keyvals_is_the_sequence_form_on_every_door(door: str, form: dict
 
 
 @pytest.mark.parametrize("door", list(_UNORDERED_DOORS))
-def test_dict_values_is_accepted_and_read_in_insertion_order(door: str):
-    result = _UNORDERED_DOORS[door]({"z": 2, "a": 0, "m": 1}.values())
-    wire = result["keyvals"] if door == "transform_impute" else result._kwargs["impute"]["keyvals"]
-    assert wire == [2, 0, 1]
+@pytest.mark.parametrize(
+    ("view", "expected"),
+    [
+        (lambda d: d.keys(), ["z", "a", "m"]),
+        (lambda d: d.values(), [2, 0, 1]),
+    ],
+    ids=["keys", "values"],
+)
+def test_a_dict_view_is_read_in_insertion_order_like_a_list(
+    door: str, view: Callable[[dict], Any], expected: list
+):
+    keyvals = view({"z": 2, "a": 0, "m": 1})
+    listed = _UNORDERED_DOORS[door](expected)
+    result = _UNORDERED_DOORS[door](keyvals)
+    read = (
+        (lambda r: r["keyvals"])
+        if door == "transform_impute"
+        else (lambda r: r._kwargs["impute"]["keyvals"])
+    )
+    assert read(result) == read(listed)
+
+
+@pytest.mark.parametrize("door", list(_UNORDERED_DOORS))
+def test_a_dict_items_view_is_read_like_the_list_of_pairs(door: str):
+    """``items()`` is ordered, so it is read as ``list(items)`` is: its pairs are not key
+    values, and both spellings are refused for that reason, not for having no order."""
+    source = {"z": 2, "a": 0}
+    with pytest.raises(ValueError) as from_list:
+        _UNORDERED_DOORS[door](list(source.items()))
+    with pytest.raises(ValueError) as from_view:
+        _UNORDERED_DOORS[door](source.items())
+    assert str(from_view.value) == str(from_list.value)
+    assert "has no order" not in str(from_view.value)
 
 
 @pytest.mark.parametrize("door", list(_UNORDERED_DOORS))

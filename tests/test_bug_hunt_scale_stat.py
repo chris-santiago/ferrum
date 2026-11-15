@@ -1842,7 +1842,7 @@ def test_smooth_spec_round_trip_all_methods():
 
 def test_bin_spec_round_trip_with_groupby():
     """Bin spec with groupby should survive JSON round-trip."""
-    spec = Bin("x", bin_count=5, groupby="g")
+    spec = Bin("x", bin_count=5, groupby=["g"])
     cs = ChartSpec(mark="bar", x="x", transforms=[spec])
     rt = ChartSpec.from_json(cs.to_json())
     assert rt == cs

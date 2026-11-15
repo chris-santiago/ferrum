@@ -37,7 +37,7 @@ use crate::transform::core::{spec_name, SpaceColumn, SpaceSlot, TransformSpec};
 use crate::transform::swarm::SwarmSpec;
 
 /// Sentinel key under which the final pipeline output is always published in
-/// the map returned by [`apply_transforms_named`]. Layers with `data_source: None`
+/// the map returned by [`apply_transforms_reading`]. Layers with `data_source: None`
 /// resolve to this key.
 pub(crate) const FINAL_OUTPUT_KEY: &str = "__final__";
 
@@ -140,7 +140,7 @@ pub(crate) struct PassedStep {
     pub(crate) pools_null_keys: bool,
 }
 
-/// What a run records beside one published batch ([`apply_transforms_named`]).
+/// What a run records beside one published batch ([`apply_transforms_reading`]).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OutputLineage {
     /// The `Swarm` whose rows the batch still is: a step after it keeps it,
@@ -267,7 +267,7 @@ impl OutputLineage {
 pub(crate) type OutputLineages = HashMap<String, OutputLineage>;
 
 /// The batch every transform output key publishes, and each key's lineage
-/// ([`apply_transforms_named`]).
+/// ([`apply_transforms_reading`]).
 pub(crate) type NamedOutputs = (HashMap<String, RecordBatch>, OutputLineages);
 
 /// Apply each transform; record named outputs with fan-out semantics.
@@ -314,8 +314,9 @@ pub(crate) fn apply_transforms_named(
 /// ([`FINAL_OUTPUT_KEY`] for a layer with no `data_source`).
 pub(crate) type DrawnReads = BTreeMap<String, BTreeSet<String>>;
 
-/// [`apply_transforms_named`] for a run whose layers' drawn columns are known:
-/// a pivot over no rows publishes the names its readers ask for
+/// Run `specs` over `batch` and publish every named output (and the
+/// [`FINAL_OUTPUT_KEY`] tail), knowing the columns each layer draws: a pivot
+/// over no rows publishes the names its readers ask for
 /// ([`pivot_demands`]), the steps after it on its chain and the layers
 /// whose rows descend from it (`drawn`).
 pub(crate) fn apply_transforms_reading(

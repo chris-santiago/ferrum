@@ -957,7 +957,7 @@ impl PyLetterValue {
     #[pyo3(signature = (
         value, *,
         group = None,
-        groupby = vec![],
+        groupby = None,
         k_depth = "proportion",
         k_proportion = 0.007,
         outlier_threshold = 0.0,
@@ -969,7 +969,7 @@ impl PyLetterValue {
     fn new(
         value: &str,
         group: Option<String>,
-        groupby: Vec<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         k_depth: &str,
         k_proportion: f64,
         outlier_threshold: f64,
@@ -979,6 +979,7 @@ impl PyLetterValue {
         if value.is_empty() {
             return Err(PyValueError::new_err("LetterValue: value must be non-empty"));
         }
+        let groupby = crate::transform::group_key::parse_groupby_pyany("LetterValue", groupby)?;
         refuse_repeated_groupby_names("LetterValue", &groupby)?;
         if !outlier_threshold.is_finite() || outlier_threshold < 0.0 {
             return Err(PyValueError::new_err(
@@ -2806,14 +2807,18 @@ mod tests {
     #[test]
     fn letter_value_constructor_takes_groupby_and_refuses_a_repeat() {
         pyo3::Python::initialize();
-        let ok = PyLetterValue::new("v", Some("g".into()), vec!["h".into()], "tukey", 0.007, 0.0, None, None)
-            .expect("a groupby list constructs");
-        assert!(matches!(&ok.0, TransformSpec::LetterValue(s) if s.groupby == ["h"]));
-        let err = PyLetterValue::new("v", None, vec!["h".into(), "h".into()], "tukey", 0.007, 0.0, None, None)
-            .err()
-            .expect("a repeated groupby name refuses")
-            .to_string();
-        assert!(err.contains("LetterValue: groupby column 'h' is repeated"), "{err}");
+        Python::attach(|py| {
+            let once = pyo3::types::PyList::new(py, ["h"]).unwrap();
+            let ok = PyLetterValue::new("v", Some("g".into()), Some(once.as_any()), "tukey", 0.007, 0.0, None, None)
+                .expect("a groupby list constructs");
+            assert!(matches!(&ok.0, TransformSpec::LetterValue(s) if s.groupby == ["h"]));
+            let twice = pyo3::types::PyList::new(py, ["h", "h"]).unwrap();
+            let err = PyLetterValue::new("v", None, Some(twice.as_any()), "tukey", 0.007, 0.0, None, None)
+                .err()
+                .expect("a repeated groupby name refuses")
+                .to_string();
+            assert!(err.contains("LetterValue: groupby column 'h' is repeated"), "{err}");
+        });
     }
 
     /// A value that is infinite is skipped as a null value is: the letter

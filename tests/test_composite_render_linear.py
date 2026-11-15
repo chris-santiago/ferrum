@@ -334,7 +334,7 @@ def test_heterogeneous_child_config_lowers_with_per_leaf_binding(small_chart, la
     # this is what would silently break if the plain leaf inherited leaf 0's
     # chart_config instead of its own empty override.
     boundary = _panel_boundary_x(with_anno)
-    annotation_lines = re.findall(r'<line\s+([^>]*)stroke="#333333"[^>]*/>', with_anno)
+    annotation_lines = re.findall(r'<line\s+([^>]*)stroke="#1f2937"[^>]*/>', with_anno)
     assert annotation_lines, "expected the hline annotation to render at least one <line>"
     for attrs in annotation_lines:
         x1 = float(re.search(r'x1="([^"]+)"', attrs).group(1))

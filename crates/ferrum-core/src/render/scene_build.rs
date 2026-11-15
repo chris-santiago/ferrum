@@ -706,11 +706,12 @@ pub fn build_scene(
                 x_scale: &scales.x,
                 y_scale: &scales.y,
                 breaks: &break_remaps,
+                theme,
             };
             super::annotation::build_annotations_through_breaks(
                 &chart_config.annotations,
                 &ann_ctx,
-                super::annotation::projected_coord_name(spec.coord.as_ref()),
+                spec.coord.as_ref(),
                 prep.names_unflipped,
                 warnings,
             )
@@ -11721,7 +11722,7 @@ mod tests {
     }
 
     /// The named-only-chain case: the chart's only transform carries a
-    /// `name`, so [`crate::transform::run::apply_transforms_named`] publishes
+    /// `name`, so [`crate::transform::run::apply_transforms_reading`] publishes
     /// it as a branch and leaves `__final__` — the tail both layers read —
     /// byte-identical to the source. `spec.transforms` is non-empty (so the
     /// deleted heuristic would have claimed the remedy), but the missing

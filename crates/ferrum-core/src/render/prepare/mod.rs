@@ -963,7 +963,7 @@ impl PreparedInputs {
     pub fn final_batch(&self) -> &RecordBatch {
         self.transform_outputs
             .get(FINAL_OUTPUT_KEY)
-            .expect("apply_transforms_named publishes FINAL_OUTPUT_KEY unconditionally")
+            .expect("apply_transforms_reading publishes FINAL_OUTPUT_KEY unconditionally")
     }
 }
 
@@ -1493,7 +1493,7 @@ pub fn prepare_render_inputs(
         run_pipeline(spec, &normalized, viewport, theme, leaf_scales)?;
     let transformed = transform_outputs
         .get(FINAL_OUTPUT_KEY)
-        .expect("apply_transforms_named must publish FINAL_OUTPUT_KEY")
+        .expect("apply_transforms_reading must publish FINAL_OUTPUT_KEY")
         .clone();
 
     // --- Phase 8a: per-layer inputs + CoordFlip ---
@@ -2271,7 +2271,7 @@ type MergedLineage = (OutputLineage, Vec<RecordBatch>, HashMap<(crate::spec::lay
 /// path, unaffected by this estimate.
 ///
 /// The facet branch also sets `TransformContext.is_partition = true` (batch-D
-/// T9 round 3): each per-panel `apply_transforms_named` call below runs on a
+/// T9 round 3): each per-panel `apply_transforms_reading` call below runs on a
 /// facet panel, not the whole frame, even though `groupby` is empty for that
 /// call. Consumers that gate a refusal on "this is a genuine whole-frame
 /// call" (e.g. `Smooth`'s rank-deficiency check) read this flag to degrade
@@ -2302,7 +2302,7 @@ fn run_transforms_with_facet(
         // Drain whatever this run's (possibly per-step-cloned, but
         // `Rc`-shared) sink accumulated — see `TransformContext::warnings`'s
         // doc for why `Rc<RefCell<_>>` makes this safe across the per-step
-        // `ctx.clone()` in `apply_transforms_named`. `merge_null_key_reports`
+        // `ctx.clone()` in `apply_transforms_reading`. `merge_null_key_reports`
         // collapses a composite's own several lowered steps over the same
         // rows and key into one report, as the faceted return does.
         let warnings = crate::transform::context::merge_null_key_reports(

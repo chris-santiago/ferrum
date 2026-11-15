@@ -1410,3 +1410,73 @@ fn the_supported_dtypes_text_names_timestamp_and_every_refusal_quotes_it() {
         );
     }
 }
+
+// ── The `groupby` PyO3 door: one refusal voice ────────────────────────────
+
+/// `parse_groupby_pyany("T", <expr>)`'s outcome: the columns, or the refusal text.
+fn read_groupby(expr: &std::ffi::CStr) -> Result<Vec<String>, String> {
+    pyo3::Python::initialize();
+    Python::attach(|py| {
+        let value = py.eval(expr, None, None).unwrap();
+        parse_groupby_pyany("T", Some(&value)).map_err(|e| e.value(py).to_string())
+    })
+}
+
+#[test]
+fn a_groupby_door_reads_ordered_sequences_and_none() {
+    assert_eq!(read_groupby(c"['a', 'b']"), Ok(vec!["a".into(), "b".into()]));
+    assert_eq!(read_groupby(c"('a',)"), Ok(vec!["a".into()]));
+    assert_eq!(read_groupby(c"{'a': 1, 'b': 2}.keys()"), Ok(vec!["a".into(), "b".into()]));
+    assert_eq!(read_groupby(c"[]"), Ok(vec![]));
+    assert_eq!(parse_groupby_pyany("T", None).unwrap(), Vec::<String>::new());
+    pyo3::Python::initialize();
+    let none = Python::attach(|py| parse_groupby_pyany("T", Some(&py.None().into_bound(py))));
+    assert!(none.is_err(), "an explicit None object is not a sequence of names");
+}
+
+/// Each text below is the one `ferrum.transforms._reject_bare_string` raises
+/// for `param="groupby", noun="column names"`, `where="T"`.
+#[test]
+fn a_groupby_door_refuses_each_unordered_or_char_split_kind_in_the_wrappers_words() {
+    assert_eq!(
+        read_groupby(c"'cat'"),
+        Err("T: groupby must be a sequence of column names (list or tuple), \
+             got a bare string 'cat'; iterating a string yields individual characters"
+            .to_string())
+    );
+    assert_eq!(
+        read_groupby(c"b'ab'"),
+        Err("T: groupby must be a sequence of column names (list or tuple), \
+             got bytes b'ab'; iterating it yields integers"
+            .to_string())
+    );
+    assert_eq!(
+        read_groupby(c"{'a'}"),
+        Err("T: groupby must be an ordered sequence of column names, got set {'a'}; \
+             a set has no order, so the output would change from run to run; \
+             pass a list, e.g. sorted(...)"
+            .to_string())
+    );
+    assert_eq!(
+        read_groupby(c"frozenset({'a'})"),
+        Err("T: groupby must be an ordered sequence of column names, got frozenset \
+             frozenset({'a'}); a set has no order, so the output would change from run to \
+             run; pass a list, e.g. sorted(...)"
+            .to_string())
+    );
+    assert_eq!(
+        read_groupby(c"__import__('types').MappingProxyType({'a': 1})"),
+        Err("T: groupby must be a sequence of column names, got mappingproxy \
+             mappingproxy({'a': 1}); pass a list of its keys, e.g. list(...)"
+            .to_string())
+    );
+}
+
+#[test]
+fn a_groupby_that_is_not_names_is_refused_naming_the_value() {
+    let err = read_groupby(c"[1, 2]").unwrap_err();
+    assert!(err.starts_with("T: groupby must be a sequence of column names"), "{err}");
+    assert!(err.ends_with("got [1, 2]"), "{err}");
+    let err = read_groupby(c"3").unwrap_err();
+    assert!(err.ends_with("got 3"), "{err}");
+}

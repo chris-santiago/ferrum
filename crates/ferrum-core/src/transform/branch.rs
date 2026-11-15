@@ -29,7 +29,7 @@
 //! `"{name}_{key}"` shape always has the separator), so there is no
 //! collision between a branch's own name and anything it scopes. A
 //! branch never advances the outer unnamed chain. Execution lives in
-//! [`crate::transform::run::apply_transforms_named`].
+//! [`crate::transform::run::apply_transforms_reading`].
 
 use std::collections::{BTreeMap, HashMap};
 

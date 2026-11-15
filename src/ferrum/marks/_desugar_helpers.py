@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import polars as pl
 
 from ferrum._metric_labels import _curve_metric, _curve_metrics_by_group, _render_metric
+from ferrum.transforms import _reject_bare_string_groupby
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -688,6 +689,20 @@ def resolve_color_groupby(
     raw = base_groupby + ([color_field] if split_hue else [])
     groupby: list[str] = [g for g in raw if g is not None]
     return with_grouping(groupby, grouping), split_hue
+
+
+def mark_groupby(groupby: Any, *, where: str) -> list[str]:
+    """A mark's ``groupby=`` (a column name or a sequence of names) as a list.
+
+    A bare string names one column, the form every mark documents. Any other
+    value goes through the sequence-parameter guard, so a set, a byte string or
+    a mapping is refused in the same words as ``transform_*``'s ``groupby=``
+    instead of being read in hash order or reaching the engine.
+    """
+    if isinstance(groupby, str):
+        return [groupby]
+    _reject_bare_string_groupby(groupby, where=where)
+    return list(groupby)
 
 
 def with_grouping(groupby: list[str], grouping: Sequence[str]) -> list[str]:

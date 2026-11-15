@@ -1025,20 +1025,20 @@ class TestAnnotationPrimitiveValues:
     """Test annotate_*() with various parameter values."""
 
     def test_annotate_hline_default_stroke(self):
-        """annotate_hline with no stroke kwarg should use default '#333'.
+        """annotate_hline with no stroke kwarg leaves the primitive's stroke unset.
 
-        Targets annotations.py:72: stroke or '#333'.
+        The renderer resolves it to the theme's text colour.
         """
         ann = annotate_hline(5.0)
         from ferrum.annotation.primitives import AnnotationLine
 
         assert isinstance(ann._annotation_primitive, AnnotationLine)
-        assert ann._annotation_primitive.stroke == "#333"
+        assert ann._annotation_primitive.stroke is None
 
     def test_annotate_vline_default_stroke(self):
-        """annotate_vline with no stroke kwarg should use default '#333'."""
+        """annotate_vline with no stroke kwarg leaves the primitive's stroke unset."""
         ann = annotate_vline(5.0)
-        assert ann._annotation_primitive.stroke == "#333"
+        assert ann._annotation_primitive.stroke is None
 
     def test_annotate_rect_default_fill(self):
         """annotate_rect with no fill kwarg should use default '#cccccc'.
@@ -1052,15 +1052,15 @@ class TestAnnotationPrimitiveValues:
         assert ann._annotation_primitive.fill == "#cccccc"
 
     def test_annotate_text_default_color(self):
-        """annotate_text with no color kwarg should use default '#333'.
+        """annotate_text with no color kwarg leaves the primitive's color unset.
 
-        Targets annotations.py:273: color or '#333'.
+        The renderer resolves it to the theme's text colour.
         """
         from ferrum.annotation.primitives import AnnotationText
 
         ann = annotate_text(1.0, 2.0, "test")
         assert isinstance(ann._annotation_primitive, AnnotationText)
-        assert ann._annotation_primitive.color == "#333"
+        assert ann._annotation_primitive.color is None
 
     def test_annotate_text_align_mapping(self):
         """annotate_text should map 'left'/'center'/'right' to anchor values.

@@ -2260,38 +2260,6 @@ pub(crate) fn excluded_channel_is_positional(channel: &str) -> bool {
     matches!(channel, "x" | "y" | "x2" | "y2")
 }
 
-/// The `(min, max)` a log remedy suggests for the opposite-signed values
-/// `extent` spans. A spread extent is suggested as it stands. A constant one
-/// (`min == max`, which the domain validator refuses as `[v, v]`) becomes the
-/// decade around the value, signed like it: `step^floor(log |v|)` to
-/// `step^ceil(log |v|)`, or `step^(e - 1)` to `step^(e + 1)` when `|v|` is
-/// the exact power `step^e`, so the value sits inside rather than on an edge.
-/// `step` is the larger of `base` and `1 / base`, so a base between 0 and 1
-/// (which `LogScale` accepts) gets the same decade its reciprocal does.
-/// Where a bound overflows or underflows (`f64` extremes) it is replaced by
-/// the value itself, so both endpoints stay finite, nonzero and distinct (the
-/// two bounds cannot fail together: they are consecutive powers of `step`).
-fn log_remedy_domain(extent: (f64, f64), base: f64) -> (f64, f64) {
-    let (min, max) = extent;
-    if min != max || !min.is_finite() || min == 0.0 || !(base.is_finite() && base > 0.0 && base != 1.0) {
-        return extent;
-    }
-    let step = base.max(base.recip());
-    let magnitude = min.abs();
-    let exponent = crate::scale::log::LogScaleData::snap_exp(magnitude.ln() / step.ln());
-    let (lo_exponent, hi_exponent) = if exponent.floor() == exponent.ceil() {
-        (exponent - 1.0, exponent + 1.0)
-    } else {
-        (exponent.floor(), exponent.ceil())
-    };
-    let bound = |exponent: f64| {
-        let power = step.powf(exponent);
-        if power.is_finite() && power > 0.0 { power } else { magnitude }
-    };
-    let (lo, hi) = (bound(lo_exponent), bound(hi_exponent));
-    if min < 0.0 { (-hi, -lo) } else { (lo, hi) }
-}
-
 /// [`RenderError::LogScaleNoValueOnSide`]'s `reason`: built once, at the one
 /// place every `Log` channel's resolution discovers its on-side extent is
 /// empty, so x/y and every numeric auxiliary channel refuse with the same
@@ -2308,7 +2276,7 @@ fn log_remedy_domain(extent: (f64, f64), base: f64) -> (f64, f64) {
 /// this text that differs between the two channel classes; every other word
 /// is shared.
 /// `base` is the axis's log base, for the decade a constant column's domain
-/// is built around ([`log_remedy_domain`]).
+/// is built around ([`LogScaleData::remedy_domain`](crate::scale::log::LogScaleData::remedy_domain)).
 /// `field` is `None` only for a demanded statistic's drawn column (an
 /// internal name like `bin_start`) whose caller explicitly suppressed the
 /// channel's title (`title=""`) — see
@@ -2325,7 +2293,7 @@ pub(crate) fn log_no_value_on_side_reason(
     base: f64,
 ) -> String {
     use crate::scale::log::LogSide;
-    let opposite_extent = opposite_extent.map(|extent| log_remedy_domain(extent, base));
+    let opposite_extent = opposite_extent.map(|extent| crate::scale::log::LogScaleData::remedy_domain(extent, base));
     let maps_word = match side {
         LogSide::Positive => "positive",
         LogSide::Negative => "negative",
@@ -3685,37 +3653,6 @@ pub(crate) fn legend_swatches(scene: &ferrum_scene::SceneGraph) -> Vec<(&'static
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A constant opposite-signed column is suggested as the base-decade
-    /// around the value, a spread one as it stands.
-    #[test]
-    fn a_log_remedy_domain_is_a_decade_around_a_constant_value() {
-        assert_eq!(log_remedy_domain((-3.0, -3.0), 10.0), (-10.0, -1.0));
-        assert_eq!(log_remedy_domain((-10.0, -10.0), 10.0), (-100.0, -1.0));
-        assert_eq!(log_remedy_domain((-3.0, -3.0), 2.0), (-4.0, -2.0));
-        assert_eq!(log_remedy_domain((-1000.0, -1000.0), 10.0), (-10000.0, -100.0));
-        assert_eq!(log_remedy_domain((3.0, 3.0), 10.0), (1.0, 10.0));
-        assert_eq!(log_remedy_domain((-30.0, -3.0), 10.0), (-30.0, -3.0), "a spread extent is unchanged");
-        assert_eq!(log_remedy_domain((-1e-5, -1e-5), 10.0), (-1e-4, -1e-6), "an exact power prints exact endpoints");
-        assert_eq!(log_remedy_domain((-3.0, -3.0), 0.5), (-4.0, -2.0), "a base below one takes the decade of its reciprocal");
-        assert_eq!(log_remedy_domain((-3.0, -3.0), 0.1), (-10.0, -1.0));
-    }
-
-    /// At the float extremes the decade overflows or underflows; both
-    /// endpoints stay finite, nonzero, distinct, and hold the value.
-    #[test]
-    fn a_log_remedy_domain_is_finite_nonzero_and_distinct_at_the_float_extremes() {
-        for value in [-1.7e308, -f64::MAX, -5e-324, -f64::MIN_POSITIVE, 1.7e308, 5e-324] {
-            for base in [10.0, 2.0, 0.5, 1e300] {
-                let (min, max) = log_remedy_domain((value, value), base);
-                assert!(min.is_finite() && max.is_finite(), "{value} base {base}: {min}, {max}");
-                assert!(min != 0.0 && max != 0.0 && min < max, "{value} base {base}: {min}, {max}");
-                assert!(min <= value && value <= max, "{value} base {base}: {min}, {max}");
-                assert_eq!(min.signum(), value.signum());
-                assert_eq!(max.signum(), value.signum());
-            }
-        }
-    }
 
     /// An infinity on a log axis is called infinite on both voices, with the
     /// remedies that change it; a finite cut keeps the domain sentence.

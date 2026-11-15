@@ -161,6 +161,12 @@ def _normalize_stroke_dash(value: Any, *, context: str) -> list[float] | None:
     return _dash_lengths(lengths, context=context, original=value)
 
 
+#: Internal paint token that resolves to the theme's text colour (``font_color``)
+#: at render time. Annotation helpers pass it as the mark stroke when the caller
+#: gave no colour, so their mark route draws the same ink as the primitive route.
+THEME_FONT_PAINT = "theme:font"
+
+
 def _is_paint_sentinel(value: str) -> bool:
     """Return ``True`` if *value* is a non-color paint sentinel, not a color.
 
@@ -172,6 +178,8 @@ def _is_paint_sentinel(value: str) -> bool:
       not trimmed, not case-folded). An internal theme-lookup token
       composite marks pass as ``stroke=``/``fill=`` (see
       ``marks/composite.py``).
+    - ``"theme:font"`` — exact string match, like ``"theme:label"`` but
+      resolving to the theme's text colour (:data:`THEME_FONT_PAINT`).
     - ``"none"``/``"transparent"`` — trimmed and case-insensitive (draw.rs:
       ``trimmed.eq_ignore_ascii_case("none") || trimmed.eq_ignore_ascii_case("transparent")``),
       so ``"None"``, ``"NONE"``, ``" none "``, ``"Transparent"``,
@@ -182,7 +190,7 @@ def _is_paint_sentinel(value: str) -> bool:
       that promises CSS-name support recreated the same divergence class
       this batch remediates).
 
-    All three sentinel spellings must be checked BEFORE
+    Every sentinel spelling must be checked BEFORE
     ``ferrum.color.to_hex`` and never reach the parser — all raise inside
     ``to_hex`` by design, see
     ``tests/test_color_vocabulary.py::TestSentinelsAreNotColors``. The
@@ -190,7 +198,7 @@ def _is_paint_sentinel(value: str) -> bool:
     ``ferrum._validate.is_none_color_sentinel`` (``selection.py`` composes
     from the same predicate for its own, differently-handled refusal).
     """
-    return value == "theme:label" or is_none_color_sentinel(value)
+    return value in ("theme:label", THEME_FONT_PAINT) or is_none_color_sentinel(value)
 
 
 # Canonical set of valid constant shape names for mark_point(shape=...).

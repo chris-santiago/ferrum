@@ -534,7 +534,7 @@ impl PyQq {
         dequantize = false,
         emit_line = true,
         seed = 0,
-        groupby = vec![],
+        groupby = None,
         name = None,
     ))]
     fn new(
@@ -543,7 +543,7 @@ impl PyQq {
         dequantize: bool,
         emit_line: bool,
         seed: u64,
-        groupby: Vec<String>,
+        groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if field.is_empty() {
@@ -555,6 +555,7 @@ impl PyQq {
             "distribution",
             distribution,
         )?;
+        let groupby = crate::transform::group_key::parse_groupby_pyany("QQ", groupby)?;
         refuse_repeated_groupby_names("QQ", &groupby)?;
         Ok(PyQq(TransformSpec::Qq(QQSpec {
             field: field.to_string(),
@@ -733,9 +734,9 @@ mod tests {
     #[test]
     fn qq_pyqq_new_accepts_lognormal_and_rejects_bogus() {
         pyo3::Python::initialize();
-        let ok = PyQq::new("v", "lognormal", false, true, 0, Vec::new(), None);
+        let ok = PyQq::new("v", "lognormal", false, true, 0, None, None);
         assert!(ok.is_ok(), "lognormal must be accepted: {:?}", ok.err().map(|e| e.to_string()));
-        let bad = PyQq::new("v", "not_a_distribution", false, true, 0, Vec::new(), None);
+        let bad = PyQq::new("v", "not_a_distribution", false, true, 0, None, None);
         assert!(bad.is_err(), "bogus distribution must be rejected");
     }
 
@@ -1294,14 +1295,18 @@ mod tests {
     #[test]
     fn qq_constructor_takes_groupby_and_refuses_a_repeat() {
         pyo3::Python::initialize();
-        let ok = PyQq::new("v", "normal", false, true, 0, vec!["h".into()], None)
-            .expect("a groupby list constructs");
-        assert!(matches!(&ok.0, TransformSpec::Qq(s) if s.groupby == ["h"]));
-        let err = PyQq::new("v", "normal", false, true, 0, vec!["h".into(), "h".into()], None)
-            .err()
-            .expect("a repeated groupby name refuses")
-            .to_string();
-        assert!(err.contains("QQ: groupby column 'h' is repeated"), "{err}");
+        Python::attach(|py| {
+            let once = pyo3::types::PyList::new(py, ["h"]).unwrap();
+            let ok = PyQq::new("v", "normal", false, true, 0, Some(once.as_any()), None)
+                .expect("a groupby list constructs");
+            assert!(matches!(&ok.0, TransformSpec::Qq(s) if s.groupby == ["h"]));
+            let twice = pyo3::types::PyList::new(py, ["h", "h"]).unwrap();
+            let err = PyQq::new("v", "normal", false, true, 0, Some(twice.as_any()), None)
+                .err()
+                .expect("a repeated groupby name refuses")
+                .to_string();
+            assert!(err.contains("QQ: groupby column 'h' is repeated"), "{err}");
+        });
     }
 
     /// A hue group with no plottable value is named once and keeps a NaN row,

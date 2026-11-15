@@ -255,13 +255,11 @@ class TestAnnotateAblineRenderedDasharray:
             fm.annotate_abline(slope=1.0, intercept=0.0, stroke_dash=junk)
 
     def test_default_stroke_is_unaffected_by_the_normalization_route(self):
-        # abline's default stroke is "black" (unlike hline/vline's "#333"
-        # fallback, which only applies when stroke=None) -- routing through
-        # _capture_line_style must not silently change it. The renderer
-        # normalizes the literal "black" to its hex form ("#000000") in the
-        # rendered SVG, which is what this asserts against.
+        # With no stroke the line draws the theme's text colour (the default
+        # theme's is "#1f2937"); routing through _capture_line_style must not
+        # make that line dashed.
         svg = fm.annotate_abline(slope=1.0, intercept=0.0).to_svg()
-        assert _dasharray_by_stroke(svg, "polyline", "#000000") is None
+        assert _dasharray_by_stroke(svg, "polyline", "#1f2937") is None
 
 
 # ---------------------------------------------------------------------------

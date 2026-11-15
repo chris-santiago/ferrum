@@ -10,7 +10,7 @@
 //!
 //! Used by `heatmap()` (wide-matrix input) and `clustermap()` reshape.
 
-use arrow::array::{Array, ArrayRef, RecordBatch, StringArray, StringBuilder};
+use arrow::array::{new_empty_array, Array, ArrayRef, RecordBatch, StringBuilder};
 use arrow::compute::{cast, concat};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
@@ -50,10 +50,12 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
             .collect(),
     };
 
-    if value_var_names.is_empty() && n_rows == 0 {
-        return empty_melt(spec, batch);
-    }
-    if value_var_names.is_empty() {
+    // A frame with no rows and no value columns to name (a pivot over no rows
+    // holds none) melts to its id columns, empty, plus empty `var_name` and
+    // `value_name` columns: the general path below, with the types a melt of
+    // `Float64` value columns gives ([`unify_value_dtype`]). With rows there is
+    // nothing to draw from an `id_vars` that covers every column.
+    if value_var_names.is_empty() && n_rows != 0 {
         return Err(PyValueError::new_err(
             "stat_unpivot: no value_vars to melt (id_vars covers all columns)"
         ));
@@ -83,7 +85,8 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
     // Stack value columns vertically.
     let stacked_value: ArrayRef = {
         let refs: Vec<&dyn Array> = value_columns_cast.iter().map(|a| a.as_ref()).collect();
-        concat(&refs).map_err(|e| PyValueError::new_err(format!("stat_unpivot: concat: {e}")))?
+        concat_or_empty(&refs, &unified_dtype)
+            .map_err(|e| PyValueError::new_err(format!("stat_unpivot: concat: {e}")))?
     };
 
     // Build var_name column (Utf8): repeat each name n_rows times in row-major order.
@@ -108,7 +111,8 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
             let one = batch.column(i);
             let repeats: Vec<&dyn Array> = (0..value_var_names.len())
                 .map(|_| one.as_ref()).collect();
-            concat(&repeats).map_err(|e| PyValueError::new_err(format!("stat_unpivot: id-replicate: {e}")))
+            concat_or_empty(&repeats, one.data_type())
+                .map_err(|e| PyValueError::new_err(format!("stat_unpivot: id-replicate: {e}")))
         })
         .collect::<PyResult<_>>()?;
 
@@ -129,34 +133,22 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
         .map_err(|e| PyValueError::new_err(format!("stat_unpivot: {e}")))
 }
 
-/// The melt of a frame with no rows and no value columns to name (a pivot
-/// over no rows holds none): its id columns as they are, empty, and an empty
-/// `var_name` text column and `value_name` `Float64` column, the types a melt
-/// of `Float64` value columns gives. A frame with rows whose `id_vars` cover
-/// every column is refused by [`apply`]; there is nothing to draw from it.
-fn empty_melt(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
-    let schema = batch.schema();
-    let mut fields = Vec::with_capacity(spec.id_vars.len() + 2);
-    let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.id_vars.len() + 2);
-    for name in &spec.id_vars {
-        let i = schema
-            .index_of(name)
-            .map_err(|_| PyValueError::new_err(format!("stat_unpivot: id_var '{name}' not found")))?;
-        let field = schema.field(i);
-        fields.push(Field::new(field.name(), field.data_type().clone(), field.is_nullable()));
-        cols.push(batch.column(i).clone());
+/// `concat` of `arrays`, or an empty array of `dtype` when there are none
+/// (`concat` refuses an empty list).
+fn concat_or_empty(arrays: &[&dyn Array], dtype: &DataType) -> Result<ArrayRef, arrow::error::ArrowError> {
+    if arrays.is_empty() {
+        Ok(new_empty_array(dtype))
+    } else {
+        concat(arrays)
     }
-    fields.push(Field::new(&spec.var_name, DataType::Utf8, false));
-    fields.push(Field::new(&spec.value_name, DataType::Float64, true));
-    cols.push(Arc::new(StringArray::from(Vec::<&str>::new())));
-    cols.push(Arc::new(arrow::array::Float64Array::from(Vec::<f64>::new())));
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)
-        .map_err(|e| PyValueError::new_err(format!("stat_unpivot: {e}")))
 }
 
+/// The dtype the value columns stack into. No columns at all only reaches
+/// here for a frame with no rows ([`apply`] refuses it otherwise); its value
+/// column is `Float64`, as a melt of `Float64` value columns gives.
 fn unify_value_dtype(dtypes: &[&DataType]) -> PyResult<DataType> {
     if dtypes.is_empty() {
-        return Err(PyValueError::new_err("stat_unpivot: no value columns"));
+        return Ok(DataType::Float64);
     }
     // Homogeneous fast path.
     if dtypes.iter().all(|d| *d == dtypes[0]) {
@@ -260,7 +252,7 @@ impl PyUnpivot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, Int32Array};
+    use arrow::array::{Float64Array, Int32Array, StringArray};
 
     fn batch_3x4() -> RecordBatch {
         // 3 rows × 4 numeric value columns
@@ -328,7 +320,6 @@ mod tests {
 
     #[test]
     fn unpivot_homogeneous_utf8_works() {
-        use arrow::array::StringArray;
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Utf8, false),
             Field::new("b", DataType::Utf8, false),
@@ -348,7 +339,6 @@ mod tests {
     #[test]
     fn unpivot_mixed_int_and_utf8_errors() {
         pyo3::Python::initialize();
-        use arrow::array::StringArray;
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Int32, false),
             Field::new("b", DataType::Utf8, false),

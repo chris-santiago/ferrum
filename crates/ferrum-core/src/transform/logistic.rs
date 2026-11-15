@@ -497,7 +497,7 @@ impl PyLogistic {
                 return Err(PyValueError::new_err("Logistic: ci must be in (0, 1)"));
             }
         }
-        let groupby = parse_groupby_pyany(groupby)?;
+        let groupby = parse_groupby_pyany("Logistic", groupby)?;
         Ok(PyLogistic(TransformSpec::Logistic(LogisticSpec {
             x: x.to_string(),
             y: y.to_string(),

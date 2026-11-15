@@ -321,7 +321,9 @@ def test_the_annotate_helpers_land_on_band_centres_under_a_sort():
     line = _one(vline, "line", stroke="#ff0010")
     _near([float(line.attrs["x1"]), float(line.attrs["x2"])], [ticks["b"], ticks["b"]])
     text = (chart + fm.annotate_text("b", 2.0, "HELLO", anchor="middle")).to_svg()
-    _near(float(_one(text, "text", fill="#333333").attrs["x"]), ticks["b"])
+    hello = [e for e in _all(text, "text") if e.text == "HELLO"]
+    assert len(hello) == 1
+    _near(float(hello[0].attrs["x"]), ticks["b"])
     rect = (chart + fm.annotate_rect("b", "c", 1.0, 3.0, fill="#ff0011")).to_svg()
     _near(sorted(_lo_hi(_one(rect, "rect", fill="#ff0011"), "x")), sorted([ticks["b"], ticks["c"]]))
 
@@ -794,7 +796,7 @@ _UNCHANGED = {
             _every_kind(1.2, 1.4, 2.6, 2.7)
             + [fm.annotate_hline(2.0), fm.annotate_vline(2.0), fm.annotate_abline(1.0, 0.0)],
         ),
-        "70875b22bef951dbb5c78e2cd67be29ffc0581403119ff94b5e7f7d4ed66694c",
+        "14d3f84ff20afc270517fb95dafd24ef8a6f4c30d69bc075da3c83b8334f0d31",
     ),
     "date": (
         lambda: _layered(
@@ -802,14 +804,14 @@ _UNCHANGED = {
             _every_kind(dt.date(2020, 1, 1), 1.4, dt.datetime(2020, 1, 2, 12), 2.7)
             + [fm.annotate_vline("2020-01-02"), fm.annotate_text("2020-01-02", 2.0, "iso")],
         ),
-        "0f912ea1d046fedf38b3b146d02f509a3b888cd2835fd13b23247aadca6b7af2",
+        "69be0e29bb387c8918c187d08a4bea31ad94266694ecf292251e9354ecd1abb1",
     ),
     "norm": (
         lambda: _layered(
             _numeric_chart(),
             _every_kind(fm.NormCoord(0.2), fm.NormCoord(0.3), fm.NormCoord(0.6), fm.NormCoord(0.7)),
         ),
-        "fa299e565c9373ba82d60c6a91f17236e74fdc9b7e40e5beff118c0e5169daca",
+        "ef8bcf79b4e9908fa5e6498beddd166a3258e3b7ddedd58ea1c0a3268cc891fc",
     ),
     "pixel": (
         lambda: _layered(
@@ -818,14 +820,14 @@ _UNCHANGED = {
                 fm.PixelCoord(90.0), fm.PixelCoord(70.0), fm.PixelCoord(300.0), fm.PixelCoord(200.0)
             ),
         ),
-        "1a07a89b90966626c3ca90f11c61256b1397d9c621df1368ffd2e17b39923780",
+        "911de57d08ed1010a5edcab673c34b6215aa8d95abcbe38f860de3f6e6d20233",
     ),
     "numeric_on_a_band_axis": (
         lambda: _layered(
             _bars("x", "sort"),
             [ann.text(fm.NormCoord(0.4), 2.0, "t"), ann.span("y", 1.5, 2.5, fill=_COLOUR["span"])],
         ),
-        "ed24db0bc00a46208985db7a22f8980b10699969bc868c885804f435654685d0",
+        "d0cbb86bcc059214783bc4071ae793590dae306d16631689ea37a8e640bb10ef",
     ),
 }
 
