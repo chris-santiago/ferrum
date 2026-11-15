@@ -1056,9 +1056,9 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> _LoweredTree:
         When the composition cannot be rendered faithfully (see
         :func:`_lower_any` for the specific cases: non-root subtitle/caption,
         an unsupported shared-resolve channel, or an unrecognized node kind),
-        or when every child's data is empty (sized holes leave nothing left
-        to size cells from — mirrors :func:`_build_grid_tree`'s all-empty
-        case for grid composites).
+        or when every child's data is empty (a composition with no populated
+        leaf has no panel to size from — mirrors :func:`_build_grid_tree`'s
+        all-empty case for grid composites).
     """
     payloads: list = []
     # (viewport, theme, chart_config) per leaf; when the leaves differ, each
@@ -1074,7 +1074,7 @@ def _lower_composite(composite, *, auto_tooltips: bool) -> _LoweredTree:
         leaf_inputs=leaf_inputs,
         leaf_nodes=leaf_nodes,
     )
-    if not leaf_inputs:
+    if not _any_leaf_has_rows(payloads):
         raise ValueError(
             f"{type(composite).__name__}: every child's data is empty; nothing to render"
         )
@@ -1168,16 +1168,10 @@ def _lower_any(
     only the true tree root finalizes the call-level ``viewport``/``theme``/
     ``chart_config`` default via :func:`_apply_leaf_binding_overrides`.
 
-    Every non-overlay layout (hconcat/vconcat/wrap/grid) reaches an empty-data
-    leaf through :func:`_lower_leaf_node`, which lowers it to a
-    ``{"kind": "hole"}`` cell (sized under hconcat/vconcat; ignored by
-    grid/wrap cell math): a grid cell has no data
-    of its own to draw a frame from, so a hole is the only sizeable
-    placeholder. Only ``LayerChart``'s overlay lowering (which does not route
-    through this generic composite branch) reaches
-    :func:`_lower_overlay_leaf_node` instead, which lowers an empty layer like
-    any other leaf, since a hole is illegal under overlay and an empty layer
-    draws its own frame on the shared panel instead.
+    Every layout reaches a leaf, empty-data or not, through
+    :func:`_lower_leaf_node` (``LayerChart``'s overlay lowering reaches
+    :func:`_lower_overlay_leaf_node` instead). An empty-data leaf lowers like
+    any other: Rust draws its frame and axes and warns once for it.
 
     Raises
     ------
@@ -1363,7 +1357,7 @@ def _append_leaf_wire_node(
     leaf_inputs: list,
     leaf_nodes: list,
 ) -> dict:
-    """Append one non-empty leaf's rendering inputs and return its wire node.
+    """Append one leaf's rendering inputs and return its wire node.
 
     The shared tail of both :func:`_lower_leaf_node` and
     :func:`_lower_overlay_leaf_node`: appending to the parallel accumulator
@@ -1378,6 +1372,16 @@ def _append_leaf_wire_node(
     return leaf_node
 
 
+def _any_leaf_has_rows(payloads: list) -> bool:
+    """Whether any lowered leaf's frame has rows.
+
+    A composition with no such leaf has nothing to draw, so it is refused
+    rather than rendered as a grid of empty frames. A layered leaf counts
+    only through its layers' frames, however the layers were combined.
+    """
+    return any(data.num_rows > 0 for data in payloads)
+
+
 def _lower_leaf_node(
     chart,
     *,
@@ -1390,16 +1394,11 @@ def _lower_leaf_node(
 
     The single source of truth for leaf lowering, shared (via :func:`_lower_any`)
     by every composite form except ``LayerChart``'s overlay (see
-    :func:`_lower_overlay_leaf_node`). An empty-data leaf (``num_rows == 0``)
-    lowers to a ``{"kind": "hole"}`` placeholder, sized from the viewport the
-    leaf would otherwise have rendered at, so it occupies the same space a
-    drawn leaf would -- required under hconcat/vconcat (Rust refuses an
-    unsized hole there with ``HoleSizeRequired``) and harmlessly ignored by
-    grid/wrap cell math.
+    :func:`_lower_overlay_leaf_node`). A leaf whose frame has no rows lowers
+    like any other: Rust draws its frame and axes and warns once that its panel
+    is drawn empty, as it does for a single zero-row chart.
     """
     spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
-    if data.num_rows == 0:
-        return {"kind": "hole", "width": viewport[0], "height": viewport[1]}
     return _append_leaf_wire_node(
         spec,
         data,
@@ -1425,10 +1424,8 @@ def _lower_overlay_leaf_node(
     Used only by :meth:`LayerChart._composite_tree`, whose overlay layout has
     no hole placeholder at all (a hole is illegal under overlay). An
     empty-data layer (``num_rows == 0``) lowers like any other leaf and draws
-    its share of the shared panel's frame -- zero rows take the same render
-    path a filter-emptied chart already takes, drawing the frame/axes and
-    warning once, rather than the ``{"kind": "hole"}`` :func:`_lower_leaf_node`
-    produces everywhere else.
+    its share of the shared panel's frame. A ``LayerChart`` with a zero-row
+    layer beside a populated one draws without a warning.
     """
     spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
     return _append_leaf_wire_node(
@@ -1486,8 +1483,8 @@ def _build_grid_tree(
     JointChart marginal, for instance), or ``None`` (a ``{"kind": "hole"}``
     placeholder cell, which the Rust grid layout reserves a slot for but draws
     nothing into — see the Task 8a hole wire). Holes are valid at any grid
-    position, not only the 2×2 corner; an empty-data cell also lowers to a hole
-    (grid layouts support them) rather than raising.
+    position, not only the 2×2 corner; an empty-data cell lowers like any leaf
+    and draws its frame, unless every cell is empty.
 
     *chrome* (see :class:`_RootChrome`) bundles the root-only
     title/subtitle/caption/config values with ``is_root`` and the calling
@@ -1534,8 +1531,8 @@ def _build_grid_tree(
     ------
     ValueError
         When a nested (non-root) *subtitle*/*caption* is set, or when every
-        cell is empty (an all-holes grid has no leaf to size cells from —
-        see Task 10-python sub-task 3). Both messages name ``chrome.kind``
+        cell's frame is empty (a grid with no populated leaf has nothing to draw).
+        Both messages name ``chrome.kind``
         (the calling class, e.g. ``"JointChart"``).
     """
     if not chrome.is_root and (chrome.subtitle is not None or chrome.caption is not None):
@@ -1563,13 +1560,10 @@ def _build_grid_tree(
         )
         children.append(node)
 
-    if not leaf_nodes:
-        # Every cell is empty (e.g. pairplot/jointplot on a zero-row
-        # DataFrame): there is no leaf viewport left to size cells from, and
-        # grid/wrap holes' width/height are ignored by cell math (Task
-        # 10-rust) -- a leafless grid cannot be faithfully sized without a
-        # Rust change, so this is a loud, typed failure rather than a
-        # silently wrong-size render.
+    if not _any_leaf_has_rows(payloads):
+        # Every cell's frame is empty (e.g. pairplot/jointplot on a zero-row
+        # DataFrame): nothing is left to draw, so this is a loud, typed failure
+        # rather than a grid of empty frames.
         raise ValueError(
             f"{chrome.kind} ({nrows}x{ncols}): every panel's data is empty; nothing to render"
         )
@@ -1580,21 +1574,8 @@ def _build_grid_tree(
     if col_ratios is not None:
         extra_fields["col_ratios"] = col_ratios
 
-    # An empty-data cell lowers to a hole (see :func:`_lower_leaf`), and a hole
-    # has no plot extent to share or adopt -- a jointplot whose marginal has no
-    # rows, say. The caller declares the alignments its FIGURE means, in cell
-    # positions, without having to know which cells came back empty; dropping
-    # the ones that no longer name two panels is this builder's job, because
-    # this is where that is first knowable. The wire contract stays strict: a
-    # declaration naming a hole is malformed and Rust refuses it.
-    def _is_panel(cell: int) -> bool:
-        return children[cell]["kind"] != "hole"
-
-    live = [
-        a for a in (extent_alignments or []) if _is_panel(a["follower"]) and _is_panel(a["leader"])
-    ]
-    if live:
-        extra_fields["extent_alignments"] = live
+    if extent_alignments:
+        extra_fields["extent_alignments"] = extent_alignments
     tree = _composite_node(
         "grid",
         children,

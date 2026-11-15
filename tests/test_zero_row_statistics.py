@@ -17,6 +17,7 @@ byte-identical to what it drew before, and a name its values lack is still refus
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -283,13 +284,15 @@ def test_a_zero_row_statistic_chart_with_a_layer_warns_once(mark: str):
 @pytest.mark.parametrize("mark", sorted(_MARKS))
 def test_a_zero_row_statistic_leaf_beside_a_populated_leaf_renders_both_routes(mark: str):
     """A grid with one populated child renders (the all-empty grid raises, below): the zero-row
-    child's statistic no longer fails the whole composite, and the populated child still draws."""
+    child's statistic no longer fails the whole composite, it draws its frame and warns once, and
+    the populated child still draws."""
     grid = fm.hconcat(_MARKS[mark](_empty()), _MARKS[mark](_populated()))
     svg, messages = _render_capturing(grid.to_svg)
-    assert messages == []
+    assert messages == [_NO_ROWS_TO_DRAW]
     assert ">a<" in svg and ">b<" in svg
-    _, interactive = _render_capturing(_interactive(grid))
-    assert interactive == []
+    scene, interactive = _render_capturing(_interactive(grid))
+    assert interactive == [_NO_ROWS_TO_DRAW]
+    assert len(json.loads(scene)["panels"]) == 2
 
 
 def test_a_zero_row_statistic_layer_beside_a_populated_layer_still_draws_the_populated_one():
@@ -769,7 +772,7 @@ def test_a_zero_row_pivot_leaf_beside_a_populated_leaf_equals_the_plain_zero_row
 
     page, messages = render(_zero_row_pivot_leaf())
     twin_page, twin_messages = render(_wide_leaf(_published_twin()))
-    assert messages == twin_messages == []
+    assert messages == twin_messages == [_NO_ROWS_TO_DRAW]
     assert page == twin_page
 
 

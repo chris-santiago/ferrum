@@ -25,11 +25,9 @@ What this file proves
 - **Static-SVG panel extents numerically match the ratio shares** — parsing
   the rendered SVG's total canvas dims (not just the interactive scene's
   ``layout_scale``) to recover ``ratio``/``dendrogram_ratio`` from geometry.
-- **An empty-data leaf lowers to a hole cell instead of raising or falling
-  back** — Task 10-pre-a: ``_build_grid_tree``'s cells support ``grid``
-  holes, so a zero-row marginal/dendrogram lowers to ``{"kind": "hole"}``
-  (visually blank, matching the pre-cutover per-child render's blank output
-  for an empty chart) rather than declining the whole tree to the legacy path.
+- **An empty-data grid cell lowers like any leaf** — a zero-row
+  marginal/dendrogram draws its own frame and axes, aligned with the main
+  panel, and warns once per render, on the static and the interactive route.
 """
 
 from __future__ import annotations
@@ -42,6 +40,8 @@ import pytest
 
 import ferrum as fm
 from tests._svg_extents import numeric_text_entries
+from tests._svg_rects import panel_extents
+from tests.test_null_group_warning import _NO_ROWS_TO_DRAW, _render_capturing
 
 
 def _joint_chart(*, ratio: int = 5, spacing: float = 10.0, size: float = 300.0) -> fm.JointChart:
@@ -283,88 +283,74 @@ class TestClusterMapChartRatioGrid:
         assert heatmap_size / dendro_row_height == pytest.approx(expected_ratio, rel=0.01)
 
 
-class TestEmptyDataLeafLowersToHole:
-    """An empty-data grid cell lowers to a hole and renders via the composite path.
+class TestEmptyDataGridLeafDrawsItsFrame:
+    """A zero-row grid cell (a marginal or dendrogram) lowers like any leaf.
 
-    Task 10-pre-a sub-task 2: ``_build_grid_tree``'s cells support the ``grid``
-    layout's ``{"kind": "hole"}`` placeholder (Task 8a), so
-    ``_lower_leaf_node`` now turns a zero-row marginal/dendrogram into a hole
-    -- a faithful match for the legacy per-child path's blank-render behavior
-    for an empty chart -- instead of declining the whole tree to the legacy
-    path. RED before this task (``_composite_tree`` returned ``None`` for any
-    empty-data marginal/dendrogram); GREEN after.
+    Its frame and axes draw aligned with the main panel and the chart warns
+    once per render that its panel is drawn empty, on the static and the
+    interactive route.
     """
 
-    def test_joint_chart_empty_marginal_lowers_to_hole(self):
-        """An empty-data marginal lowers the JointChart via the composite path."""
+    @staticmethod
+    def _joint() -> "fm.JointChart":
         df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [4.0, 3.0, 2.0, 1.0]})
         center = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
         empty_top = fm.Chart(df.head(0)).mark_histogram().encode(x="x:Q")
-        jc = fm.JointChart(center, top=empty_top)
+        return fm.JointChart(center, top=empty_top)
 
-        lowered = jc._composite_tree(auto_tooltips=False)
-        assert lowered is not None
-        kinds = [c["kind"] for c in lowered.tree["children"]]
-        assert kinds == ["hole", "leaf"], f"empty marginal must lower to a hole: {kinds}"
+    @staticmethod
+    def _clustermap() -> "fm.ClusterMapChart":
+        wide = pl.DataFrame(
+            {"row": ["a", "b", "c", "d"], "x": [1.0, 0.5, 0.3, 0.9], "y": [0.5, 1.0, 0.7, 0.2]}
+        )
+        heatmap = fm.Chart(wide).mark_rect().encode(x="row", y="row", color="x")
+        empty_row_dendro = (
+            fm.Chart(wide.head(0)).mark_line().encode(x="x:Q", y="row").axis(show=False)
+        )
+        return fm.ClusterMapChart(heatmap, row_dendrogram=empty_row_dendro, dendrogram_ratio=0.3)
 
-        lowered_interactive = jc._composite_tree(auto_tooltips=True)
-        assert lowered_interactive is not None
+    def test_joint_chart_empty_marginal_lowers_to_a_leaf(self):
+        for auto_tooltips in (False, True):
+            lowered = self._joint()._composite_tree(auto_tooltips=auto_tooltips)
+            assert lowered is not None
+            kinds = [c["kind"] for c in lowered.tree["children"]]
+            assert kinds == ["leaf", "leaf"], f"empty marginal must lower to a leaf: {kinds}"
 
-    def test_joint_chart_empty_marginal_static_renders_via_composite_path(self):
-        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [4.0, 3.0, 2.0, 1.0]})
-        center = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
-        empty_top = fm.Chart(df.head(0)).mark_histogram().encode(x="x:Q")
-        jc = fm.JointChart(center, top=empty_top)
-
-        svg = jc.to_svg()  # must not raise
+    def test_joint_chart_empty_marginal_static_draws_both_frames_and_warns_once(self):
+        svg, messages = _render_capturing(self._joint().to_svg)
         assert svg.startswith("<svg")
         assert svg.count("<circle") > 0
+        assert messages == [_NO_ROWS_TO_DRAW]
+        extents = panel_extents(svg)
+        assert len(extents) == 2
+        (_, top), (_, joint) = sorted(extents.items(), key=lambda kv: kv[1][2])
+        assert top[:2] == pytest.approx(joint[:2], abs=1e-3)
 
-    def test_joint_chart_empty_marginal_interactive_renders_one_panel(self):
-        """The hole marginal contributes zero panels: only center renders."""
-        df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [4.0, 3.0, 2.0, 1.0]})
-        center = fm.Chart(df).mark_point().encode(x="x:Q", y="y:Q")
-        empty_top = fm.Chart(df.head(0)).mark_histogram().encode(x="x:Q")
-        jc = fm.JointChart(center, top=empty_top)
-
-        scene_json, packed = jc._render_interactive()  # must not raise
-        scene = json.loads(scene_json)
-        assert len(scene["panels"]) == 1
+    def test_joint_chart_empty_marginal_interactive_renders_both_panels_and_warns_once(self):
+        (scene_json, packed), messages = _render_capturing(self._joint()._render_interactive)
+        assert messages == [_NO_ROWS_TO_DRAW]
+        assert len(json.loads(scene_json)["panels"]) == 2
         assert isinstance(packed, (bytes, bytearray))
 
-    def test_clustermap_chart_empty_dendrogram_lowers_to_hole(self):
-        """An empty-data dendrogram lowers the ClusterMapChart via the composite path."""
-        wide = pl.DataFrame(
-            {"row": ["a", "b", "c", "d"], "x": [1.0, 0.5, 0.3, 0.9], "y": [0.5, 1.0, 0.7, 0.2]}
-        )
-        heatmap = fm.Chart(wide).mark_rect().encode(x="row", y="row", color="x")
-        empty_row_dendro = (
-            fm.Chart(wide.head(0)).mark_line().encode(x="x:Q", y="row").axis(show=False)
-        )
-        cmc = fm.ClusterMapChart(heatmap, row_dendrogram=empty_row_dendro, dendrogram_ratio=0.3)
+    def test_clustermap_chart_empty_dendrogram_lowers_to_a_leaf(self):
+        for auto_tooltips in (False, True):
+            lowered = self._clustermap()._composite_tree(auto_tooltips=auto_tooltips)
+            assert lowered is not None
+            kinds = [c["kind"] for c in lowered.tree["children"]]
+            assert kinds == ["leaf", "leaf"], f"empty dendrogram must lower to a leaf: {kinds}"
 
-        lowered = cmc._composite_tree(auto_tooltips=False)
-        assert lowered is not None
-        kinds = [c["kind"] for c in lowered.tree["children"]]
-        assert kinds == ["hole", "leaf"], f"empty dendrogram must lower to a hole: {kinds}"
-
-        lowered_interactive = cmc._composite_tree(auto_tooltips=True)
-        assert lowered_interactive is not None
-
-    def test_clustermap_chart_empty_dendrogram_renders_one_panel(self):
-        wide = pl.DataFrame(
-            {"row": ["a", "b", "c", "d"], "x": [1.0, 0.5, 0.3, 0.9], "y": [0.5, 1.0, 0.7, 0.2]}
-        )
-        heatmap = fm.Chart(wide).mark_rect().encode(x="row", y="row", color="x")
-        empty_row_dendro = (
-            fm.Chart(wide.head(0)).mark_line().encode(x="x:Q", y="row").axis(show=False)
-        )
-        cmc = fm.ClusterMapChart(heatmap, row_dendrogram=empty_row_dendro, dendrogram_ratio=0.3)
-
-        svg = cmc.to_svg()  # must not raise
+    def test_clustermap_chart_empty_dendrogram_draws_both_frames_and_warns_once(self):
+        svg, messages = _render_capturing(self._clustermap().to_svg)
         assert svg.startswith("<svg")
+        assert messages == [_NO_ROWS_TO_DRAW]
+        extents = panel_extents(svg)
+        assert len(extents) == 2
+        (a, b) = sorted(extents.values())
+        assert a[2:] == pytest.approx(b[2:], abs=1e-3)  # same rows span
 
-        scene_json, packed = cmc._render_interactive()  # must not raise
-        scene = json.loads(scene_json)
-        assert len(scene["panels"]) == 1  # the empty dendrogram's hole contributes none
+        (scene_json, packed), interactive = _render_capturing(
+            self._clustermap()._render_interactive
+        )
+        assert interactive == [_NO_ROWS_TO_DRAW]
+        assert len(json.loads(scene_json)["panels"]) == 2
         assert isinstance(packed, (bytes, bytearray))

@@ -166,38 +166,31 @@ def test_a_single_marginal_jointplot_aligns_too(frame):
     )
 
 
-def test_an_empty_marginal_drops_its_declaration_rather_than_refusing(frame):
-    """An empty-data marginal lowers to a HOLE, and a hole has no plot extent
-    to adopt — so the declaration naming it is dropped at lowering.
-
-    The two halves of that sentence must not be confused. The wire contract
-    stays strict: a declaration naming a hole is malformed and Rust refuses it
-    naming the entry, because no lowering may emit one. What happens here is
-    the FIGURE changing shape under the lowering's feet (`_lower_leaf` turns a
-    zero-row cell into a hole), which is the lowering's own business to
-    reconcile. Before it did, this figure raised
-    `ValueError: grid: extent_alignments[0] names a 'hole' cell` instead of
-    rendering — caught by `test_composite_render_ratio.py`'s empty-marginal
-    cases, and pinned here beside the contract it qualifies.
-    """
+def test_an_empty_marginal_keeps_its_declaration_and_aligns_with_the_joint_panel(frame):
+    """A zero-row marginal lowers to a leaf like any other, so its declaration stays on the wire
+    and its drawn frame spans the joint panel's axis."""
     from ferrum.composition import JointChart
 
     center = fm.Chart(frame).mark_point().encode(x="x:Q", y="y:Q")
     empty_top = fm.Chart(frame.head(0)).mark_histogram().encode(x="x:Q")
-    lowered = JointChart(center, top=empty_top)._composite_tree(auto_tooltips=False)
+    chart = JointChart(center, top=empty_top)
+    lowered = chart._composite_tree(auto_tooltips=False)
 
-    assert [c["kind"] for c in lowered.tree["children"]] == ["hole", "leaf"]
-    assert "extent_alignments" not in lowered.tree, (
-        "the only declared follower became a hole, so the key is omitted entirely"
-    )
-    assert lowered.render_svg().startswith("<svg")
+    assert [c["kind"] for c in lowered.tree["children"]] == ["leaf", "leaf"]
+    assert lowered.tree["extent_alignments"] == [{"follower": 0, "leader": 1, "axis": "x"}]
+    extents = panel_extents(lowered.render_svg())
+    assert len(extents) == 2
+    (_, top), (_, joint) = sorted(extents.items(), key=lambda kv: kv[1][2])
+    assert top[:2] == pytest.approx(joint[:2], abs=EPS)
 
-    # A live marginal beside an empty one keeps ITS declaration: the drop is
-    # per-entry, not all-or-nothing.
+    # A live marginal beside an empty one is declared too: every marginal is.
     empty_right = fm.Chart(frame.head(0)).mark_histogram().encode(x="x:Q")
     right = fm.Chart(frame).mark_point().encode(x="x:Q", y="y:Q")
     both = JointChart(center, top=empty_right, right=right)._composite_tree(auto_tooltips=False)
-    assert both.tree["extent_alignments"] == [{"follower": 3, "leader": 2, "axis": "y"}]
+    assert both.tree["extent_alignments"] == [
+        {"follower": 0, "leader": 2, "axis": "x"},
+        {"follower": 3, "leader": 2, "axis": "y"},
+    ]
 
 
 def test_a_layered_centre_warns_that_the_marginal_was_not_aligned(frame):
