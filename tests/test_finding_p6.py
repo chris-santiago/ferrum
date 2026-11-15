@@ -508,16 +508,10 @@ def test_annotation_bracket_direction_alias_constructs(direction):
     )
 
 
-def test_annotation_bracket_up_renders_identically_to_above_and_below():
-    """Documents a known, out-of-scope Rust limitation this Python-only fix
-    does not paper over: "above" (the documented default), "below", and
-    "up" all currently render identically in emit_bracket (only "up" has an
-    explicit match arm; "above"/"below" fall through to the same tip
-    direction as "up"). All three must still be valid to construct."""
-    svg_above = _render_bracket("above")
-    svg_below = _render_bracket("below")
-    svg_up = _render_bracket("up")
-    assert svg_above == svg_below == svg_up
+def test_annotation_bracket_above_renders_identically_to_up():
+    """ "above" (the documented default) is a synonym for "up"; "below" is the synonym for
+    "down" and is pinned in ``tests/test_annotation_caller_channels.py``."""
+    assert _render_bracket("above") == _render_bracket("up")
 
 
 def test_annotation_bracket_down_left_right_are_genuinely_distinct():

@@ -70,17 +70,9 @@ _VALID_TEXT_BASELINES = (
 # routes to the post-marks bucket. No further Rust-recognized alias exists.
 _VALID_ANNOTATION_Z = ("above_marks", "below_marks")
 
-# render/annotation.rs::emit_bracket -- "up"/"down"/"left"/"right" are the
-# four match arms Rust actually distinguishes; anything else (including the
-# documented default "above" and its sibling "below") falls through to the
-# same tip direction as "up". "above"/"below" are kept in the validated set
-# because "above" is the class's own documented default and "below" is
-# covered by an existing passing test/usage -- rejecting either would be a
-# self-inflicted regression, not a fix. Rust does not currently render
-# "below" distinctly from "above"/"up" (a latent Rust defect noted but not
-# fixed by this Python-only change); "up"/"down"/"left"/"right" are added
-# here because they are genuinely Rust-recognized tokens that this class's
-# validation previously rejected without ever being reachable pre-fix.
+# render/annotation.rs::emit_bracket -- "up"/"down"/"left"/"right" are the tip directions the
+# renderer draws. "above" is the documented default and the synonym of "up"; "below" is the
+# synonym of "down".
 _VALID_BRACKET_DIRECTIONS = ("above", "below", "up", "down", "left", "right")
 
 
@@ -611,11 +603,10 @@ def bracket(
     direction : str, default "above"
         Which side the tip ticks point toward: ``"up"``, ``"down"``,
         ``"left"``, or ``"right"``. ``"above"`` is a synonym for ``"up"``
-        (kept as the default for backward compatibility). ``"below"`` is
-        accepted for symmetry with ``"above"`` but currently renders
-        identically to ``"above"``/``"up"`` — a known renderer limitation,
-        not a Python-side validation gap; pass ``"down"`` for a tip that
-        actually points downward.
+        (the default); ``"below"`` is a synonym for ``"down"``. Under a
+        caller's ``CoordFlip`` the direction exchanges with the coordinate
+        pair, so a bracket's tips and label still point away from its
+        baseline.
     stroke : str, default "#333"
         Bracket stroke color.
     tip_length : float, default 6

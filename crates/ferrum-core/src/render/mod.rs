@@ -1350,9 +1350,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // their field docs on `RenderError`. The remaining variants carry no
         // user-channel token at all.
         other @ (RenderError::InvalidViewport { .. }
-        // Worded in the letter of the axis the annotation field is measured on,
-        // as the field stands when the annotation is built; it carries no
-        // encoding channel token, so there is nothing to un-flip here.
+        // Worded in the caller's axis letter: under a caller's `CoordFlip` the
+        // annotation builder exchanges the fields before it places them and maps
+        // the drawn axis back when it words a refusal, so it carries no
+        // encoding channel token and there is nothing to un-flip here.
         | RenderError::AnnotationRefused(_)
         | RenderError::UnknownColumn { .. }
         | RenderError::RasterColorNotQuantitative(_)

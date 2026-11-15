@@ -257,6 +257,53 @@ pub enum AnnotationSpec {
     },
 }
 
+impl AnnotationSpec {
+    /// This spec with every coordinate pair and a span's `axis` exchanged
+    /// (`x`/`y`, `x1`/`y1`, `x2`/`y2`, `text_x`/`text_y`): the spec the caller
+    /// wrote under a `CoordFlip`, read against the drawn axes. Offsets (`dx`,
+    /// `dy`), anchors and label positions are drawn-space and stay where they
+    /// are. A bracket's `direction` is geometry along its own baseline, so it
+    /// is transposed with the pair: up and above to right, down and below to
+    /// left, left to down, right to up (an unrecognized value draws as up, so it
+    /// becomes right).
+    fn exchanged(&self) -> Self {
+        use std::mem::swap;
+        let mut spec = self.clone();
+        match &mut spec {
+            AnnotationSpec::Text { x, y, .. }
+            | AnnotationSpec::Callout { x, y, .. }
+            | AnnotationSpec::Image { x, y, .. } => swap(x, y),
+            AnnotationSpec::Arrow { x, y, x2, y2, .. } => {
+                swap(x, y);
+                swap(x2, y2);
+            }
+            AnnotationSpec::Rect { x1, y1, x2, y2, .. }
+            | AnnotationSpec::Line { x1, y1, x2, y2, .. } => {
+                swap(x1, y1);
+                swap(x2, y2);
+            }
+            AnnotationSpec::Bracket { x1, y1, x2, y2, direction, .. } => {
+                swap(x1, y1);
+                swap(x2, y2);
+                *direction = match direction.as_str() {
+                    "down" | "below" => "left",
+                    "left" => "down",
+                    "right" => "up",
+                    _ => "right",
+                }
+                .to_string();
+            }
+            AnnotationSpec::Span { axis, .. } => {
+                *axis = if axis == "x" { "y" } else { "x" }.to_string();
+            }
+        }
+        if let AnnotationSpec::Callout { text_x, text_y, .. } = &mut spec {
+            swap(text_x, text_y);
+        }
+        spec
+    }
+}
+
 // ── Per-variant wire key sets (#92/#148 array-item gate) ────────────────────
 //
 // One const per `AnnotationSpec` variant, INCLUDING `type` (the item's own
@@ -1132,7 +1179,7 @@ fn emit_bracket(
 
     let (tip_dx, tip_dy) = match direction {
         "up" => (0.0, -tip_length),
-        "down" => (0.0, tip_length),
+        "down" | "below" => (0.0, tip_length),
         "left" => (-tip_length, 0.0),
         "right" => (tip_length, 0.0),
         _ => (0.0, -tip_length),
@@ -1163,7 +1210,7 @@ fn emit_bracket(
         let label_offset = tip_length + 4.0;
         let (off_x, off_y) = match direction {
             "up" => (0.0, -label_offset),
-            "down" => (0.0, label_offset),
+            "down" | "below" => (0.0, label_offset),
             "left" => (-label_offset, 0.0),
             "right" => (label_offset, 0.0),
             _ => (0.0, -label_offset),
@@ -1313,13 +1360,29 @@ fn emit_callout(
 /// A category coordinate is checked first ([`check_categories`]): it refuses
 /// where the panel cannot place it and warns once per label the axis lacks.
 /// `projected_coord` names a `CoordPolar`/`CoordGeo` panel ([`projected_coord_name`]).
+///
+/// `names_unflipped` says the caller's own `CoordFlip` put the caller's x on the
+/// drawn vertical axis (`prepare::names_unflipped`). The specs then hold the
+/// caller's channels, so each coordinate pair is exchanged once here
+/// ([`AnnotationSpec::exchanged`]) and every builder reads them as drawn
+/// coordinates; refusals and warnings map the drawn axis back to the caller's
+/// letter. Offsets, anchors and label positions are drawn-space and
+/// are not exchanged.
 pub fn build_annotations_through_breaks(
     specs: &[AnnotationSpec],
     ctx: &ScaleContext<'_>,
     projected_coord: Option<&'static str>,
+    names_unflipped: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<AnnotationNodes, AnnotationRefusal> {
-    check_categories(specs, ctx, projected_coord, warnings)?;
+    let exchanged: Vec<AnnotationSpec>;
+    let specs = if names_unflipped {
+        exchanged = specs.iter().map(AnnotationSpec::exchanged).collect();
+        &exchanged[..]
+    } else {
+        specs
+    };
+    check_categories(specs, ctx, projected_coord, names_unflipped, warnings)?;
     if ctx.breaks.is_empty() {
         return Ok(build_annotations(specs, ctx));
     }
@@ -1400,12 +1463,21 @@ fn coords_with_axes(spec: &AnnotationSpec) -> Vec<(AlignAxis, &CoordValue)> {
 /// centre). The order is the coord, then the axis kind, then the span's shape,
 /// so a span with one category end is refused for its shape only on a
 /// categorical axis, where both ends as categories is a remedy that renders.
+///
+/// `specs` are already in drawn space; `exchanged` says they were exchanged from
+/// the caller's, so a message names the other letter than the axis it measured.
 fn check_categories(
     specs: &[AnnotationSpec],
     ctx: &ScaleContext<'_>,
     projected_coord: Option<&'static str>,
+    exchanged: bool,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<(), AnnotationRefusal> {
+    let callers = |axis: AlignAxis| match (exchanged, axis.is_y()) {
+        (false, _) => axis,
+        (true, true) => AlignAxis::X,
+        (true, false) => AlignAxis::Y,
+    };
     let mut unknown: Vec<(AlignAxis, &str)> = Vec::new();
     for spec in specs {
         for (axis, value) in coords_with_axes(spec) {
@@ -1413,7 +1485,7 @@ fn check_categories(
             if let Some(coord) = projected_coord {
                 return Err(AnnotationRefusal::CategoryUnderCoord {
                     label: label.to_string(),
-                    axis,
+                    axis: callers(axis),
                     coord,
                 });
             }
@@ -1421,7 +1493,7 @@ fn check_categories(
             if !matches!(scale, ScaleKind::Ordinal(_)) {
                 return Err(AnnotationRefusal::CategoryOnContinuousAxis {
                     label: label.to_string(),
-                    axis,
+                    axis: callers(axis),
                 });
             }
             if ctx.category_centre(scale, label).is_none() && !unknown.contains(&(axis, label)) {
@@ -1435,7 +1507,7 @@ fn check_categories(
                 _ => continue,
             };
             return Err(AnnotationRefusal::MixedSpanEnds {
-                axis: if axis == "x" { AlignAxis::X } else { AlignAxis::Y },
+                axis: callers(if axis == "x" { AlignAxis::X } else { AlignAxis::Y }),
                 category_end,
                 label: label.to_string(),
             });
@@ -1449,7 +1521,7 @@ fn check_categories(
         };
         domain.sort();
         warnings.push(RenderWarning::AnnotationCategoryNotFound {
-            axis,
+            axis: callers(axis),
             label: label.to_string(),
             domain,
         });

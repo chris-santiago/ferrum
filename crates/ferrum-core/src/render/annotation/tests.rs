@@ -631,6 +631,19 @@ fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
     );
 }
 
+/// "below" draws as "down" and "above" as "up", tips and label alike.
+#[test]
+fn emit_bracket_below_draws_like_down_and_above_like_up() {
+    let drawn = |direction: &str| {
+        let mut out = Vec::new();
+        emit_bracket(0.0, 100.0, 100.0, 100.0, "n", direction, "#000000", 6.0, &mut out);
+        format!("{out:?}")
+    };
+    assert_eq!(drawn("below"), drawn("down"));
+    assert_eq!(drawn("above"), drawn("up"));
+    assert_ne!(drawn("below"), drawn("up"));
+}
+
 /// R1 port: an unrecognized bracket `direction` defaults to "up" (matching
 /// the fallthrough arm), rather than silently producing a zero-length tip.
 #[test]
@@ -1356,7 +1369,7 @@ impl BrokenPanel {
             breaks,
         };
         let mut warnings = Vec::new();
-        let nodes = build_annotations_through_breaks(specs, &ctx, None, &mut warnings).unwrap();
+        let nodes = build_annotations_through_breaks(specs, &ctx, None, false, &mut warnings).unwrap();
         assert!(
             nodes.below_marks.is_empty(),
             "these fixtures use above-marks specs only"
@@ -1947,7 +1960,7 @@ fn no_breaks_routes_straight_to_the_plain_build() {
         breaks: &[],
     };
     let mut warnings = Vec::new();
-    let routed = build_annotations_through_breaks(&specs, &ctx, None, &mut warnings).unwrap();
+    let routed = build_annotations_through_breaks(&specs, &ctx, None, false, &mut warnings).unwrap();
     let plain = build_annotations(&specs, &ctx);
 
     assert_eq!(routed.above_marks, plain.above_marks);
@@ -1986,7 +1999,7 @@ fn a_below_marks_text_untouched_by_the_break_still_routes_to_below_marks() {
         breaks: &[y],
     };
     let mut warnings = Vec::new();
-    let nodes = build_annotations_through_breaks(&[text], &ctx, None, &mut warnings).unwrap();
+    let nodes = build_annotations_through_breaks(&[text], &ctx, None, false, &mut warnings).unwrap();
 
     assert!(warnings.is_empty());
     assert!(
@@ -2094,7 +2107,7 @@ mod categories {
     ) -> (Result<AnnotationNodes, AnnotationRefusal>, Vec<RenderWarning>) {
         let ctx = ScaleContext { plot_area: PLOT, x_scale: x, y_scale: y, breaks: &[] };
         let mut warnings = Vec::new();
-        let built = build_annotations_through_breaks(specs, &ctx, projected, &mut warnings);
+        let built = build_annotations_through_breaks(specs, &ctx, projected, false, &mut warnings);
         (built, warnings)
     }
 
@@ -2357,5 +2370,308 @@ mod categories {
         assert_eq!(named(r#"{"kind": "fixed"}"#), None);
         assert_eq!(projected_coord_name(Some(&CoordKind::Flip)), None);
         assert_eq!(projected_coord_name(None), None);
+    }
+    fn run_flipped(
+        specs: &[AnnotationSpec],
+        x: &ScaleKind,
+        y: &ScaleKind,
+    ) -> (Result<AnnotationNodes, AnnotationRefusal>, Vec<RenderWarning>) {
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: x, y_scale: y, breaks: &[] };
+        let mut warnings = Vec::new();
+        let built = build_annotations_through_breaks(specs, &ctx, None, true, &mut warnings);
+        (built, warnings)
+    }
+
+    fn data(v: f64) -> CoordValue {
+        CoordValue::Data(v)
+    }
+
+    fn shown(nodes: &AnnotationNodes) -> String {
+        format!("{:?}", nodes.above_marks)
+    }
+
+    /// Both axes linear and distinct, so an exchange is visible in the pixels.
+    fn unequal_axes() -> (ScaleKind, ScaleKind) {
+        let (x, y, _) = test_ctx();
+        (x, y)
+    }
+
+    #[test]
+    fn a_flipped_text_places_the_callers_x_on_the_drawn_vertical_axis() {
+        let (x, y) = unequal_axes();
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let (built, _) = run_flipped(&[text(data(30.0), data(0.5))], &x, &y);
+        let (px, py) = text_position(&built.unwrap());
+        assert!((px - ctx.resolve_x(&data(0.5))).abs() < 1e-9, "x {px}");
+        assert!((py - ctx.resolve_y(&data(30.0))).abs() < 1e-9, "y {py}");
+        let (plain, _) = run(&[text(data(30.0), data(0.5))], &x, &y, None);
+        assert_ne!(text_position(&plain.unwrap()), (px, py), "the exchange moves the text");
+    }
+
+    #[test]
+    fn a_flipped_text_keeps_its_offsets_and_anchor_in_drawn_space() {
+        let (x, y) = unequal_axes();
+        let mut spec = text(data(30.0), data(0.5));
+        if let AnnotationSpec::Text { dx, dy, anchor, .. } = &mut spec {
+            *dx = 7.0;
+            *dy = -5.0;
+            *anchor = "end".to_string();
+        }
+        let exchanged = spec.exchanged();
+        let AnnotationSpec::Text { dx, dy, anchor, .. } = &exchanged else {
+            panic!("a text spec stays a text spec under the exchange, got {exchanged:?}");
+        };
+        assert_eq!((*dx, *dy, anchor.as_str()), (7.0, -5.0, "end"));
+        let (flipped, _) = run_flipped(&[spec], &x, &y);
+        let (px, py) = text_position(&flipped.unwrap());
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        assert!((px - (ctx.resolve_x(&data(0.5)) + 7.0)).abs() < 1e-9);
+        assert!((py - (ctx.resolve_y(&data(30.0)) - 5.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_flipped_category_x_lands_on_the_band_of_the_drawn_vertical_axis() {
+        let y = band(&["a", "b", "c", "d"], [20.0, 320.0], 0.0);
+        let (built, warnings) = run_flipped(&[text(category("b"), data(2.0))], &linear(), &y);
+        let (_, py) = text_position(&built.unwrap());
+        assert!((py - 132.5).abs() < 1e-9, "band b centre is 132.5, got {py}");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn a_flipped_category_span_shades_whole_bands_across_the_plot_width() {
+        let y = band(&["a", "b", "c", "d"], [20.0, 320.0], 0.0);
+        let (built, _) = run_flipped(&[span("x", category("b"), category("c"))], &linear(), &y);
+        let (rx, ry, rw, rh) = rect_extent_of(&built.unwrap());
+        assert!((ry - 95.0).abs() < 1e-9 && (rh - 150.0).abs() < 1e-9, "{ry} {rh}");
+        assert!((rx - PLOT.x).abs() < 1e-9 && (rw - PLOT.w).abs() < 1e-9, "{rx} {rw}");
+    }
+
+    #[test]
+    fn a_flipped_numeric_span_runs_along_the_drawn_vertical_axis() {
+        let (x, y) = unequal_axes();
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let (built, _) = run_flipped(&[span("x", data(20.0), data(40.0))], &x, &y);
+        let (rx, ry, rw, rh) = rect_extent_of(&built.unwrap());
+        let (a, b) = (ctx.resolve_y(&data(20.0)), ctx.resolve_y(&data(40.0)));
+        assert!((ry - a.min(b)).abs() < 1e-9 && (rh - (a - b).abs()).abs() < 1e-9, "{ry} {rh}");
+        assert!((rx - PLOT.x).abs() < 1e-9 && (rw - PLOT.w).abs() < 1e-9, "{rx} {rw}");
+    }
+
+    #[test]
+    fn a_flipped_norm_and_pixel_measure_along_the_drawn_axis_their_field_lands_on() {
+        let (x, y) = unequal_axes();
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        let (built, _) = run_flipped(&[text(CoordValue::Norm { norm: 0.1 }, data(0.5))], &x, &y);
+        let (px, py) = text_position(&built.unwrap());
+        assert!((py - (PLOT.y + 0.1 * PLOT.h)).abs() < 1e-9, "10% down from the top, got {py}");
+        assert!((px - ctx.resolve_x(&data(0.5))).abs() < 1e-9, "caller's y on the horizontal axis");
+        let (built, _) = run_flipped(&[text(CoordValue::Pixel { px: 25.0 }, data(0.5))], &x, &y);
+        let (_, py) = text_position(&built.unwrap());
+        assert!((py - (PLOT.y + 25.0)).abs() < 1e-9, "25 px below the top, got {py}");
+    }
+
+    fn callout(x: f64, y: f64, text_x: Option<f64>, text_y: Option<f64>) -> AnnotationSpec {
+        AnnotationSpec::Callout {
+            x: data(x),
+            y: data(y),
+            text: "n".to_string(),
+            arrow: "straight".to_string(),
+            padding: 4.0,
+            background: "#ffffff".to_string(),
+            border_color: "#333333".to_string(),
+            border_radius: 0.0,
+            text_x: text_x.map(data),
+            text_y: text_y.map(data),
+        }
+    }
+
+    fn arrow(x: f64, y: f64, x2: f64, y2: f64) -> AnnotationSpec {
+        AnnotationSpec::Arrow {
+            x: data(x),
+            y: data(y),
+            x2: data(x2),
+            y2: data(y2),
+            stroke: "#000000".to_string(),
+            stroke_width: 1.0,
+            head_size: 6.0,
+        }
+    }
+
+    fn rect(x1: f64, y1: f64, x2: f64, y2: f64) -> AnnotationSpec {
+        AnnotationSpec::Rect {
+            x1: data(x1),
+            y1: data(y1),
+            x2: data(x2),
+            y2: data(y2),
+            fill: "#cccccc".to_string(),
+            opacity: 0.5,
+            corner_radius: 0.0,
+            stroke: None,
+        }
+    }
+
+    fn line(x1: f64, y1: f64, x2: f64, y2: f64) -> AnnotationSpec {
+        AnnotationSpec::Line {
+            x1: data(x1),
+            y1: data(y1),
+            x2: data(x2),
+            y2: data(y2),
+            stroke: "#000000".to_string(),
+            stroke_width: 1.0,
+            dash: None,
+        }
+    }
+
+    fn bracket(x1: f64, y1: f64, x2: f64, y2: f64, direction: &str) -> AnnotationSpec {
+        AnnotationSpec::Bracket {
+            x1: data(x1),
+            y1: data(y1),
+            x2: data(x2),
+            y2: data(y2),
+            label: "b".to_string(),
+            direction: direction.to_string(),
+            stroke: "#000000".to_string(),
+            tip_length: 4.0,
+        }
+    }
+
+    fn image(x: f64, y: f64) -> AnnotationSpec {
+        AnnotationSpec::Image {
+            x: data(x),
+            y: data(y),
+            src: "data:,".to_string(),
+            width: 10.0,
+            height: 10.0,
+            anchor: "top-right".to_string(),
+        }
+    }
+
+    /// Each kind written by the caller beside the spec a hand exchange of its
+    /// pairs gives, with four distinct values so one missed swap shows.
+    fn caller_and_exchanged() -> Vec<(AnnotationSpec, AnnotationSpec)> {
+        vec![
+            (text(data(0.2), data(10.0)), text(data(10.0), data(0.2))),
+            (image(0.2, 10.0), image(10.0, 0.2)),
+            (arrow(0.2, 10.0, 0.8, 70.0), arrow(10.0, 0.2, 70.0, 0.8)),
+            (rect(0.2, 10.0, 0.8, 70.0), rect(10.0, 0.2, 70.0, 0.8)),
+            (line(0.2, 10.0, 0.8, 70.0), line(10.0, 0.2, 70.0, 0.8)),
+            (bracket(0.2, 10.0, 0.8, 70.0, "up"), bracket(10.0, 0.2, 70.0, 0.8, "right")),
+            (callout(0.2, 10.0, Some(0.5), Some(60.0)), callout(10.0, 0.2, Some(60.0), Some(0.5))),
+            (callout(0.2, 10.0, Some(0.5), None), callout(10.0, 0.2, None, Some(0.5))),
+            (span("x", data(10.0), data(70.0)), span("y", data(10.0), data(70.0))),
+            (span("y", data(10.0), data(70.0)), span("x", data(10.0), data(70.0))),
+        ]
+    }
+
+    #[test]
+    fn an_exchange_swaps_each_field_pair_of_every_kind_and_nothing_else() {
+        for (caller, expected) in caller_and_exchanged() {
+            assert_eq!(format!("{:?}", caller.exchanged()), format!("{expected:?}"));
+        }
+    }
+
+    #[test]
+    fn a_bracket_direction_is_transposed_with_its_pair() {
+        for (written, drawn) in [
+            ("up", "right"),
+            ("down", "left"),
+            ("left", "down"),
+            ("right", "up"),
+            ("above", "right"),
+            ("below", "left"),
+        ] {
+            assert_eq!(
+                format!("{:?}", bracket(0.2, 10.0, 0.8, 70.0, written).exchanged()),
+                format!("{:?}", bracket(10.0, 0.2, 70.0, 0.8, drawn)),
+                "direction {written}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flipped_bracket_equals_the_unflipped_chart_with_axes_exchanged() {
+        // The default bracket's tips and label sit off its baseline, never on it.
+        let (x, y) = unequal_axes();
+        let caller = bracket(0.2, 10.0, 0.8, 70.0, "up");
+        let (flipped, _) = run_flipped(std::slice::from_ref(&caller), &x, &y);
+        let (twin, _) = run(&[bracket(10.0, 0.2, 70.0, 0.8, "right")], &x, &y, None);
+        assert_eq!(shown(&flipped.unwrap()), shown(&twin.unwrap()));
+    }
+
+    #[test]
+    fn a_flipped_spec_of_every_kind_draws_the_hand_exchanged_spec_unflipped() {
+        let (x, y) = unequal_axes();
+        for (caller, expected) in caller_and_exchanged() {
+            let (flipped, _) = run_flipped(std::slice::from_ref(&caller), &x, &y);
+            let (hand, _) = run(&[expected], &x, &y, None);
+            let (plain, _) = run(std::slice::from_ref(&caller), &x, &y, None);
+            let (flipped, hand, plain) = (shown(&flipped.unwrap()), shown(&hand.unwrap()), shown(&plain.unwrap()));
+            assert_eq!(flipped, hand);
+            assert_ne!(flipped, plain, "{caller:?} must move under the exchange");
+        }
+    }
+
+    #[test]
+    fn an_unexchanged_build_is_the_same_nodes_as_before() {
+        let (x, y) = unequal_axes();
+        let specs = [text(data(30.0), data(0.5)), span("x", data(0.2), data(0.6))];
+        let (a, _) = run(&specs, &x, &y, None);
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &x, y_scale: &y, breaks: &[] };
+        assert_eq!(shown(&a.unwrap()), shown(&build_annotations(&specs, &ctx)));
+    }
+
+    #[test]
+    fn a_flipped_refusal_names_the_callers_axis_letter() {
+        // Caller's x is a category but the drawn vertical axis is continuous.
+        let (built, _) = run_flipped(&[text(category("b"), data(1.0))], &linear(), &linear());
+        assert!(built.unwrap_err().to_string().starts_with("annotation category 'b' on the x axis:"));
+        // Caller's y is a category and the drawn horizontal axis is continuous.
+        let (built, _) = run_flipped(&[text(data(1.0), category("b"))], &linear(), &linear());
+        assert!(built.unwrap_err().to_string().starts_with("annotation category 'b' on the y axis:"));
+        // Caller's y is a category and the drawn horizontal axis is continuous; the drawn vertical axis is a band.
+        let band_y = band(&["a", "b"], [20.0, 320.0], 0.0);
+        let (built, _) = run_flipped(&[text(data(1.0), category("b"))], &linear(), &band_y);
+        assert!(built.unwrap_err().to_string().starts_with("annotation category 'b' on the y axis:"));
+        let (built, _) = run_flipped(&[span("x", category("b"), data(2.5))], &linear(), &band_y);
+        assert_eq!(
+            built.unwrap_err().to_string(),
+            "annotation span on the x axis: start 'b' is a category and end is not; pass \
+             categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends"
+        );
+        let (built, _) = run_flipped(&[text(category("b"), data(1.0))], &linear(), &linear());
+        assert!(matches!(
+            built,
+            Err(AnnotationRefusal::CategoryOnContinuousAxis { axis: AlignAxis::X, .. })
+        ));
+    }
+
+    #[test]
+    fn a_flipped_projected_refusal_names_the_callers_axis_letter() {
+        let ctx_x = linear();
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: &ctx_x, y_scale: &ctx_x, breaks: &[] };
+        let mut warnings = Vec::new();
+        let built = build_annotations_through_breaks(
+            &[text(category("b"), data(1.0))],
+            &ctx,
+            Some("CoordPolar"),
+            true,
+            &mut warnings,
+        );
+        assert!(matches!(built, Err(AnnotationRefusal::CategoryUnderCoord { axis: AlignAxis::X, .. })));
+    }
+
+    #[test]
+    fn a_flipped_unknown_category_warns_naming_the_callers_axis() {
+        // The caller's x is categorical: it is drawn on the vertical axis.
+        let y = band(&["b", "a"], [20.0, 320.0], 0.0);
+        let (built, warnings) = run_flipped(&[text(category("zz"), data(1.0))], &linear(), &y);
+        let (_, py) = text_position(&built.unwrap());
+        assert!((py - 170.0).abs() < 1e-9, "plot centre, got {py}");
+        let shown: Vec<String> = warnings.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            shown,
+            ["annotation category 'zz' not found in x-axis domain ['a', 'b']; placing at plot center"]
+        );
     }
 }

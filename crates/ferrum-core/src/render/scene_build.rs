@@ -711,6 +711,7 @@ pub fn build_scene(
                 &chart_config.annotations,
                 &ann_ctx,
                 super::annotation::projected_coord_name(spec.coord.as_ref()),
+                prep.names_unflipped,
                 warnings,
             )
             .map_err(RenderError::AnnotationRefused)?
