@@ -1118,8 +1118,8 @@ def test_a_post_build_binding_on_another_variable_keeps_its_current_output(form_
 
 
 #: Each another-variable door on flat residplot and the exact refusal it
-#: raises: a later `.encode()`, and `encode=` at the call (which lands on
-#: the chart the same way, after the layers are already built).
+#: raises: a later `.encode()`. (`encode=` at the call names the call's own
+#: x/y, so it refits instead: see the test below the refusal test.)
 _FLAT_ANOTHER_VARIABLE_DOORS: dict[str, tuple[Callable[[], "fm.Chart"], str]] = {
     "later-x": (
         lambda: _residplot_flat().encode(x="u"),
@@ -1129,22 +1129,6 @@ _FLAT_ANOTHER_VARIABLE_DOORS: dict[str, tuple[Callable[[], "fm.Chart"], str]] = 
     ),
     "later-y": (
         lambda: _residplot_flat().encode(y="u"),
-        "residplot(y=Y('u')) after the call is not supported: residplot computes its "
-        "residuals from the y= it was called with ('w'), so 'u' would be drawn without "
-        "a refit. Pass it in the call instead: residplot(y='u', ...).",
-    ),
-    "encode-x": (
-        lambda: fm.residplot(
-            _frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"x": "u"}
-        ),
-        "residplot(x=X('u')) after the call is not supported: residplot computes its "
-        "residuals from the x= it was called with ('v'), so 'u' would be drawn without "
-        "a refit. Pass it in the call instead: residplot(x='u', ...).",
-    ),
-    "encode-y": (
-        lambda: fm.residplot(
-            _frame(), x="v", y="w", zero_line=False, show_metrics=False, encode={"y": "u"}
-        ),
         "residplot(y=Y('u')) after the call is not supported: residplot computes its "
         "residuals from the y= it was called with ('w'), so 'u' would be drawn without "
         "a refit. Pass it in the call instead: residplot(y='u', ...).",
@@ -1199,6 +1183,16 @@ def test_a_post_build_binding_on_another_variable_is_refused_on_flat_residplot(d
     with pytest.raises(EntryRefusal) as err:
         build().to_svg()
     assert str(err.value) == text
+
+
+@pytest.mark.parametrize("channel", ["x", "y"])
+def test_encode_at_the_call_on_another_variable_refits_flat_residplot(channel):
+    """`encode=` at the call is the call's own x/y: naming another column
+    draws the chart `residplot(x=..., y=...)` draws for it."""
+    flat = {"zero_line": False, "show_metrics": False}
+    via_encode = fm.residplot(_frame(), x="v", y="w", encode={channel: "u"}, **flat)
+    keywords = {"x": "v", "y": "w", channel: "u"}
+    assert via_encode.to_svg() == fm.residplot(_frame(), **keywords, **flat).to_svg()
 
 
 def test_a_post_build_binding_on_a_column_the_data_lacks_keeps_flat_residplots_raw_failure():

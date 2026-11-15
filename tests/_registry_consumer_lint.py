@@ -952,12 +952,14 @@ KNOWN_NON_CHANNEL_KEYWORDS = frozenset(
 KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
     {
         "Series",  # pl.Series("y", ...)
+        "_axis_channel",  # _axis_channel("x"/"y", value) -- the CHANNEL SLOT positional naming how to parse a caller's shorthand string, never a transform's output column read
         "_channel_class_for",  # internal channel-name -> class lookup, not a column read
         "_eager_post_build_channel",  # _eager_post_build_channel(out, "x"/"y", called_field=, drawn_column=...) -- the CHANNEL SLOT positional (same shape as _refuse_statistic_input), drawn_column/called_field the figure's own hardcoded literals
         "_extent_alignment",  # _extent_alignment(f, l, "x"|"y") -- an AXIS token, never a column
         "_histogram_categorical_reads",  # _histogram_categorical_reads("x"/"y") -- the OPPOSITE axis's channel name for the remedy text, never a transform's output column read
         "_refuse_statistic_input",  # _refuse_statistic_input(entry, "x"/"y", ch, reason=...) -- the channel SLOT, never a transform's output column read
         "_set_composite_mark",  # internal composite-mark metadata setter
+        "_written_field",  # _written_field("x"/"y", value) -- the CHANNEL SLOT positional naming how to parse a caller's shorthand string, never a transform's output column read
         "_unique_col_name",  # _unique_col_name(df.columns, "count") -- reads the SOURCE frame's own columns, never a transform's output batch
         "append",  # list.append("count") building a column-name list
         "col",  # pl.col("value")

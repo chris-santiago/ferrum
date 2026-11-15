@@ -56,9 +56,17 @@ from ferrum._validate import (
     validate_color_value,
 )
 from ferrum._warn import user_stacklevel
+from ferrum._encode_lowering import (
+    _rebind_positional,
+    _refuse_categorical_input,
+    _refuse_histogram_bin_aggregate,
+)
+from ferrum.encoding._resolve import channel_for_value
+from ferrum.encoding.base import ChannelBase
 from ferrum.marks._desugar_helpers import _unique_col_name, nominal_color_channel
 from ferrum.marks.base import _is_paint_sentinel
 from ferrum.plots._helpers import (
+    _merged_xy,
     _checked_figsize,
     _checked_figure_size,
     _field_name,
@@ -1635,6 +1643,8 @@ def jointplot(
         single-mark charts, a flat dict of mark properties.
     encode : dict, optional
         Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+        With ``kind="hist"`` an ``x``/``y`` entry is read as the call's own
+        ``x``/``y`` (the bins are computed from it).
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
@@ -1696,6 +1706,51 @@ def jointplot(
     )
 
 
+def _time_type_reads(channel: str, field: str, type_: str) -> str:
+    """Return the reason a hist centre refuses a declared time type on *channel*."""
+    return (
+        f"the histogram bins {channel} as numbers into 2-D cells, so type={type_!r} would "
+        f"be read as numbers, not as times. Drop the type ({channel}={field!r})."
+    )
+
+
+def _axis_channel(name: str, value: Any) -> Any:
+    """Return *value* as the channel ``encode()`` reads it as; any other value unchanged.
+
+    A shorthand string (``"w:Q"``, ``"mean(w)"``) is the channel it spells,
+    so one binding gets one refusal and one render whatever its spelling.
+    """
+    if isinstance(value, str):
+        return channel_for_value(name, value, declare=f"encode({name}=...)")
+    return value
+
+
+def _with_limit(cls: type[ChannelBase], bound: Any, limit: Any) -> ChannelBase:
+    """Return *bound* (a column name or channel) with *limit* as the domain of its scale.
+
+    A channel object keeps its field and every other option it carries, and
+    its own scale keeps its type and settings: the limit becomes that scale's
+    domain, replacing a domain the scale already had, and a limit the scale
+    cannot take meets the scale's own refusal at render. A column name, or a
+    channel with no scale, gets a scale holding the domain alone. A scale
+    value that is neither a dict nor a scale object is left as written, for
+    the scale door to refuse.
+    """
+    if not isinstance(bound, ChannelBase):
+        return cls(bound, scale={"domain": list(limit)})
+    scale = bound.option("scale")
+    if scale is None:
+        spec = {}
+    elif isinstance(scale, dict):
+        spec = scale
+    elif hasattr(scale, "_to_scale_spec_dict"):
+        spec = scale._to_scale_spec_dict()
+    else:
+        # Not a scale the limit can join: leave it for the scale door's own refusal.
+        return bound
+    return bound._with_options(scale={**spec, "domain": list(limit)})
+
+
 def _jointplot_build(
     data: Any,
     *,
@@ -1726,6 +1781,14 @@ def _jointplot_build(
     # Build the center chart per `kind`.
     from ferrum.encoding import X as _X, Y as _Y
 
+    # The 2-D histogram bins `x`/`y` itself, ahead of the encoding `encode=`
+    # lands on, so `encode=`'s x/y is read as this call's own x=/y= (the
+    # `Chart.encode` None-is-unset merge) before the bins and the marginals
+    # are built. Every other centre binds `x`/`y` through its encoding, which
+    # `encode=` reaches on every panel as it always has.
+    if kind == "hist":
+        x, y, encode = _merged_xy(x, y, encode, restating="own")
+
     jk = dict(joint_kws or {})
 
     # `hue` is typed Nominal once and reused on the centre and both marginals.
@@ -1744,12 +1807,12 @@ def _jointplot_build(
     # Apply xlim/ylim as scale domain overrides on center encodings.
     if xlim is not None:
         x_field = enc_center.get("x", x)
-        if isinstance(x_field, str):
-            enc_center["x"] = _X(x_field, scale={"domain": list(xlim)})
+        if isinstance(x_field, (str, ChannelBase)):
+            enc_center["x"] = _with_limit(_X, x_field, xlim)
     if ylim is not None:
         y_field = enc_center.get("y", y)
-        if isinstance(y_field, str):
-            enc_center["y"] = _Y(y_field, scale={"domain": list(ylim)})
+        if isinstance(y_field, (str, ChannelBase)):
+            enc_center["y"] = _with_limit(_Y, y_field, ylim)
 
     if kind == "scatter":
         center = Chart(data).mark_point(**jk).encode(**enc_center)
@@ -1785,13 +1848,39 @@ def _jointplot_build(
             "y2": _bin2d_cols["y_hi"],
             "color": _bin2d_cols["count"],
         }
-        if xlim is not None:
-            hist_enc["x"] = _X(_bin2d_cols["x_lo"], scale={"domain": list(xlim)})
-        if ylim is not None:
-            hist_enc["y"] = _Y(_bin2d_cols["y_lo"], scale={"domain": list(ylim)})
+        # x/y are read the way `encode()` reads them (a shorthand string is
+        # the channel it spells) and a channel names the column it bins by its
+        # field. Bin2D computes both axes itself, so a bin=/aggregate= on
+        # either is refused the way a histogram's value axis refuses it (each
+        # axis is the value axis of one orientation). A declared time type is
+        # refused as the categorical types are: the bins are numbers. The
+        # channel keeps its options on the bin column that is drawn (titled
+        # by its field), and a limit becomes the domain of its scale.
+        x_ch, y_ch = _axis_channel("x", x), _axis_channel("y", y)
+        for horizontal, encoding in (
+            (False, {"x": _field_name(x_ch), "y": y_ch}),
+            (True, {"x": x_ch, "y": _field_name(y_ch)}),
+        ):
+            _refuse_histogram_bin_aggregate(
+                "mark_histogram", encoding, horizontal=horizontal, density=False, share=None
+            )
+        for axis in ("x", "y"):
+            _refuse_categorical_input(
+                "jointplot",
+                {"x": x_ch, "y": y_ch},
+                (axis,),
+                reads=_time_type_reads,
+                disallowed=("T",),
+            )
+        for axis, bound, cls, lim in (("x", x_ch, _X, xlim), ("y", y_ch, _Y, ylim)):
+            column = _bin2d_cols[f"{axis}_lo"]
+            if isinstance(bound, ChannelBase):
+                hist_enc[axis] = _rebind_positional(column, bound, cls)
+            if lim is not None:
+                hist_enc[axis] = _with_limit(cls, hist_enc[axis], lim)
         center = (
             Chart(data)
-            ._with_statistics(Bin2D(x=x, y=y, **bin2d_kwargs))
+            ._with_statistics(Bin2D(x=_field_name(x_ch), y=_field_name(y_ch), **bin2d_kwargs))
             .mark_rect(**jk)
             .encode(**hist_enc)
         )
@@ -1851,7 +1940,7 @@ def _jointplot_build(
 
     enc_top: dict = {"x": x}
     if xlim is not None:
-        enc_top["x"] = _X(x, scale={"domain": list(xlim)})
+        enc_top["x"] = _with_limit(_X, x, xlim)
     if hue is not None:
         enc_top["color"] = hue_ch
     if marginal_kind == "hist":
@@ -1882,7 +1971,7 @@ def _jointplot_build(
     # marginal's y-axis (shared with the centre cell via share_y).
     enc_right: dict = {"y": y}
     if ylim is not None:
-        enc_right["y"] = _Y(y, scale={"domain": list(ylim)})
+        enc_right["y"] = _with_limit(_Y, y, ylim)
     if hue is not None:
         enc_right["color"] = hue_ch
     if marginal_kind == "hist":

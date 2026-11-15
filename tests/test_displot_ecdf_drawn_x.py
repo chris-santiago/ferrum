@@ -122,49 +122,47 @@ def test_shorthand_x_reaches_every_overlay(two_col_df, kind, overlay):
 
 
 @pytest.mark.parametrize("overlay", ["kde", "rug"])
-def test_overlay_x_reads_v_despite_a_later_encode_x(two_col_df, overlay):
-    """The overlay block resolves inside displot, from the x= keyword,
-    before encode= lands: encode={"x": "w"} re-points the primary layer's
-    x, but the overlay keeps reading v."""
+def test_overlay_x_reads_the_encode_x(two_col_df, overlay):
+    """``encode={"x": "w"}`` is the call's own x: the overlay reads w, as the
+    primary layer does."""
     chart = fm.displot(two_col_df, x="v", kind="hist", encode={"x": "w"}, **{overlay: True})
     spec = json.loads(chart.to_spec().to_json())
     if overlay == "kde":
         (kde_step,) = [step for step in all_steps(spec) if step["type"] == "kde"]
-        assert kde_step["field"] == "v"
+        assert kde_step["field"] == "w"
     else:
         rug_layer = next(layer for layer in spec["layers"] if layer.get("name") == "rug")
-        assert rug_layer["encoding"]["x"]["field"] == "v"
+        assert rug_layer["encoding"]["x"]["field"] == "w"
 
 
 @pytest.mark.parametrize("overlay", ["kde", "rug"])
 @pytest.mark.parametrize("door", ["encode", "posthoc"])
-def test_an_overlaid_ecdf_reads_the_x_keyword_through_every_later_door(two_col_df, overlay, door):
+def test_an_overlaid_ecdf_reads_the_x_it_was_called_with(two_col_df, overlay, door):
     """With a kde= or rug= overlay, displot builds the ECDF and its overlays
-    before it returns, from the x= keyword alone, so a later x through an
-    encode= entry or a post-hoc .encode() reaches none of them: the line
-    keeps counting and drawing v, byte-identical to the call without the
-    later x."""
+    before it returns. An ``encode=`` x is the call's own x, so the line
+    counts and draws w, byte-identical to ``x="w"``; a post-hoc ``.encode()``
+    reaches none of them, so the line keeps counting and drawing v."""
     if door == "encode":
         chart = fm.displot(two_col_df, x="v", kind="ecdf", encode={"x": "w"}, **{overlay: True})
+        counted = "w"
     else:
         chart = fm.displot(two_col_df, x="v", kind="ecdf", **{overlay: True}).encode(x="w")
-    plain = fm.displot(two_col_df, x="v", kind="ecdf", **{overlay: True})
+        counted = "v"
+    plain = fm.displot(two_col_df, x=counted, kind="ecdf", **{overlay: True})
     assert chart.to_svg() == plain.to_svg()
     spec = json.loads(chart.to_spec().to_json())
     (window,) = [step for step in all_steps(spec) if step["type"] == "data_window"]
-    assert window["sort"] == ["v"]
-    assert window["ops"][0]["field"] == "v"
+    assert window["sort"] == [counted]
+    assert window["ops"][0]["field"] == counted
 
 
-def test_encode_x_with_no_x_keyword_is_refused_as_x_none(two_col_df):
+def test_encode_x_with_no_x_keyword_is_the_calls_own_x(two_col_df):
     """``displot(kind="ecdf", encode={"x": "v"})`` with no ``x=`` keyword is
-    refused exactly as ``displot(kind="ecdf")`` is: ``encode=`` is read only
-    after the call-time "needs x=" check, which sees the keyword alone."""
-    with pytest.raises(ValueError) as with_encode:
-        fm.displot(two_col_df, kind="ecdf", encode={"x": "v"})
-    with pytest.raises(ValueError) as without_encode:
-        fm.displot(two_col_df, kind="ecdf")
-    assert str(with_encode.value) == str(without_encode.value)
+    ``displot(kind="ecdf", x="v")``: ``encode=`` x is read before the
+    call's "needs x=" check."""
+    with_encode = fm.displot(two_col_df, kind="ecdf", encode={"x": "v"})
+    keyword = fm.displot(two_col_df, kind="ecdf", x="v")
+    assert with_encode.to_svg() == keyword.to_svg()
 
 
 def test_null_x_values_use_the_same_window_wire():

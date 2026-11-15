@@ -8,7 +8,7 @@ from __future__ import annotations
 import functools
 import inspect
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Callable, Iterable, NamedTuple, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, NamedTuple, TypeVar
 
 import polars as pl
 
@@ -241,6 +241,72 @@ def _drawn_positional_channels(bindings: dict, encode: dict | None) -> dict[str,
         elif isinstance(value, str):
             channels[name] = channel_for_value(name, value, declare=f"encode({name}=...)")
     return channels
+
+
+def _written_field(name: str, value: Any) -> str | None:
+    """Return the column a written x/y *value* names, or ``None`` when it names none.
+
+    A string is read the way ``encode()`` reads it (``"v:N"`` names ``v``), a
+    channel names its own field, and any other value (a fieldless channel, a
+    placeholder) names no column.
+    """
+    if isinstance(value, ChannelBase):
+        return value.field
+    if isinstance(value, str):
+        return channel_for_value(name, value, declare=f"encode({name}=...)").field
+    return None
+
+
+def _merged_xy(
+    x: Any,
+    y: Any,
+    encode: dict | None,
+    *,
+    keep: dict[str, frozenset[str]] | None = None,
+    restating: Literal["later", "own"] = "later",
+) -> tuple[Any, Any, dict | None]:
+    """Return the x, y and remaining ``encode=`` of a call whose ``encode=`` x/y are its own.
+
+    ``encode={"y": "w2"}`` binds the column ``y="w2"`` would, so a binding to
+    a column other than the keyword's (or to one when the keyword binds none)
+    replaces the keyword's. The call reads the merged x/y once, before any
+    refusal, frame read or kind dispatch, so every statistic it computes reads
+    the column the chart draws. ``None`` leaves the keyword binding in place
+    (``Chart.encode``'s None-is-unset merge).
+
+    Three kinds of binding stay in ``encode=``, where the chart's own later
+    binding reads them as it does a later ``.encode()``: one that restates the
+    keyword's own column (its title, scale or declared type), one that names no
+    column (a fieldless channel), and one naming a column in *keep* (a column
+    the figure draws itself). A call whose statistic never takes a later
+    restatement (``restating="own"``) reads a restatement as its own too. The
+    remaining ``encode=`` is ``None`` when nothing is left.
+    """
+    if not encode:
+        return x, y, encode
+    own = {"x": x, "y": y}
+    rest = dict(encode)
+    for name in ("x", "y"):
+        if name not in rest:
+            continue
+        written = rest[name]
+        if written is None:
+            del rest[name]
+            continue
+        field = _written_field(name, written)
+        if (
+            field is None
+            or field in (keep or {}).get(name, ())
+            or (
+                own[name] is not None
+                and restating == "later"
+                and field == _written_field(name, own[name])
+            )
+        ):
+            continue
+        own[name] = written
+        del rest[name]
+    return own["x"], own["y"], rest or None
 
 
 def _encode_grouping(bindings: dict) -> list[str]:

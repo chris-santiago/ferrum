@@ -1864,7 +1864,7 @@ _FINITE_DIGESTS: dict[str, str] = {
     "mark_hex": "d62f8bbaaad9dea9223b4ec4a79f021f5a1d328494e6b3d250c54c62bd851059",
     "mark_raster": "288b36880b3cd516d594aadee62940ee6a2dd0383e406efaba133c52a3c47a6b",
     "jointplot hex": "3f345cada87622415194ff9072a03fecce66358f53f9533e4c340dddaf58f1f0",
-    "jointplot hist": "dbc86e737029a059b4f456b42d0370fa280716679cea9fb3c710bf06912eafae",
+    "jointplot hist": "c8bfc2c7b506a2c21f9e74ee8fdfc8dd3e3e578ba35a24865590075df9419653",
     "jointplot kde": "d015368dd10d790e82af783c9fb74f410c3b3c41017ef9ba9716af98f8ac445c",
     "jointplot scatter": "733b83ee4a0a7ed83ff06413689c53aa92be0191f0310545cfd045d5ab11e6bf",
     "mark_point": "a1dd556295fd02004bccf04453e548d4e71a05a47c860f120485d68a58be12d9",

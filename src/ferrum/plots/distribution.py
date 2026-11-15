@@ -58,6 +58,7 @@ from ferrum.marks.statistical import _resolve_ecdf
 from ferrum.encoding import Y
 from ferrum.encoding.base import declared_title, drawn_title
 from ferrum.plots._helpers import (
+    _merged_xy,
     _checked_figure_size,
     _drawn_bindings,
     _drawn_positional_channels,
@@ -682,6 +683,10 @@ def displot(
         single-mark charts, a flat dict of mark properties.
     encode : dict, optional
         Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+        An ``x``/``y`` entry naming another column than the ``x=``/``y=``
+        keyword is read as the call's own ``x``/``y`` (the statistic is
+        computed from it); one restating the keyword's column lands on the
+        chart afterwards, like a later ``.encode()``.
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
@@ -766,6 +771,7 @@ def displot(
     # ...and a well-formed rule that this `kind=` cannot act on is reported
     # too, rather than accepted and silently dropped.
     _warn_inert_bins(kind=kind, bins=bins)
+    x, y, encode = _merged_xy(x, y, encode)
     # Every "this needs x=" refusal, in displot's voice, before any chart is
     # built -- including the overlay case, which used to render a chart
     # missing the mark it was asked for.
@@ -1857,22 +1863,25 @@ def catplot(
         exactly as it would on any other explicit domain, and that is your
         choice to make, not this parameter's to override.
 
-        **The** ``encode={"x": ...}`` **door bypasses this padding
-        entirely, even with no** ``scale=`` **of your own.** ``encode=``
-        is a raw ``Chart.encode(**encode)`` override applied after this
-        builder's own normalization, so ``encode={"x": fm.X("year")}``
-        (no ``scale=``) replaces the padded, typed channel this parameter
-        built wholesale -- silently losing BOTH the padding (marks can
-        drop again, with no domain of your own to blame it on) and, under
-        ``native_scale=False``, the force-nominal typing itself (a numeric
-        column reverts to native positions). This is not specific to
-        ``native_scale``: the identical ``encode=`` override already
-        erases this builder's other normalizations the same way (e.g. the
-        ``hue=`` nominal-color typing), since ``encode=`` is documented as
-        exactly that -- an override door, not a channel this builder
-        reads back from. Prefer ``x=fm.X(...)`` (or a bare ``x="year"``)
-        over ``encode={"x": ...}`` when you want ``native_scale`` and its
-        padding to keep working.
+        **An** ``encode={"x": ...}`` **that restates the call's own x
+        column bypasses this padding, even with no** ``scale=`` **of your
+        own.** ``encode=`` naming another column than ``x=`` is the call's
+        own ``x`` and is normalized and padded like it (``encode={"x":
+        fm.X("year")}`` beside ``x="day"`` is ``x=fm.X("year")``). One that
+        restates the column ``x=`` names, ``encode={"x": fm.X("year")}``
+        beside ``x="year"``, is a raw ``Chart.encode(**encode)`` override
+        applied after this builder's own normalization: it replaces the
+        padded, typed channel this parameter built wholesale, silently
+        losing BOTH the padding (marks can drop again, with no domain of
+        your own to blame it on) and, under ``native_scale=False``, the
+        force-nominal typing itself (a numeric column reverts to native
+        positions). The same restatement erases this builder's other
+        normalizations (e.g. the ``hue=`` nominal-color typing). Prefer
+        ``x=fm.X(...)`` (or a bare ``x="year"``) over a restating
+        ``encode={"x": ...}`` when you want ``native_scale`` and its
+        padding to keep working. ``encode=`` is read in the lowering's
+        space under ``orient="h"`` too: its ``x`` is the category and its
+        ``y`` the value.
     ci : int or float, default 95
         Bootstrap confidence-interval width, as a percent in the open
         interval ``(0, 100)``, for the estimating kinds ``"point"`` and
@@ -1902,6 +1911,12 @@ def catplot(
         single-mark charts, a flat dict of mark properties.
     encode : dict, optional
         Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+        An ``x``/``y`` entry naming another column than the ``x=``/``y=``
+        keyword is read as the call's own ``x``/``y`` (the statistic is
+        computed from it); one restating the keyword's column lands on the
+        chart afterwards, like a later ``.encode()``.
+        Under ``orient="h"`` the entries are in the lowering's space: ``x``
+        is the category and ``y`` the value.
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
@@ -1972,6 +1987,15 @@ def catplot(
     >>> fm.catplot(df, x="total_bill", y="day", kind="violin", orient="h")
     """
     validate_choice("catplot", "kind", kind, _CATPLOT_VALID_KINDS)
+    # `encode=`'s x/y is this call's own x=/y=: read once, so the category,
+    # the value and every kind's statistic read the one binding the chart draws.
+    if orient == "h":
+        # `encode=` is written in the lowering's space under both
+        # orientations (x the category, y the value), so under `orient="h"`
+        # its y is read against the caller's x= and its x against y=.
+        y, x, encode = _merged_xy(y, x, encode)
+    else:
+        x, y, encode = _merged_xy(x, y, encode)
 
     if kind in _CATPLOT_AGGREGATING_KINDS:
         ci_level, n_boot = _catplot_interval_args(ci, n_boot)

@@ -62,6 +62,8 @@ from ferrum.marks._fit_layers import build_fit_layers
 from ferrum.marks.diagnostic._regression import COOK_OUTLIER_STYLE
 from ferrum.marks.statistical import desugar_smooth
 from ferrum.plots._helpers import (
+    _merged_xy,
+    _written_field,
     _color_field_for,
     _column_or_literal_color,
     _compose_compare,
@@ -1263,6 +1265,11 @@ def _lmplot_impl(
     # fit request, the axis titles) reads the one parsed channel, never
     # the raw keyword, so a shorthand string, a declared type and a
     # channel's own options mean the same thing in all of them.
+    #
+    # An `encode=` x/y naming another column than the keyword's is this
+    # call's own x=/y= (`_merged_xy`), read first so the fit, the scatter, the
+    # refusals and the axis titles all read the one binding the chart draws.
+    x, y, encode = _merged_xy(x, y, encode)
     x_ch = _required_channel(x, entry=entry, param="x")
     y_ch = _required_channel(y, entry=entry, param="y")
     hue = _grouping_hue(entry, hue)
@@ -1482,10 +1489,11 @@ def _lmplot_impl(
         else:
             out = out.facet(row=row)
 
-    # An x/y binding the caller writes after this call -- `encode=` below
-    # included, which lands on `out._encoding` the same way a later
-    # `.encode()` does -- reads or refuses this call's own x=/y=, in
-    # `entry`'s voice, applied by `Chart._resolve_pending`.
+    # An x/y binding the caller writes after this call -- a later
+    # `.encode()`, and an `encode=` entry the merge above left (a
+    # restatement of the keyword's column, or a fieldless channel), which
+    # lands on `out._encoding` the same way -- reads or refuses this call's
+    # own x=/y=, in `entry`'s voice, applied by `Chart._resolve_pending`.
     out = out._with_post_build_positional(
         _lmplot_post_build_positional(
             out,
@@ -1719,6 +1727,10 @@ def lmplot(
         single-mark charts, a flat dict of mark properties.
     encode : dict, optional
         Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+        An ``x``/``y`` entry naming another column than the ``x=``/``y=``
+        keyword is read as the call's own ``x``/``y`` (the statistic is
+        computed from it); one restating the keyword's column lands on the
+        chart afterwards, like a later ``.encode()``.
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
@@ -2049,7 +2061,10 @@ def residplot(
         layer names (e.g. ``{"scatter": {"opacity": 0.5}}``); for
         single-mark charts, a flat dict of mark properties.
     encode : dict, optional
-        Additional encoding kwargs, validated via ``Chart.encode()``. On
+        Additional encoding kwargs, validated via ``Chart.encode()``. An
+        ``x``/``y`` entry naming another column than the ``x=``/``y=``
+        keyword is the call's own ``x``/``y`` (the residuals are computed
+        from it). On
         the layered form (any overlay requested: the default), a channel
         other than x/y, a grouping channel, or a facet channel binds the
         point layer alone, not the chart -- the zero-reference rule, the
@@ -2104,11 +2119,13 @@ def residplot(
         ``O`` or ``T``: see ``x``/``y`` above.
     ValueError
         On the flat form (no overlay drawn), if an ``x``/``y`` binding
-        written after the call -- ``encode=`` or a later ``.encode()`` --
-        names another column of the data: the figure's one mark would
-        draw that column without refitting against it. Naming the call as
-        the remedy. The layered form is unaffected -- its layers bind
-        ``x``/``y`` themselves, as ``regplot``/``lmplot`` already do.
+        written by a later ``.encode()`` names another column of the data:
+        the figure's one mark would draw that column without refitting
+        against it. Naming the call as the remedy. An ``encode=`` naming
+        another column is the call's own ``x``/``y`` and refits, on both
+        forms. The layered form is unaffected by a later ``.encode()``
+        -- its layers bind ``x``/``y`` themselves, as ``regplot``/``lmplot``
+        already do.
 
     Examples
     --------
@@ -2139,6 +2156,22 @@ def residplot(
     # channel value: a shorthand string ("bill:Q") is read as the channel
     # it spells, so `x_field`/`y_field` and the re-point below never see
     # the raw, un-split shorthand.
+    #
+    # An `encode=` x/y naming another column than the keyword's is this
+    # call's own x=/y= (`_merged_xy`), read first so the transform, the
+    # titles, the re-point and the refusals below all read the one binding the
+    # chart draws. The residual and predictor columns the figure draws itself
+    # are not columns of the data to refit on, so an `encode=` naming one
+    # stays for the chart's own later binding. They are the names this call's
+    # transform emits (`_residual_column_names`, which gives a fresh name to
+    # one the data already uses); neither depends on the zero rule or the
+    # metrics.
+    keyword_x_field = _written_field("x", x) or ""
+    emitted = _residual_column_names(
+        data.columns, x_field=keyword_x_field, zero_line=False, metrics_applied=False
+    )
+    drawn_names = {"x": frozenset({emitted["x"]}), "y": frozenset({emitted["residual"]})}
+    x, y, encode = _merged_xy(x, y, encode, keep=drawn_names)
     x_ch = _required_channel(x, entry="residplot", param="x")
     y_ch = _required_channel(y, entry="residplot", param="y")
     x_field = x_ch.field
@@ -2392,11 +2425,12 @@ def residplot(
                 # `None` entry from unbinding a keyword's own channel,
                 # the same rule the chart draws by. x/y are excluded: this
                 # layer's own `enc["x"]`/`enc["y"]` already point at the
-                # residual batch's columns, while `encode=`'s x/y reach
-                # the chart level, where the post-build record re-points
-                # them the same way a later `.encode()` does -- merging
-                # `encode=`'s raw field here would re-bind this layer to
-                # a column the residual batch never emits.
+                # residual batch's columns, while an `encode=` x/y that
+                # restates the call's own column reaches the chart level,
+                # where the post-build record re-points it the same way a
+                # later `.encode()` does -- merging `encode=`'s raw field
+                # here would re-bind this layer to a column the residual
+                # batch never emits.
                 encoding=_drawn_bindings(
                     enc, {k: v for k, v in (encode or {}).items() if k not in ("x", "y")}
                 ),
@@ -2475,9 +2509,11 @@ def residplot(
         chart._layers = internal_layers
         chart._mark = None
 
-    # An x/y binding the caller writes after this call -- `encode=` below
-    # included -- reads or refuses this call's own x=/y=, in residplot's
-    # voice, applied by `Chart._resolve_pending`. Only the flat form (no
+    # An x/y binding the caller writes after this call -- a later
+    # `.encode()`, and an `encode=` entry the merge above left (a
+    # restatement of the keyword's column, a fieldless channel, or a name
+    # of a column the figure draws) -- reads or refuses this call's own
+    # x=/y=, in residplot's voice, applied by `Chart._resolve_pending`. Only the flat form (no
     # layer of its own to shadow a chart-level binding) also refuses a
     # binding naming another column of the data.
     chart = chart._with_post_build_positional(
@@ -2633,6 +2669,10 @@ def regplot(
         single-mark charts, a flat dict of mark properties.
     encode : dict, optional
         Additional encoding kwargs merged via ``Chart.encode(**encode)``.
+        An ``x``/``y`` entry naming another column than the ``x=``/``y=``
+        keyword is read as the call's own ``x``/``y`` (the statistic is
+        computed from it); one restating the keyword's column lands on the
+        chart afterwards, like a later ``.encode()``.
     properties : dict, optional
         Chart properties merged via ``Chart.properties(**properties)``
         (e.g. ``{"width": 400, "title": "My chart"}``).
