@@ -25,6 +25,7 @@ import pytest
 
 import ferrum as fm
 from tests._svg_rects import mark_groups_by_frame
+from tests.test_log_remedies_render import _interactive as _scene_json
 from tests.test_group_by_date import (
     _DOORS,
     _KIND_SHAPES,
@@ -106,7 +107,7 @@ _FACETED_MARKS = {
 
 
 def _interactive(chart: Any) -> Callable[[], Any]:
-    return lambda: chart.interactive().scene_json
+    return lambda: _scene_json(chart)
 
 
 # ---------------------------------------------------------------------------

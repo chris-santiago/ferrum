@@ -35,6 +35,7 @@ import pytest
 import ferrum as fm
 import ferrum.annotation as ann
 from tests.test_annotation_categories import (
+    _digest,
     _COLOUR,
     _DF,
     _FACETED,
@@ -721,10 +722,6 @@ def test_an_annotation_over_a_break_is_the_twins_picture(kind):
 #
 # Each digest is the output of a figure-applied flip, or of no flip: neither moves.
 # ---------------------------------------------------------------------------
-
-
-def _digest(svg: str) -> str:
-    return hashlib.sha256(svg.encode()).hexdigest()
 
 
 def _catplot_h() -> fm.Chart:
