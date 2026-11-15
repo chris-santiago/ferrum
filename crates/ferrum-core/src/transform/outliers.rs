@@ -339,7 +339,7 @@ use pyo3::prelude::*;
 ///     column, and dtype.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or a mapping other than a dict is refused.
+///     string, bytes, set or a mapping is refused.
 ///     Columns to group by; fences computed independently per group.
 /// extent : float, default 1.5
 ///     Tukey fence multiplier (``IQR * extent``). Must be ≥ 0. Use 0 to

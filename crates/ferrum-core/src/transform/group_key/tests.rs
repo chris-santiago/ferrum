@@ -1413,6 +1413,13 @@ fn the_supported_dtypes_text_names_timestamp_and_every_refusal_quotes_it() {
 
 // ── The `groupby` PyO3 door: one refusal voice ────────────────────────────
 
+/// `repr(<expr>)` as the linked Python prints it, so an expected refusal text
+/// follows the interpreter's own repr of the value instead of one version's.
+fn repr_of(expr: &std::ffi::CStr) -> String {
+    pyo3::Python::initialize();
+    Python::attach(|py| py.eval(expr, None, None).unwrap().repr().unwrap().to_string())
+}
+
 /// `parse_groupby_pyany("T", <expr>)`'s outcome: the columns, or the refusal text.
 fn read_groupby(expr: &std::ffi::CStr) -> Result<Vec<String>, String> {
     pyo3::Python::initialize();
@@ -1469,6 +1476,104 @@ fn a_groupby_door_refuses_each_unordered_or_char_split_kind_in_the_wrappers_word
         Err("T: groupby must be a sequence of column names, got mappingproxy \
              mappingproxy({'a': 1}); pass a list of its keys, e.g. list(...)"
             .to_string())
+    );
+}
+
+/// A dict has no dict form on `groupby`: it is refused in the words used for every
+/// other mapping, whatever its subclass or size.
+#[test]
+fn a_groupby_door_refuses_every_dict_in_the_mapping_words() {
+    assert_eq!(
+        read_groupby(c"{'a': 1}"),
+        Err("T: groupby must be a sequence of column names, got dict {'a': 1}; \
+             pass a list of its keys, e.g. list(...)"
+            .to_string())
+    );
+    assert_eq!(
+        read_groupby(c"{}"),
+        Err("T: groupby must be a sequence of column names, got dict {}; \
+             pass a list of its keys, e.g. list(...)"
+            .to_string())
+    );
+    for (expr, type_name) in [
+        (c"__import__('collections').OrderedDict(a=1)", "OrderedDict"),
+        (c"__import__('collections').defaultdict(int, {'a': 1})", "defaultdict"),
+    ] {
+        assert_eq!(
+            read_groupby(expr),
+            Err(format!(
+                "T: groupby must be a sequence of column names, got {type_name} {}; \
+                 pass a list of its keys, e.g. list(...)",
+                repr_of(expr)
+            ))
+        );
+    }
+    assert_eq!(
+        read_groupby(c"list({'a': 1, 'b': 2})"),
+        Ok(vec!["a".into(), "b".into()]),
+        "the remedy the message names renders"
+    );
+}
+
+/// `parse_names_pyany("T", param, noun, <expr>)`'s outcome: the names, or the refusal text.
+fn read_names(param: &str, noun: &str, expr: &std::ffi::CStr) -> Result<Vec<String>, String> {
+    pyo3::Python::initialize();
+    Python::attach(|py| {
+        let value = py.eval(expr, None, None).unwrap();
+        parse_names_pyany("T", param, noun, &value).map_err(|e| e.value(py).to_string())
+    })
+}
+
+/// The generic helper words every refusal with the parameter and noun it is given,
+/// the way `transforms._reject_bare_string(param=, noun=)` does.
+#[test]
+fn a_names_door_voices_its_parameter_and_noun_in_every_refusal() {
+    assert_eq!(
+        read_names("as_", "output-column names", c"'cat'"),
+        Err("T: as_ must be a sequence of output-column names (list or tuple), \
+             got a bare string 'cat'; iterating a string yields individual characters"
+            .to_string())
+    );
+    assert_eq!(
+        read_names("fields", "column names", c"b'ab'"),
+        Err("T: fields must be a sequence of column names (list or tuple), \
+             got bytes b'ab'; iterating it yields integers"
+            .to_string())
+    );
+    assert_eq!(
+        read_names("id_vars", "column names", c"{'a'}"),
+        Err("T: id_vars must be an ordered sequence of column names, got set {'a'}; \
+             a set has no order, so the output would change from run to run; \
+             pass a list, e.g. sorted(...)"
+            .to_string())
+    );
+    assert_eq!(
+        read_names("value_vars", "column names", c"{'a': 1}"),
+        Err("T: value_vars must be a sequence of column names, got dict {'a': 1}; \
+             pass a list of its keys, e.g. list(...)"
+            .to_string())
+    );
+    for (expr, type_name) in [
+        (c"__import__('collections').OrderedDict(a=1)", "OrderedDict"),
+        (c"__import__('collections').defaultdict(int, {'a': 1})", "defaultdict"),
+    ] {
+        assert_eq!(
+            read_names("fields", "column names", expr),
+            Err(format!(
+                "T: fields must be a sequence of column names, got {type_name} {}; \
+                 pass a list of its keys, e.g. list(...)",
+                repr_of(expr)
+            ))
+        );
+    }
+    assert_eq!(
+        read_names("as_", "output-column names", c"[1]"),
+        Err("T: as_ must be a sequence of output-column names (list or tuple) of strings, got [1]"
+            .to_string())
+    );
+    assert_eq!(
+        read_names("fields", "column names", c"(c for c in ['a', 'b'])"),
+        Ok(vec!["a".into(), "b".into()])
     );
 }
 

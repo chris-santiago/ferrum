@@ -250,7 +250,7 @@ impl WhiskerExtentArg {
 ///     transform, column, and dtype.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or a mapping other than a dict is refused.
+///     string, bytes, set or a mapping is refused.
 ///     Columns to group by before computing statistics.
 /// whisker_extent : float or "min-max", default 1.5
 ///     When a float, whiskers extend to the most extreme data point within

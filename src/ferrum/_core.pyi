@@ -760,8 +760,8 @@ class Unpivot:
     def __init__(
         self,
         *,
-        id_vars: list[str] = ...,
-        value_vars: list[str] | None = None,
+        id_vars: Sequence[str] | None = None,
+        value_vars: Sequence[str] | None = None,
         var_name: str = "variable",
         value_name: str = "value",
         name: str | None = None,
@@ -861,9 +861,9 @@ class DensityData:
 class Flatten:
     def __init__(
         self,
-        fields: List[str],
+        fields: Sequence[str],
         *,
-        as_: Optional[List[str]] = None,
+        as_: Optional[Sequence[str]] = None,
         name: Optional[str] = None,
     ) -> None: ...
 

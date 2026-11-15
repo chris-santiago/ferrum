@@ -274,6 +274,7 @@ fn repeat_by_lengths(col: &dyn Array, field: &str, lengths: &[usize]) -> PyResul
 
 use pyo3::prelude::*;
 use crate::transform::core::TransformSpec;
+use crate::transform::group_key::parse_names_pyany;
 
 #[pyclass(module = "ferrum._core", name = "Flatten")]
 #[derive(Debug, Clone)]
@@ -283,7 +284,15 @@ pub(crate) struct PyFlatten(pub(crate) TransformSpec);
 impl PyFlatten {
     #[new]
     #[pyo3(signature = (fields, *, as_ = None, name = None))]
-    fn new(fields: Vec<String>, as_: Option<Vec<String>>, name: Option<String>) -> PyResult<Self> {
+    fn new(
+        fields: &Bound<'_, PyAny>,
+        as_: Option<&Bound<'_, PyAny>>,
+        name: Option<String>,
+    ) -> PyResult<Self> {
+        let fields = parse_names_pyany("Flatten", "fields", "column names", fields)?;
+        let as_ = as_
+            .map(|v| parse_names_pyany("Flatten", "as_", "output-column names", v))
+            .transpose()?;
         if fields.is_empty() {
             return Err(PyValueError::new_err("Flatten: fields must be non-empty"));
         }
@@ -587,5 +596,38 @@ mod tests {
         assert!(vals.is_null(1), "null list element must stay an Arrow null, not NaN");
         assert_eq!(vals.value(0), 1.0);
         assert_eq!(vals.value(2), 3.0);
+    }
+
+    #[test]
+    fn the_constructor_reads_names_through_the_shared_door() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let eval = |e: &std::ffi::CStr| py.eval(e, None, None).unwrap();
+            let msg = |r: PyResult<PyFlatten>| r.err().unwrap().value(py).to_string();
+            assert_eq!(
+                msg(PyFlatten::new(&eval(c"{'a': 1}"), None, None)),
+                "Flatten: fields must be a sequence of column names, got dict {'a': 1}; \
+                 pass a list of its keys, e.g. list(...)"
+            );
+            assert_eq!(
+                msg(PyFlatten::new(&eval(c"['a']"), Some(&eval(c"{'x'}")), None)),
+                "Flatten: as_ must be an ordered sequence of output-column names, got set {'x'}; \
+                 a set has no order, so the output would change from run to run; \
+                 pass a list, e.g. sorted(...)"
+            );
+            assert_eq!(
+                msg(PyFlatten::new(&eval(c"[]"), None, None)),
+                "Flatten: fields must be non-empty"
+            );
+            let ok = PyFlatten::new(&eval(c"{'a': 1}.keys()"), Some(&eval(c"('x',)")), None).unwrap();
+            assert_eq!(
+                ok.0,
+                TransformSpec::Flatten(FlattenSpec {
+                    fields: vec!["a".into()],
+                    as_: Some(vec!["x".into()]),
+                    name: None
+                })
+            );
+        });
     }
 }

@@ -289,7 +289,7 @@ use pyo3::prelude::*;
 ///     range.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or a mapping other than a dict is refused.
+///     string, bytes, set or a mapping is refused.
 ///     Columns to group by before computing statistics.
 /// seed : int, default 0
 ///     RNG seed for the bootstrap (``method="ci"``). Seeds ``ChaCha8Rng``

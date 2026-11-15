@@ -33,9 +33,12 @@ check at construction.
 
 from __future__ import annotations
 
+import ast
 import inspect
+import re
+from pathlib import Path
 import typing
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Sequence, Set
 from types import MappingProxyType
 from typing import Any
@@ -239,6 +242,13 @@ def _set_text(door: str, param: str, noun: str, value: object) -> str:
     )
 
 
+def _bare_string_text(door: str, param: str, noun: str, value: str) -> str:
+    return (
+        f"{door}: {param} must be a sequence of {noun} (list or tuple), got a bare string "
+        f"{value!r}; iterating a string yields individual characters"
+    )
+
+
 def _mapping_text(door: str, param: str, noun: str, value: object) -> str:
     if param == "keyvals":
         return (
@@ -264,6 +274,16 @@ _REFUSED = [
 ]
 
 
+#: Mappings with a dict form on no parameter but ``keyvals``: refused everywhere else, so
+#: nothing reads a dict's keys.
+_REFUSED_WITHOUT_DICT_FORM = [
+    ("dict", {"zzz_col_a": 1, "zzz_col_b": 2}, _mapping_text),
+    ("empty_dict", {}, _mapping_text),
+    ("ordered_dict", OrderedDict(zzz_col_a=1, zzz_col_b=2), _mapping_text),
+    ("defaultdict", defaultdict(int, {"zzz_col_a": 1, "zzz_col_b": 2}), _mapping_text),
+]
+
+
 @pytest.mark.parametrize("name, param", _DERIVED_PARAMS, ids=lambda v: v)
 @pytest.mark.parametrize("value, builder", [v[1:] for v in _REFUSED], ids=[v[0] for v in _REFUSED])
 def test_an_unordered_or_byte_collection_is_refused_across_the_family(name, param, value, builder):
@@ -274,11 +294,56 @@ def test_an_unordered_or_byte_collection_is_refused_across_the_family(name, para
     assert str(excinfo.value) == builder(name, param, _NOUNS[param], value)
 
 
+_NO_DICT_FORM_PARAMS = [(n, p) for n, p in _DERIVED_PARAMS if p != "keyvals"]
+
+
+@pytest.mark.parametrize("name, param", _NO_DICT_FORM_PARAMS, ids=lambda v: v)
+@pytest.mark.parametrize(
+    "value, builder",
+    [v[1:] for v in _REFUSED_WITHOUT_DICT_FORM],
+    ids=[v[0] for v in _REFUSED_WITHOUT_DICT_FORM],
+)
+def test_a_dict_is_refused_where_the_parameter_has_no_dict_form(name, param, value, builder):
+    """A dict, an OrderedDict, a defaultdict and an empty dict refuse in the mapping words
+    on ``groupby``, ``fields``, ``sort`` and ``as_``, never read as their keys."""
+    with pytest.raises(ValueError) as excinfo:
+        _call_with(name, param, value)
+    assert str(excinfo.value) == builder(name, param, _NOUNS[param], value)
+
+
 @pytest.mark.parametrize(
     "form", [{"start": 0, "stop": 3}, OrderedDict(start=0, stop=3)], ids=["dict", "OrderedDict"]
 )
 def test_a_dict_keyvals_stays_the_sequence_form(form):
     assert fm.transform_impute("v", key="t", keyvals=form)["keyvals"] == {"start": 0, "stop": 3}
+    assert fm.Y("v", impute={"keyvals": form})._kwargs["impute"]["keyvals"] == {
+        "start": 0,
+        "stop": 3,
+    }
+
+
+def test_a_dict_keyvals_with_an_unknown_key_keeps_its_own_refusal():
+    with pytest.raises(ValueError) as excinfo:
+        fm.transform_impute("v", key="t", keyvals={1.0: 0})
+    assert str(excinfo.value) == (
+        "transform_impute: keyvals={...} has unknown key 1.0; expected start|stop|step"
+    )
+    with pytest.raises(ValueError) as excinfo:
+        fm.Y("v", impute={"keyvals": {1.0: 0}})
+    assert str(excinfo.value) == (
+        "Y(impute=...): keyvals={...} has unknown key 1.0; expected start|stop|step"
+    )
+
+
+def test_a_mapping_proxy_keyvals_is_refused_on_both_impute_doors():
+    value = MappingProxyType({"start": 0, "stop": 3})
+    expected = _mapping_text("transform_impute", "keyvals", "key values", value)
+    with pytest.raises(ValueError) as excinfo:
+        fm.transform_impute("v", key="t", keyvals=value)
+    assert str(excinfo.value) == expected
+    with pytest.raises(ValueError) as excinfo:
+        fm.Y("v", impute={"keyvals": value})
+    assert str(excinfo.value) == _mapping_text("Y(impute=...)", "keyvals", "key values", value)
 
 
 @pytest.mark.parametrize("name, param", _DERIVED_PARAMS, ids=lambda v: v)
@@ -305,6 +370,7 @@ def test_the_remedy_a_mapping_refusal_names_is_accepted(name, param):
     ``keyvals``' sequence form) is read as written."""
     proxy = MappingProxyType({"zzz_col_a": 1, "zzz_col_b": 2})
     assert _call_with(name, param, list(proxy))[param] == _VALID_SAMPLE
+    assert _call_with(name, param, list({"zzz_col_a": 1, "zzz_col_b": 2}))[param] == _VALID_SAMPLE
     if param == "keyvals":
         form = dict(MappingProxyType({"start": 0, "stop": 3}))
         assert _call_with(name, param, form)[param] == {"start": 0, "stop": 3}
@@ -424,14 +490,75 @@ def test_cycle_2_char_split_repros_now_refuse(call, match):
         call()
 
 
+@pytest.mark.parametrize(
+    "call, door, param, noun",
+    [
+        (
+            lambda v: fm.transform_aggregate({"field": "x", "fn": "mean", "as": "m"}, groupby=v),
+            "transform_aggregate",
+            "groupby",
+            "column names",
+        ),
+        (
+            lambda v: fm.transform_stack("s", groupby=v),
+            "transform_stack",
+            "groupby",
+            "column names",
+        ),
+        (
+            lambda v: fm.transform_impute("v", key="t", groupby=v),
+            "transform_impute",
+            "groupby",
+            "column names",
+        ),
+        (
+            lambda v: fm.transform_window({"op": "row_number", "as": "r"}, sort=v),
+            "transform_window",
+            "sort",
+            "column names",
+        ),
+        (
+            lambda v: fm.transform_stack("s", groupby=["g"], sort=v),
+            "transform_stack",
+            "sort",
+            "column names",
+        ),
+        (lambda v: fm.transform_fold(v), "transform_fold", "fields", "column names"),
+        (lambda v: fm.transform_flatten(v), "transform_flatten", "fields", "column names"),
+        (
+            lambda v: fm.transform_flatten(["t"], as_=v),
+            "transform_flatten",
+            "as_",
+            "output-column names",
+        ),
+    ],
+)
+def test_the_public_entry_point_refuses_a_dict_in_the_mapping_words(call, door, param, noun):
+    value = {"g": 1}
+    with pytest.raises(ValueError) as excinfo:
+        call(value)
+    assert str(excinfo.value) == _mapping_text(door, param, noun, value)
+
+
+def test_a_dict_groupby_remedy_equals_the_one_column_list():
+    assert fm.transform_stack("s", groupby=list({"g": 1}))["groupby"] == ["g"]
+    assert fm.transform_stack("s", groupby=list({"g": 1})) == fm.transform_stack("s", groupby=["g"])
+
+
 def test_reject_helper_is_the_single_shared_mechanism():
     """Every refusal above comes from one predicate, not a copy per site."""
     from ferrum.transforms import _reject_bare_string, _reject_bare_string_groupby
 
-    with pytest.raises(ValueError, match="transform_regression.*groupby.*bare string"):
+    with pytest.raises(ValueError) as excinfo:
         _reject_bare_string_groupby("cat", where="transform_regression")
-    with pytest.raises(ValueError, match="transform_fold: fields.*bare string"):
+    assert str(excinfo.value) == _bare_string_text(
+        "transform_regression", "groupby", "column names", "cat"
+    )
+    with pytest.raises(ValueError) as excinfo:
         _reject_bare_string("cat", where="transform_fold", param="fields", noun="column names")
+    assert str(excinfo.value) == _bare_string_text(
+        "transform_fold", "fields", "column names", "cat"
+    )
 
     # None and real sequences are not rejected -- the helper only guards
     # against the bare-string mistake, leaving None-handling and
@@ -439,6 +566,11 @@ def test_reject_helper_is_the_single_shared_mechanism():
     _reject_bare_string_groupby(None, where="transform_regression")
     _reject_bare_string_groupby(["cat"], where="transform_regression")
     _reject_bare_string_groupby(("cat", "dog"), where="transform_regression")
+    with pytest.raises(ValueError) as excinfo:
+        _reject_bare_string_groupby({"g": 1}, where="transform_regression")
+    assert str(excinfo.value) == _mapping_text(
+        "transform_regression", "groupby", "column names", {"g": 1}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +635,19 @@ def test_a_constructor_refuses_an_unordered_or_byte_groupby_in_the_transform_wor
 
 
 @pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
+@pytest.mark.parametrize(
+    "value, builder",
+    [v[1:] for v in _REFUSED_WITHOUT_DICT_FORM],
+    ids=[v[0] for v in _REFUSED_WITHOUT_DICT_FORM],
+)
+def test_a_constructor_refuses_a_dict_groupby_in_the_transform_words(name, value, builder):
+    """The PyO3 constructors share the wrappers' refusal: a dict is no more a list of columns here."""
+    with pytest.raises(ValueError) as excinfo:
+        _construct(name, value)
+    assert str(excinfo.value) == builder(name, "groupby", "column names", value)
+
+
+@pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
 def test_a_constructor_refuses_a_bare_string_groupby_in_the_transform_words(name):
     with pytest.raises(ValueError) as excinfo:
         _construct(name, "cat")
@@ -526,7 +671,10 @@ def test_a_constructor_takes_no_groupby_by_default(name):
 
 @pytest.mark.parametrize("name", sorted(_CONSTRUCTORS))
 def test_a_constructor_reads_a_dict_view_groupby_like_a_list(name):
-    _construct(name, {"g": 1, "h": 2}.keys())
+    """A ``keys()`` view reaches the constructor as ``list(d)`` does, in insertion order."""
+    source = {"h": 1, "g": 2}
+    assert repr(_construct(name, source.keys())) == repr(_construct(name, list(source)))
+    assert repr(_construct(name, source.keys())) != repr(_construct(name, ["g", "h"]))
 
 
 @pytest.mark.parametrize(
@@ -549,5 +697,143 @@ def test_a_mark_groupby_keeps_one_column_as_a_string_and_refuses_a_set(mark, kwa
     )
     base = fm.Chart(df).encode(**encoding, color="g:N")
     getattr(base, mark)(groupby="g", **kwargs).to_svg()
-    with pytest.raises(ValueError, match=f"{mark}: groupby must be an ordered sequence"):
+    with pytest.raises(ValueError) as excinfo:
         getattr(base, mark)(groupby={"g"}, **kwargs).to_svg()
+    assert str(excinfo.value) == _set_text(mark, "groupby", "column names", {"g"})
+
+
+#: Each mark door that reads ``groupby=``: (mark, the call's kwargs, the chart's encoding).
+#: ``mark_smooth`` reaches ``groupby`` on two paths, with and without a confidence band.
+_MARK_DOORS = {
+    "mark_density": ("mark_density", {}, {"x": "x"}),
+    "mark_histogram": ("mark_histogram", {}, {"x": "x"}),
+    "mark_smooth_band": ("mark_smooth", {"method": "lm", "ci": 0.95}, {"x": "x", "y": "y"}),
+    "mark_smooth_line": ("mark_smooth", {"method": "lm", "ci": None}, {"x": "x", "y": "y"}),
+    "mark_contour": ("mark_contour", {}, {"x": "x", "y": "y"}),
+}
+
+_MAPPING_ROWS = _REFUSED_WITHOUT_DICT_FORM + [row for row in _REFUSED if row[0] == "mappingproxy"]
+
+
+@pytest.mark.parametrize("door", sorted(_MARK_DOORS))
+@pytest.mark.parametrize(
+    "value", [row[1] for row in _MAPPING_ROWS], ids=[row[0] for row in _MAPPING_ROWS]
+)
+def test_a_mark_groupby_refuses_a_mapping_in_the_mapping_words(door, value):
+    """A mark reads ``groupby=`` through the same guard as the transforms: a mapping,
+    a dict included, is refused in the mark's own name instead of read as its keys."""
+    mark, kwargs, encoding = _MARK_DOORS[door]
+    df = pl.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+            "y": [1.0, 2.0, 2.5, 4.0, 3.0, 6.0],
+            "g": list("aaabbb"),
+        }
+    )
+    chart = getattr(fm.Chart(df).encode(**encoding, color="g:N"), mark)(groupby=value, **kwargs)
+    with pytest.raises(ValueError) as excinfo:
+        chart.to_svg()
+    assert str(excinfo.value) == _mapping_text(mark, "groupby", "column names", value)
+
+
+# ---------------------------------------------------------------------------
+# The other constructors that take a list of column names
+# ---------------------------------------------------------------------------
+
+#: (class, parameter) -> (noun in the refusal, builder of an otherwise valid instance).
+_NAME_LIST_DOORS: dict[tuple[str, str], tuple[str, Any]] = {
+    ("Flatten", "fields"): ("column names", lambda v: _core.Flatten(v)),
+    ("Flatten", "as_"): ("output-column names", lambda v: _core.Flatten(["t"], as_=v)),
+    ("Unpivot", "id_vars"): ("column names", lambda v: _core.Unpivot(id_vars=v)),
+    ("Unpivot", "value_vars"): ("column names", lambda v: _core.Unpivot(value_vars=v)),
+}
+
+#: Constructor parameters annotated as a list of strings that hold values, not column names.
+_VALUE_LISTS = {
+    ("OrdinalScale", "domain"),
+    ("BandScale", "domain"),
+    ("PointScale", "domain"),
+    ("QuantizeScale", "range"),
+}
+
+_STR_LIST_ANNOTATION = re.compile(r"^(Optional\[)?(List|list|Sequence)\[str\]\]?( \| None)?$")
+
+
+def _stub_string_list_parameters() -> set[tuple[str, str]]:
+    """Every ``(class, parameter)`` that ``_core.pyi`` annotates as a list of strings."""
+    stub = Path(_core.__file__).with_name("_core.pyi")
+    found: set[tuple[str, str]] = set()
+    for node in ast.parse(stub.read_text()).body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for member in node.body:
+            if isinstance(member, ast.FunctionDef) and member.name == "__init__":
+                for arg in member.args.args + member.args.kwonlyargs:
+                    if arg.annotation and _STR_LIST_ANNOTATION.match(ast.unparse(arg.annotation)):
+                        found.add((node.name, arg.arg))
+    return found
+
+
+def test_every_constructor_name_list_is_covered():
+    """A constructor parameter added later that takes a list of strings fails here until it
+    is a ``groupby`` of ``_CONSTRUCTORS``, a door of ``_NAME_LIST_DOORS`` or a value list."""
+    stubbed = _stub_string_list_parameters()
+    assert ("Flatten", "fields") in stubbed and ("Unpivot", "id_vars") in stubbed
+    assert ("Bin", "groupby") in stubbed
+    uncovered = sorted(
+        (cls, param)
+        for cls, param in stubbed
+        if not (param == "groupby" and cls in _CONSTRUCTORS)
+        and (cls, param) not in _NAME_LIST_DOORS
+        and (cls, param) not in _VALUE_LISTS
+    )
+    assert not uncovered
+
+
+@pytest.mark.parametrize("door", sorted(_NAME_LIST_DOORS), ids=lambda d: ".".join(d))
+@pytest.mark.parametrize(
+    "value, builder",
+    [row[1:] for row in _MAPPING_ROWS + [r for r in _REFUSED if r[0] != "mappingproxy"]],
+    ids=[row[0] for row in _MAPPING_ROWS + [r for r in _REFUSED if r[0] != "mappingproxy"]],
+)
+def test_a_name_list_constructor_refuses_a_mapping_set_or_bytes_in_the_transform_words(
+    door, value, builder
+):
+    cls, param = door
+    noun, build = _NAME_LIST_DOORS[door]
+    with pytest.raises(ValueError) as excinfo:
+        build(value)
+    assert str(excinfo.value) == builder(cls, param, noun, value)
+
+
+@pytest.mark.parametrize("door", sorted(_NAME_LIST_DOORS), ids=lambda d: ".".join(d))
+def test_a_name_list_constructor_refuses_a_bare_string_in_the_transform_words(door):
+    cls, param = door
+    noun, build = _NAME_LIST_DOORS[door]
+    with pytest.raises(ValueError) as excinfo:
+        build("cat")
+    assert str(excinfo.value) == _bare_string_text(cls, param, noun, "cat")
+
+
+@pytest.mark.parametrize("door", sorted(_NAME_LIST_DOORS), ids=lambda d: ".".join(d))
+@pytest.mark.parametrize(
+    "make",
+    [
+        tuple,
+        lambda items: (i for i in items),
+        lambda items: {i: 0 for i in items}.keys(),
+    ],
+    ids=["tuple", "generator", "keys_view"],
+)
+def test_a_name_list_constructor_reads_ordered_values_like_a_list(door, make):
+    _cls, _param = door
+    _noun, build = _NAME_LIST_DOORS[door]
+    items = ["zzz_col_b", "zzz_col_a"]
+    assert repr(build(make(items))) == repr(build(list(items)))
+    assert repr(build(make(items))) != repr(build(sorted(items)))
+
+
+def test_unpivot_takes_no_id_vars_by_default():
+    assert repr(_core.Unpivot()) == repr(_core.Unpivot(id_vars=[]))
+    assert repr(_core.Unpivot(id_vars=None)) == repr(_core.Unpivot(id_vars=[]))
+    assert "value_vars=None" in repr(_core.Unpivot())

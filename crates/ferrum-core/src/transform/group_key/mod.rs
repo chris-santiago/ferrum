@@ -1329,13 +1329,9 @@ where
 
 /// Read the `groupby` PyO3 constructor argument into `Vec<String>`.
 ///
-/// The one extraction every transform constructor that takes a `groupby` goes
-/// through, so a malformed value is refused in one voice. `None` is `[]`. A bare
-/// string, a byte string, a set or a non-`dict` mapping is refused with the text
-/// of the Python wrappers' `transforms._reject_bare_string(param="groupby",
-/// noun="column names")` guard, `where_` naming the constructor the way the
-/// wrappers name theirs. Anything else is read as an ordered iterable of strings
-/// (`list`, `tuple`, a `dict`'s `keys()`/`items()`/`values()` views).
+/// The thin `groupby` door over [`parse_names_pyany`]: `None` is `[]`, anything
+/// else is read as a sequence of column names named `groupby`. Every groupby
+/// constructor goes through it, so a malformed value is refused in one voice.
 ///
 /// The wire shim [`deserialize_groupby_vec`] keeps accepting a bare string in
 /// JSON, which is not a Python door.
@@ -1343,16 +1339,36 @@ pub(crate) fn parse_groupby_pyany(
     where_: &str,
     obj: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Vec<String>> {
-    let Some(obj) = obj else {
-        return Ok(Vec::new());
-    };
-    if let Some(refusal) = groupby_refusal(where_, obj)? {
+    match obj {
+        None => Ok(Vec::new()),
+        Some(obj) => parse_names_pyany(where_, "groupby", "column names", obj),
+    }
+}
+
+/// Read a PyO3 constructor argument that is a sequence of names (`param`, whose
+/// elements `noun` describes) into `Vec<String>`.
+///
+/// The one extraction every such parameter goes through: every `groupby`,
+/// `Flatten`'s `fields` and `as_`, and `Unpivot`'s `id_vars` and `value_vars`. A
+/// bare string, a byte string, a set or a mapping is refused with the text of
+/// the Python wrappers' `transforms._reject_bare_string(param=, noun=)` guard,
+/// `where_` naming the constructor the way the wrappers name theirs. Anything
+/// else is read as an ordered iterable of strings (`list`, `tuple`, a `dict`'s
+/// `keys()` view, a generator); an iterable of non-strings, such as an `items()`
+/// view, is refused with the not-names text.
+pub(crate) fn parse_names_pyany(
+    where_: &str,
+    param: &str,
+    noun: &str,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<Vec<String>> {
+    if let Some(refusal) = names_refusal(where_, param, noun, obj)? {
         return Err(PyValueError::new_err(refusal));
     }
     let not_names = || {
         let shown = obj.repr().map_or_else(|_| "?".to_string(), |r| r.to_string());
         PyValueError::new_err(format!(
-            "{where_}: groupby must be a sequence of column names (list or tuple) of strings, got {shown}"
+            "{where_}: {param} must be a sequence of {noun} (list or tuple) of strings, got {shown}"
         ))
     };
     obj.try_iter()
@@ -1361,10 +1377,15 @@ pub(crate) fn parse_groupby_pyany(
         .collect()
 }
 
-/// The refusal text for a `groupby` that is not an ordered sequence of names,
+/// The refusal text for a `param` that is not an ordered sequence of `noun`,
 /// or `None` when `obj` may be read as one. Mirrors
 /// `ferrum.transforms._reject_bare_string`, branch for branch.
-fn groupby_refusal(where_: &str, obj: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+fn names_refusal(
+    where_: &str,
+    param: &str,
+    noun: &str,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<Option<String>> {
     let py = obj.py();
     let abc = py.import("collections.abc")?;
     let is_a = |cls: Bound<'_, PyAny>| obj.is_instance(&cls);
@@ -1373,7 +1394,7 @@ fn groupby_refusal(where_: &str, obj: &Bound<'_, PyAny>) -> PyResult<Option<Stri
 
     if obj.is_instance_of::<pyo3::types::PyString>() {
         return Ok(Some(format!(
-            "{where_}: groupby must be a sequence of column names (list or tuple), \
+            "{where_}: {param} must be a sequence of {noun} (list or tuple), \
              got a bare string {}; iterating a string yields individual characters",
             shown()?
         )));
@@ -1385,7 +1406,7 @@ fn groupby_refusal(where_: &str, obj: &Bound<'_, PyAny>) -> PyResult<Option<Stri
     )?;
     if is_a(byte_types.into_any())? {
         return Ok(Some(format!(
-            "{where_}: groupby must be a sequence of column names (list or tuple), \
+            "{where_}: {param} must be a sequence of {noun} (list or tuple), \
              got {} {}; iterating it yields integers",
             type_name()?,
             shown()?
@@ -1394,16 +1415,16 @@ fn groupby_refusal(where_: &str, obj: &Bound<'_, PyAny>) -> PyResult<Option<Stri
     let ordered_view = pyo3::types::PyTuple::new(py, [abc.getattr("KeysView")?, abc.getattr("ItemsView")?])?;
     if is_a(abc.getattr("Set")?)? && !is_a(ordered_view.into_any())? {
         return Ok(Some(format!(
-            "{where_}: groupby must be an ordered sequence of column names, \
+            "{where_}: {param} must be an ordered sequence of {noun}, \
              got {} {}; a set has no order, so the output would change from run to run; \
              pass a list, e.g. sorted(...)",
             type_name()?,
             shown()?
         )));
     }
-    if is_a(abc.getattr("Mapping")?)? && !obj.is_instance_of::<pyo3::types::PyDict>() {
+    if is_a(abc.getattr("Mapping")?)? {
         return Ok(Some(format!(
-            "{where_}: groupby must be a sequence of column names, got {} {}; \
+            "{where_}: {param} must be a sequence of {noun}, got {} {}; \
              pass a list of its keys, e.g. list(...)",
             type_name()?,
             shown()?

@@ -178,6 +178,7 @@ fn is_numeric(d: &DataType) -> bool {
 // ---------- PyO3 wrapper ----------
 
 use crate::transform::core::TransformSpec;
+use crate::transform::group_key::parse_names_pyany;
 
 /// Melt / wide-to-long reshaping transform.
 ///
@@ -189,11 +190,13 @@ use crate::transform::core::TransformSpec;
 ///
 /// Parameters
 /// ----------
-/// id_vars : list of str, default []
+/// id_vars : list of str, optional
 ///     Columns to keep as identifier variables (repeated per unpivoted row).
+///     When omitted, no column is kept. A string, bytes, set or mapping is
+///     refused.
 /// value_vars : list of str, optional
 ///     Columns to unpivot. When omitted, all columns not in ``id_vars``
-///     are unpivoted.
+///     are unpivoted. A string, bytes, set or mapping is refused.
 /// var_name : str, default "variable"
 ///     Name of the new column that holds the original column names.
 /// value_name : str, default "value"
@@ -217,19 +220,26 @@ impl PyUnpivot {
     #[new]
     #[pyo3(signature = (
         *,
-        id_vars = Vec::<String>::new(),
+        id_vars = None,
         value_vars = None,
         var_name = "variable",
         value_name = "value",
         name = None,
     ))]
     fn new(
-        id_vars: Vec<String>,
-        value_vars: Option<Vec<String>>,
+        id_vars: Option<&Bound<'_, PyAny>>,
+        value_vars: Option<&Bound<'_, PyAny>>,
         var_name: &str,
         value_name: &str,
         name: Option<String>,
     ) -> PyResult<Self> {
+        let id_vars = id_vars
+            .map(|v| parse_names_pyany("Unpivot", "id_vars", "column names", v))
+            .transpose()?
+            .unwrap_or_default();
+        let value_vars = value_vars
+            .map(|v| parse_names_pyany("Unpivot", "value_vars", "column names", v))
+            .transpose()?;
         if var_name.is_empty() || value_name.is_empty() {
             return Err(PyValueError::new_err("Unpivot: var_name and value_name must be non-empty"));
         }
@@ -405,5 +415,47 @@ mod tests {
         spec.id_vars = vec!["zz".into()];
         let err = apply(&spec, &id_only_batch(vec![])).expect_err("zz is missing");
         assert!(err.to_string().contains("id_var 'zz' not found"), "{err}");
+    }
+
+    #[test]
+    fn the_constructor_reads_names_through_the_shared_door() {
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let eval = |e: &std::ffi::CStr| py.eval(e, None, None).unwrap();
+            let msg = |r: PyResult<PyUnpivot>| r.err().unwrap().value(py).to_string();
+            assert_eq!(
+                msg(PyUnpivot::new(Some(&eval(c"{'a': 1}")), None, "variable", "value", None)),
+                "Unpivot: id_vars must be a sequence of column names, got dict {'a': 1}; \
+                 pass a list of its keys, e.g. list(...)"
+            );
+            assert_eq!(
+                msg(PyUnpivot::new(None, Some(&eval(c"'cat'")), "variable", "value", None)),
+                "Unpivot: value_vars must be a sequence of column names (list or tuple), \
+                 got a bare string 'cat'; iterating a string yields individual characters"
+            );
+            let omitted = PyUnpivot::new(None, None, "variable", "value", None).unwrap();
+            assert_eq!(
+                omitted.0,
+                TransformSpec::Unpivot(UnpivotSpec {
+                    id_vars: vec![],
+                    value_vars: None,
+                    var_name: "variable".into(),
+                    value_name: "value".into(),
+                    name: None
+                })
+            );
+            let given = PyUnpivot::new(
+                Some(&eval(c"('r',)")),
+                Some(&eval(c"{'a': 1}.keys()")),
+                "variable",
+                "value",
+                None,
+            )
+            .unwrap();
+            assert!(matches!(
+                &given.0,
+                TransformSpec::Unpivot(s) if s.id_vars == ["r"] && s.value_vars.as_deref() == Some(&["a".to_string()][..])
+            ));
+        });
     }
 }

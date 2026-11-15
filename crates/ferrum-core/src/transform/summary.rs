@@ -229,7 +229,7 @@ use crate::transform::core::TransformSpec;
 ///     transform, column, and dtype.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or a mapping other than a dict is refused.
+///     string, bytes, set or a mapping is refused.
 ///     Columns to group by. Default is ``[]`` (whole-batch summary).
 /// error_fn : {"ci", "stderr", "stdev"}, default "ci"
 ///     Error measure. ``"ci"`` uses a bootstrap confidence interval (see

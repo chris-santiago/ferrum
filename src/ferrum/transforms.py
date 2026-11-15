@@ -96,7 +96,7 @@ def _validate_as_pair(value: tuple[str, str], *, where: str) -> list[str]:
         If *value* is not a length-2 sequence of non-empty strings.
         A bare string is rejected even if it has exactly 2 characters,
         because iterating a string yields individual characters, not
-        column names. A byte string, a set and a non-``dict`` mapping are
+        column names. A byte string, a set and a mapping are
         refused through :func:`_reject_bare_string`, which also words the
         bare-string refusal.
     """
@@ -111,7 +111,7 @@ def _validate_as_pair(value: tuple[str, str], *, where: str) -> list[str]:
 
 
 def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> None:
-    """Raise ``ValueError`` if *value* is a bare string, a byte string, a set or a non-``dict`` mapping.
+    """Raise ``ValueError`` if *value* is a bare string, a byte string, a set or a mapping.
 
     The single refusal mechanism for the class of parameter whose declared
     type is a sequence of strings (``groupby=``, ``fields=``, ``sort=``,
@@ -144,9 +144,9 @@ def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> 
     take from something other than the caller: ``bytes``, ``bytearray`` and
     ``memoryview`` (they iterate into integers), any ``collections.abc.Set``
     (``set``, ``frozenset``: no defined order, so the output would change from run
-    to run) and any ``Mapping`` that is not a ``dict`` (only a
-    ``dict`` is ``keyvals``' ``{'start', 'stop', 'step'}`` form; the other
-    parameters name ``list(...)`` of its keys as the remedy). A dict's
+    to run) and any ``Mapping``, a ``dict`` included (only ``keyvals`` has a
+    dict form, ``{'start', 'stop', 'step'}``, which it keeps; every other
+    parameter names ``list(...)`` of its keys as the remedy). A dict's
     ``keys()``, ``values()`` and ``items()`` views are ordered (insertion
     order), so they are read like a list. Nothing is iterated before it
     refuses.
@@ -154,7 +154,7 @@ def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> 
     Raises
     ------
     ValueError
-        If *value* is a ``str``, a byte string, a set or a non-``dict`` mapping.
+        If *value* is a ``str``, a byte string, a set or a mapping.
     """
     if isinstance(value, str):
         raise ValueError(
@@ -172,8 +172,10 @@ def _reject_bare_string(value: object, *, where: str, param: str, noun: str) -> 
             f"got {type(value).__name__} {value!r}; a set has no order, so the output "
             "would change from run to run; pass a list, e.g. sorted(...)"
         )
-    if _is_non_dict_mapping(value):
+    if isinstance(value, Mapping):
         if param == "keyvals":
+            if isinstance(value, dict):
+                return
             raise ValueError(
                 f"{where}: keyvals must be a sequence of {noun} or a "
                 f"{{'start', 'stop', 'step'}} dict, got {type(value).__name__} {value!r}; "
@@ -220,13 +222,12 @@ def _reject_bare_string_groupby(value: object, *, where: str) -> None:
     (``list("cat")`` -> ``['c', 'a', 't']``), sending three bogus
     single-character group columns to Rust instead of raising —
     ``transform_top_k`` was the only wrapper with a hand-rolled version of
-    this same guard. This is the wrapper-level typed-refusal half of the
-    two-layer groupby shape; the Rust-side pyclasses (``PyBin``, ``PyKde``,
-    ``PyKde2d``, ``PySmooth``, ``PyTopK``) separately *normalize* a bare
-    string to a single-element list via ``parse_groupby_pyany`` at their own
-    constructor boundary — the two layers intentionally differ (refuse vs.
-    normalize) because a `transform_*` wrapper builds a plain wire dict with
-    no constructor to normalize through.
+    this same guard. A ``transform_*`` wrapper builds a plain wire dict, so it
+    validates here; each Rust constructor (``Bin``, ``Kde``, ``Smooth``,
+    ``TopK``, ``Flatten``, ``Unpivot`` and the rest) validates its own arguments
+    and refuses the same values in the same words through
+    ``parse_groupby_pyany`` / ``parse_names_pyany``
+    (``crates/ferrum-core/src/transform/group_key/mod.rs``).
 
     Materializing the value into a list remains each call site's own job,
     since the required-vs-optional and default-vs-explicit shapes differ
@@ -242,7 +243,7 @@ def _reject_bare_string_groupby(value: object, *, where: str) -> None:
     Raises
     ------
     ValueError
-        If *value* is a ``str``, a byte string, a set or a non-``dict`` mapping
+        If *value* is a ``str``, a byte string, a set or a mapping
         (see :func:`_reject_bare_string`).
     """
     _reject_bare_string(value, where=where, param="groupby", noun="column names")
@@ -1326,7 +1327,7 @@ def transform_impute(
     ------
     ValueError
         If ``groupby`` or ``keyvals`` is a bare string, a byte string, a set
-        or a non-``dict`` mapping; or if
+        or a mapping (a ``keyvals`` dict is its start/stop/step form); or if
         ``value``, ``keyvals`` or ``frame`` is malformed, or a literal (a
         ``value`` or a ``keyvals`` element) is of no accepted kind.
 

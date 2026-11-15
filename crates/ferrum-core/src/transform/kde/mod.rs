@@ -907,7 +907,7 @@ use crate::transform::core::TransformSpec;
 ///     ``"exponential"``, ``"linear"``.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or a mapping other than a dict is refused.
+///     string, bytes, set or a mapping is refused.
 ///     One or more group-key columns; KDE computed independently per group.
 ///     Output schema gains one column per groupby field after the 2nd field.
 /// count_scale : str, int, float, or None, optional

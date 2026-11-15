@@ -509,7 +509,7 @@ use crate::transform::core::TransformSpec;
 ///     byte-deterministic output across platforms.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or a mapping other than a dict is refused.
+///     string, bytes, set or a mapping is refused.
 ///     Columns to compute the points and the reference line per group of;
 ///     both outputs carry one column per field, named and typed as its input
 ///     column. A row with a null key belongs to no group and is dropped, with
