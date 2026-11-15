@@ -7,10 +7,16 @@ group, so each now returns zero rows of its declared schema and the chart report
 rows to draw once, as every other statistic and mark does. A malformed ``groupby`` is still
 refused, a key that is null on every row of a non-empty frame still has its own warning, a fit
 statistic still degrades with its fit warning, and a grid whose every child is empty still raises.
+
+A zero-row ``transform_pivot`` publishes the columns its readers ask for as empty ``Float64``
+columns: the encodings, the steps after it (read before they are computed, including a step that
+rewrites a pivoted name in place), composition doors and facet panels. A pivot over rows is
+byte-identical to what it drew before, and a name its values lack is still refused.
 """
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from typing import Any
 
@@ -32,6 +38,7 @@ from tests.test_null_group_warning import (
     _render_capturing,
     _whole_fit_message,
     FIT_FEW,
+    FIT_FEW_LOESS_POINTS,
     FIT_FEW_POINTS,
 )
 
@@ -356,3 +363,534 @@ def test_a_grid_whose_every_child_is_zero_row_still_raises():
     grid = fm.hconcat(_MARKS["mark_boxplot"](_empty()), _MARKS["mark_errorbar"](_empty()))
     with pytest.raises(ValueError, match="every child's data is empty; nothing to render"):
         grid.to_svg()
+
+
+# ---------------------------------------------------------------------------
+# A zero-row pivot publishes the columns its readers ask for
+# ---------------------------------------------------------------------------
+
+_PIVOT = fm.transform_pivot("h", "v", groupby=["k"])
+
+
+def _pivot_rows() -> pl.DataFrame:
+    return pl.DataFrame(
+        {"k": ["p", "p", "q", "q"], "h": ["a", "b", "a", "b"], "v": [1.0, 2.0, 3.0, 4.0]}
+    )
+
+
+def _pivot_empty() -> pl.DataFrame:
+    return _pivot_rows().head(0)
+
+
+def _pivot_chart(df: pl.DataFrame, **encoding: str) -> fm.Chart:
+    return fm.Chart(df).transform(_PIVOT).mark_point().encode(**encoding)
+
+
+_PIVOT_DOORS: dict[str, Callable[[pl.DataFrame], fm.Chart]] = {
+    "x_y": lambda df: _pivot_chart(df, x="a", y="b"),
+    "size": lambda df: _pivot_chart(df, x="k", y="k", size="a"),
+    "color": lambda df: _pivot_chart(df, x="k", y="k", color="b"),
+    "calculate": lambda df: (
+        fm.Chart(df)
+        .transform(_PIVOT, fm.transform_calculate("z", "datum.a + 1"))
+        .mark_point()
+        .encode(x="z", y="k")
+    ),
+    # Bin per_row appends bin_start, and refuses an input column of that name: the pivot must
+    # not publish the name the step computes, or the step refuses its own output.
+    "computed_name": lambda df: (
+        fm.Chart(df)
+        .transform(_PIVOT, fm.Bin("a", per_row=True))
+        .mark_point()
+        .encode(x="bin_start", y="k")
+    ),
+    "groupby_only": lambda df: _pivot_chart(df, x="k", y="k"),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("door", sorted(_PIVOT_DOORS))
+def test_a_zero_row_pivot_draws_its_frame_and_warns_once(door: str, output: str):
+    chart = _PIVOT_DOORS[door](_pivot_empty())
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    _, messages = _render_capturing(render)
+    assert messages == [_NO_ROWS_TO_DRAW]
+
+
+def test_a_zero_row_pivot_draws_the_pivoted_names_on_its_axes():
+    svg, _ = _render_capturing(_PIVOT_DOORS["x_y"](_pivot_empty()).to_svg)
+    assert ">a<" in svg and ">b<" in svg
+
+
+def test_a_zero_row_pivot_beside_a_populated_pivot_draws_the_populated_one():
+    chart = _PIVOT_DOORS["x_y"](_pivot_empty()) + _PIVOT_DOORS["x_y"](_pivot_rows())
+    svg, messages = _render_capturing(chart.to_svg)
+    assert messages == []
+    assert svg.count("<circle") == 2
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_zero_row_pivot_under_plus_warns_once(output: str):
+    chart = _PIVOT_DOORS["x_y"](_pivot_empty()) + _PIVOT_DOORS["x_y"](_pivot_empty())
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    assert _render_capturing(render)[1] == [_NO_ROWS_TO_DRAW]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_zero_row_pivot_in_a_layer_chart_warns_once(output: str):
+    chart = fm.LayerChart(_PIVOT_DOORS["x_y"](_pivot_empty()), _PIVOT_DOORS["x_y"](_pivot_empty()))
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    assert _render_capturing(render)[1] == [_NO_ROWS_TO_DRAW]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_zero_row_pivot_with_a_layer_warns_once(output: str):
+    chart = _PIVOT_DOORS["x_y"](_pivot_empty()).layer(fm.Layer(mark="point"))
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    assert _render_capturing(render)[1] == [_NO_ROWS_TO_DRAW]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_zero_row_faceted_pivot_draws_no_panel_and_says_so(output: str):
+    chart = _PIVOT_DOORS["x_y"](_pivot_empty()).facet("k")
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    assert _render_capturing(render)[1] == [_NO_FACET_ROWS_WARNING]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize(("kind", "shape"), _KIND_SHAPES)
+def test_a_zero_row_pivot_keyed_by_every_dtype_equals_its_epoch_twin(
+    kind: str, shape: str, output: str
+):
+    def render(frame: pl.DataFrame):
+        chart = _DOORS["pivot"](frame.head(0))
+        return _render_capturing(chart.to_svg if output == "static" else _interactive(chart))
+
+    page, messages = render(_kind_frame(kind, shape))
+    twin_page, twin_messages = render(_kind_twin(kind, shape))
+    assert messages == twin_messages == [_NO_ROWS_TO_DRAW]
+    assert page == twin_page
+
+
+def test_a_pivot_over_rows_is_the_chart_over_its_pivoted_frame():
+    wide = pl.DataFrame({"k": ["p", "q"], "a": [1.0, 3.0], "b": [2.0, 4.0]})
+    page, messages = _render_capturing(_PIVOT_DOORS["x_y"](_pivot_rows()).to_svg)
+    reference, _ = _render_capturing(fm.Chart(wide).mark_point().encode(x="a", y="b").to_svg)
+    assert messages == []
+    assert page == reference
+
+
+_UNKNOWN_ZZ = "unknown column 'zz' referenced by an encoding"
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_pivot_over_rows_still_refuses_a_name_its_values_lack(output: str):
+    chart = _pivot_chart(_pivot_rows(), x="zz", y="b")
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    with pytest.raises(ValueError) as raised:
+        render()
+    assert str(raised.value) == _UNKNOWN_ZZ
+
+
+def test_a_zero_row_frame_without_a_pivot_still_refuses_a_missing_column():
+    chart = fm.Chart(_pivot_empty()).mark_point().encode(x="zz", y="k")
+    with pytest.raises(ValueError) as raised:
+        chart.to_svg()
+    assert str(raised.value) == _UNKNOWN_ZZ
+
+
+def test_a_malformed_pivot_is_still_refused_on_a_zero_row_frame():
+    pivot = fm.transform_pivot("h", "v", groupby=["zz"])
+    chart = fm.Chart(_pivot_empty()).transform(pivot).mark_point().encode(x="a", y="b")
+    with pytest.raises(ValueError) as raised:
+        chart.to_svg()
+    assert (
+        str(raised.value)
+        == "transform failed: ValueError: data_pivot: groupby column 'zz' not found"
+    )
+
+
+def _populated_pivots() -> dict[str, fm.Chart]:
+    return {
+        "x_y": _pivot_chart(_pivot_rows(), x="a", y="b"),
+        "color": _pivot_chart(_pivot_rows(), x="a", y="b", color="k"),
+        "calculate": (
+            fm.Chart(_pivot_rows())
+            .transform(_PIVOT, fm.transform_calculate("z", "datum.a + datum.b"))
+            .mark_point()
+            .encode(x="z", y="k")
+        ),
+    }
+
+
+# SHA-256 of the static SVG and of the interactive scene JSON, measured before the zero-row pivot
+# change (the scene JSON carries no per-run id, so it is compared as is).
+_POPULATED_PIVOT_DIGESTS = {
+    "x_y": (
+        "17598a74093638d6487d2e8b466619f927cae45e41293d62eb535f86e0164f7b",
+        "816a114c63029a9d24ef7e855e573a55a5743d4ba37b9090c0c768425d012b0c",
+    ),
+    "color": (
+        "310c379ef93e961efccf25234c8020f9c56244dc8cb415447c7e231d622258b4",
+        "032e78b51d5409b915e0fe19cfd3a5c7df0325e9d05a645a199a818e1ced363a",
+    ),
+    "calculate": (
+        "c8fbb75f14388a0c85a940e9f3ef09fc2e75cf4c24663106e51288e3fdd7be11",
+        "9670b68f1eacbaff4f51ec2b4d9ff99aa7d0eeeed9a584348105de8de7ab23ac",
+    ),
+}
+
+
+@pytest.mark.parametrize("door", sorted(_POPULATED_PIVOT_DIGESTS))
+def test_a_populated_pivot_is_byte_identical_to_before(door: str):
+    chart = _populated_pivots()[door]
+    svg = hashlib.sha256(chart.to_svg().encode()).hexdigest()
+    scene = hashlib.sha256(str(chart.interactive().scene_json).encode()).hexdigest()
+    assert (svg, scene) == _POPULATED_PIVOT_DIGESTS[door]
+
+
+# ---------------------------------------------------------------------------
+# Steps that follow a zero-row pivot read its published columns
+# ---------------------------------------------------------------------------
+
+
+def _following_frame() -> pl.DataFrame:
+    schema = {"g": pl.Utf8, "h": pl.Utf8, "v": pl.Float64}
+    return pl.DataFrame({name: [] for name in schema}, schema=schema)
+
+
+_FOLLOWING_PIVOT = fm.transform_pivot("h", "v", groupby=["g"])
+
+# (steps after the pivot, x, y); the chart draws its mark_point over the last step's output.
+_FOLLOWING_STEPS: dict[str, tuple[list[dict], str, str | None]] = {
+    "calculate": ([fm.transform_calculate("c", "datum.a + 1")], "a", "c"),
+    "fold": ([fm.transform_fold(["a", "b"], as_=("key", "value"))], "key", "value"),
+    "window_rank": (
+        [fm.transform_window({"op": "rank", "as": "r"}, sort=["a"])],
+        "a",
+        "r",
+    ),
+    "stack": ([fm.transform_stack("a", groupby=["g"], as_=("y0", "y1"))], "g", "y1"),
+    "density": ([fm.transform_density("a", as_=("value", "density"))], "value", "density"),
+    "loess": (
+        [fm.transform_loess("a", "b", bandwidth=0.5, as_=("lx", "ly"))],
+        "lx",
+        "ly",
+    ),
+    "regression": (
+        [fm.transform_regression("a", "b", as_=("rx", "ry"))],
+        "rx",
+        "ry",
+    ),
+    "timeunit_default": ([fm.transform_timeunit("a", "year")], "year_a", None),
+    "timeunit_named": ([fm.transform_timeunit("a", "year", as_="yr")], "yr", None),
+    "bin_default": ([fm.transform_bin("a")], "a_bin", None),
+    "bin_named": ([fm.transform_bin("a", as_="bb")], "bb", None),
+    "flatten": ([fm.transform_flatten(["a"], as_=["fa"])], "fa", None),
+}
+
+
+def _following_chart(steps: list[dict], x: str, y: str | None) -> fm.Chart:
+    chart = fm.Chart(_following_frame()).transform(_FOLLOWING_PIVOT, *steps)
+    return chart.mark_point().encode(x=x, y=y if y is not None else "g")
+
+
+_FOLLOWING_FIT_WARNINGS = {
+    "loess": _whole_fit_message("LoessData", FIT_FEW_LOESS_POINTS),
+    "regression": _whole_fit_message("RegressionData", FIT_FEW_POINTS),
+}
+_FOLLOWING_REFUSED = ["flatten"]
+_FOLLOWING_DRAWN = [
+    step
+    for step in _FOLLOWING_STEPS
+    if step not in _FOLLOWING_FIT_WARNINGS and step not in _FOLLOWING_REFUSED
+]
+
+
+def _render_following(chart: fm.Chart, output: str) -> list[str]:
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    return _render_capturing(render)[1]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("step", _FOLLOWING_DRAWN)
+def test_a_step_after_a_zero_row_pivot_draws_its_frame_and_warns_once(step: str, output: str):
+    chart = _following_chart(*_FOLLOWING_STEPS[step])
+    assert _render_following(chart, output) == [_NO_ROWS_TO_DRAW]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("step", sorted(_FOLLOWING_FIT_WARNINGS))
+def test_a_fit_step_after_a_zero_row_pivot_warns_as_it_does_over_the_published_columns(
+    step: str, output: str
+):
+    """The pivot route gives the warning list of the same step over a zero-row frame that already
+    holds the columns, and that list is the step's own degenerate-fit warning."""
+    steps, x, y = _FOLLOWING_STEPS[step]
+    published = pl.DataFrame(
+        {"g": [], "a": [], "b": []}, schema={"g": pl.Utf8, "a": pl.Float64, "b": pl.Float64}
+    )
+    twin = fm.Chart(published).transform(*steps).mark_point().encode(x=x, y=y)
+    expected = [_FOLLOWING_FIT_WARNINGS[step]]
+    assert _render_following(twin, output) == expected
+    assert _render_following(_following_chart(steps, x, y), output) == expected
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_flatten_after_a_zero_row_pivot_is_refused_as_after_a_populated_pivot(output: str):
+    steps, x, y = _FOLLOWING_STEPS["flatten"]
+    populated = (
+        fm.Chart(_pivot_rows().rename({"k": "g"}))
+        .transform(_FOLLOWING_PIVOT, *steps)
+        .mark_point()
+        .encode(x=x, y="g")
+    )
+
+    def refusal(chart: fm.Chart) -> tuple[type, str]:
+        render = chart.to_svg if output == "static" else _interactive(chart)
+        with pytest.raises(ValueError) as raised:
+            render()
+        return type(raised.value), str(raised.value)
+
+    zero_row = refusal(_following_chart(steps, x, y))
+    assert zero_row == refusal(populated)
+    assert zero_row[1] == (
+        "transform failed: ValueError: data_flatten: column 'a' has dtype Float64, which cannot "
+        "be flattened; expected a List column or a Utf8 column of ';'-delimited values"
+    )
+
+
+def _composed(steps: list[dict], x: str, y: str | None) -> fm.Chart:
+    layer = lambda: fm.Chart(_following_frame()).mark_point().encode(x=x, y=y or "g")  # noqa: E731
+    return (layer() + layer()).transform(_FOLLOWING_PIVOT, *steps)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("step", ["calculate", "fold"])
+def test_a_step_after_a_zero_row_pivot_on_a_composed_chart_warns_once(step: str, output: str):
+    chart = _composed(*_FOLLOWING_STEPS[step])
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    assert _render_capturing(render)[1] == [_NO_ROWS_TO_DRAW]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_bare_zero_row_pivot_on_a_composed_chart_warns_once(output: str):
+    chart = _composed([], "a", "b")
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    assert _render_capturing(render)[1] == [_NO_ROWS_TO_DRAW]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_zero_row_pivot_read_only_by_a_detail_binding_warns_once(output: str):
+    chart = (
+        fm.Chart(_following_frame())
+        .transform(_FOLLOWING_PIVOT)
+        .mark_line()
+        .encode(x="g", y="a", detail="b")
+    )
+    render = chart.to_svg if output == "static" else _interactive(chart)
+    assert _render_capturing(render)[1] == [_NO_ROWS_TO_DRAW]
+
+
+# ---------------------------------------------------------------------------
+# A step that reads a pivoted name and writes the same name
+# ---------------------------------------------------------------------------
+
+_IN_PLACE_STEPS: dict[str, list[dict]] = {
+    "calculate": [fm.transform_calculate("a", "datum.a * 2")],
+    "join_aggregate": [fm.transform_join_aggregate({"fn": "mean", "field": "a", "as": "a"})],
+    "bin": [fm.transform_bin("a", as_="a")],
+    "window": [fm.transform_window({"op": "row_number", "as": "a"}, sort=["a"])],
+    "calculate_chain": [
+        fm.transform_calculate("c", "datum.a + 1"),
+        fm.transform_calculate("a", "datum.c"),
+    ],
+    "read_after_compute": [
+        fm.transform_calculate("c", "datum.a + 1"),
+        fm.transform_calculate("d", "datum.c * 2"),
+    ],
+}
+
+
+def _in_place_chart(frame: pl.DataFrame, step: str, *, composed: bool) -> fm.Chart:
+    x = "d" if step == "read_after_compute" else "a"
+    if composed:
+        layer = lambda: fm.Chart(frame).mark_point().encode(x=x, y="g")  # noqa: E731
+        return (layer() + layer()).transform(_FOLLOWING_PIVOT, *_IN_PLACE_STEPS[step])
+    chart = fm.Chart(frame).transform(_FOLLOWING_PIVOT, *_IN_PLACE_STEPS[step])
+    return chart.mark_point().encode(x=x, y="g")
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("composed", [False, True], ids=["plain", "composed"])
+@pytest.mark.parametrize("step", list(_IN_PLACE_STEPS))
+def test_a_step_that_rewrites_a_pivoted_name_draws_and_warns_once_over_no_rows(
+    step: str, composed: bool, output: str
+):
+    populated = _in_place_chart(_pivot_rows().rename({"k": "g"}), step, composed=composed)
+    assert _render_following(populated, output) == []
+    chart = _in_place_chart(_following_frame(), step, composed=composed)
+    assert _render_following(chart, output) == [_NO_ROWS_TO_DRAW]
+
+
+# ---------------------------------------------------------------------------
+# Composite leaves and facet panels
+# ---------------------------------------------------------------------------
+
+
+def _published_twin() -> pl.DataFrame:
+    return pl.DataFrame(
+        {"g": [], "a": [], "b": []}, schema={"g": pl.Utf8, "a": pl.Float64, "b": pl.Float64}
+    )
+
+
+def _wide_leaf(frame: pl.DataFrame) -> fm.Chart:
+    return fm.Chart(frame).mark_point().encode(x="a", y="b")
+
+
+def _zero_row_pivot_leaf() -> fm.Chart:
+    return _following_chart([], "a", "b")
+
+
+def _populated_leaf() -> fm.Chart:
+    wide = pl.DataFrame({"g": ["p", "q"], "a": [1.0, 3.0], "b": [2.0, 4.0]})
+    return _wide_leaf(wide)
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("concat", [fm.hconcat, fm.vconcat], ids=["hconcat", "vconcat"])
+def test_a_zero_row_pivot_leaf_beside_a_populated_leaf_equals_the_plain_zero_row_leaf(
+    concat, output: str
+):
+    def render(leaf: fm.Chart):
+        grid = concat(leaf, _populated_leaf())
+        return _render_capturing(grid.to_svg if output == "static" else _interactive(grid))
+
+    page, messages = render(_zero_row_pivot_leaf())
+    twin_page, twin_messages = render(_wide_leaf(_published_twin()))
+    assert messages == twin_messages == []
+    assert page == twin_page
+
+
+@pytest.mark.parametrize("concat", [fm.hconcat, fm.vconcat], ids=["hconcat", "vconcat"])
+def test_a_grid_of_only_zero_row_pivots_still_raises(concat):
+    grid = concat(_zero_row_pivot_leaf(), _zero_row_pivot_leaf())
+    with pytest.raises(ValueError, match="every child's data is empty; nothing to render"):
+        grid.to_svg()
+
+
+def _faceted_pivot_rows() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "k": ["m", "m", "m", "m"],
+            "f": ["p", "p", "q", "q"],
+            "h": ["a", "b", "a", "b"],
+            "v": [1.0, 2.0, -3.0, -4.0],
+        }
+    )
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+def test_a_filter_before_a_pivot_that_empties_one_facet_panel_draws_the_other(output: str):
+    """The filter leaves panel ``q`` without rows, so the pivot runs once per panel and ``q``'s
+    run has no rows; the chart equals the one over the hand-filtered, hand-pivoted frame."""
+    pivot = fm.transform_pivot("h", "v", groupby=["k", "f"])
+    chart = (
+        fm.Chart(_faceted_pivot_rows())
+        .transform(fm.transform_filter("datum.v > 0"), pivot)
+        .mark_point()
+        .encode(x="a", y="b")
+        .facet("f")
+    )
+    wide = pl.DataFrame({"k": ["m"], "f": ["p"], "a": [1.0], "b": [2.0]})
+    twin = fm.Chart(wide).mark_point().encode(x="a", y="b").facet("f")
+    page, messages = _render_capturing(chart.to_svg if output == "static" else _interactive(chart))
+    twin_page, twin_messages = _render_capturing(
+        twin.to_svg if output == "static" else _interactive(twin)
+    )
+    assert messages == twin_messages == []
+    assert page == twin_page
+    if output == "static":
+        assert page.count("<circle") == 1
+
+
+def test_a_zero_row_pivot_draws_the_page_of_a_zero_row_float64_frame():
+    """The published columns are ``Float64``: the page equals the zero-row ``Float64`` frame's and
+    differs from a text-typed frame's."""
+    page, messages = _render_capturing(_zero_row_pivot_leaf().to_svg)
+    twin, twin_messages = _render_capturing(_wide_leaf(_published_twin()).to_svg)
+    text = _published_twin().cast({"a": pl.Utf8, "b": pl.Utf8})
+    text_page, _ = _render_capturing(_wide_leaf(text).to_svg)
+    assert messages == twin_messages == [_NO_ROWS_TO_DRAW]
+    assert page == twin
+    assert page != text_page
+
+
+# ---------------------------------------------------------------------------
+# Steps that read what the pivot publishes without naming it
+# ---------------------------------------------------------------------------
+
+
+def _melted_chart(frame: pl.DataFrame, unpivot: Any, *, composed: bool) -> fm.Chart:
+    if composed:
+        layer = lambda: fm.Chart(frame).mark_point().encode(x="variable", y="value")  # noqa: E731
+        return (layer() + layer()).transform(_FOLLOWING_PIVOT, unpivot)
+    chart = fm.Chart(frame).transform(_FOLLOWING_PIVOT, unpivot)
+    return chart.mark_point().encode(x="variable", y="value")
+
+
+_UNPIVOTS = {
+    "no_value_vars": lambda: fm.Unpivot(id_vars=["g"]),
+    "value_vars": lambda: fm.Unpivot(id_vars=["g"], value_vars=["a", "b"]),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("composed", [False, True], ids=["plain", "composed"])
+@pytest.mark.parametrize("unpivot", list(_UNPIVOTS))
+def test_an_unpivot_after_a_zero_row_pivot_draws_and_warns_once(
+    unpivot: str, composed: bool, output: str
+):
+    populated = _melted_chart(
+        _pivot_rows().rename({"k": "g"}), _UNPIVOTS[unpivot](), composed=composed
+    )
+    assert _render_following(populated, output) == []
+    zero_row = _melted_chart(_following_frame(), _UNPIVOTS[unpivot](), composed=composed)
+    assert _render_following(zero_row, output) == [_NO_ROWS_TO_DRAW]
+
+
+def _named(step: dict, name: str) -> dict:
+    return {**step, "name": name}
+
+
+_NAMED_STEP_CHARTS: dict[str, Callable[[pl.DataFrame], fm.Chart]] = {
+    # a named step publishes beside the chain: the steps after it still read the pivot's `a`
+    "read_after_named": lambda df: (
+        fm.Chart(df)
+        .transform(
+            _FOLLOWING_PIVOT,
+            _named(fm.transform_calculate("a", "1"), "side"),
+            fm.transform_calculate("z", "datum.a + 1"),
+        )
+        .mark_point()
+        .encode(x="z", y="g")
+    ),
+    "draw_after_named": lambda df: (
+        fm.Chart(df)
+        .transform(_FOLLOWING_PIVOT, _named(fm.transform_calculate("a", "1"), "side"))
+        .mark_point()
+        .encode(x="a", y="g")
+    ),
+}
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("door", list(_NAMED_STEP_CHARTS))
+def test_a_named_step_after_a_zero_row_pivot_does_not_hide_the_name_it_computes(
+    door: str, output: str
+):
+    populated = _NAMED_STEP_CHARTS[door](_pivot_rows().rename({"k": "g"}))
+    assert _render_following(populated, output) == []
+    assert _render_following(_NAMED_STEP_CHARTS[door](_following_frame()), output) == [
+        _NO_ROWS_TO_DRAW
+    ]

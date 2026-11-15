@@ -148,12 +148,16 @@ pub(crate) fn global_extent(
     crate::transform::numeric_util::column_extent(batch, &spec.field)
 }
 
+impl DataBinSpec {
+    /// The column the step writes: `as_`, else `{field}_bin`.
+    pub(crate) fn output_name(&self) -> String {
+        self.as_.clone().unwrap_or_else(|| format!("{}_bin", self.field))
+    }
+}
+
 fn build_output(spec: &DataBinSpec, batch: &RecordBatch, bin_values: Vec<f64>) -> PyResult<RecordBatch> {
     let schema = batch.schema();
-    let out_name = spec
-        .as_
-        .clone()
-        .unwrap_or_else(|| format!("{}_bin", spec.field));
+    let out_name = spec.output_name();
 
     let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
     fields.push(Field::new(&out_name, DataType::Float64, true));

@@ -29,6 +29,13 @@ pub(crate) struct TimeUnitSpec {
     pub name: Option<String>,
 }
 
+impl TimeUnitSpec {
+    /// The column the step writes: `as_`, else `{unit}_{field}`.
+    pub(crate) fn output_name(&self) -> String {
+        self.as_.clone().unwrap_or_else(|| format!("{}_{}", self.unit, self.field))
+    }
+}
+
 pub(crate) fn apply(spec: &TimeUnitSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
     let schema = batch.schema();
 
@@ -60,10 +67,7 @@ pub(crate) fn apply(spec: &TimeUnitSpec, batch: &RecordBatch) -> PyResult<Record
         })
         .collect();
 
-    let out_name = spec
-        .as_
-        .clone()
-        .unwrap_or_else(|| format!("{}_{}", spec.unit, spec.field));
+    let out_name = spec.output_name();
 
     // Build output: original columns + new unit column.
     let mut fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();

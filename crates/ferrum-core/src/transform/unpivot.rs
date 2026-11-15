@@ -50,6 +50,9 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
             .collect(),
     };
 
+    if value_var_names.is_empty() && n_rows == 0 {
+        return empty_melt(spec, batch);
+    }
     if value_var_names.is_empty() {
         return Err(PyValueError::new_err(
             "stat_unpivot: no value_vars to melt (id_vars covers all columns)"
@@ -123,6 +126,31 @@ pub(crate) fn apply(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordB
     cols.push(var_arr);
     cols.push(stacked_value);
     RecordBatch::try_new(out_schema, cols)
+        .map_err(|e| PyValueError::new_err(format!("stat_unpivot: {e}")))
+}
+
+/// The melt of a frame with no rows and no value columns to name (a pivot
+/// over no rows holds none): its id columns as they are, empty, and an empty
+/// `var_name` text column and `value_name` `Float64` column, the types a melt
+/// of `Float64` value columns gives. A frame with rows whose `id_vars` cover
+/// every column is refused by [`apply`]; there is nothing to draw from it.
+fn empty_melt(spec: &UnpivotSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {
+    let schema = batch.schema();
+    let mut fields = Vec::with_capacity(spec.id_vars.len() + 2);
+    let mut cols: Vec<ArrayRef> = Vec::with_capacity(spec.id_vars.len() + 2);
+    for name in &spec.id_vars {
+        let i = schema
+            .index_of(name)
+            .map_err(|_| PyValueError::new_err(format!("stat_unpivot: id_var '{name}' not found")))?;
+        let field = schema.field(i);
+        fields.push(Field::new(field.name(), field.data_type().clone(), field.is_nullable()));
+        cols.push(batch.column(i).clone());
+    }
+    fields.push(Field::new(&spec.var_name, DataType::Utf8, false));
+    fields.push(Field::new(&spec.value_name, DataType::Float64, true));
+    cols.push(Arc::new(StringArray::from(Vec::<&str>::new())));
+    cols.push(Arc::new(arrow::array::Float64Array::from(Vec::<f64>::new())));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), cols)
         .map_err(|e| PyValueError::new_err(format!("stat_unpivot: {e}")))
 }
 
@@ -347,5 +375,45 @@ mod tests {
         };
         let out = apply(&spec, &batch).unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int32);
+    }
+
+    fn id_only_batch(rows: Vec<&str>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(rows))]).unwrap()
+    }
+
+    fn id_g_spec() -> UnpivotSpec {
+        UnpivotSpec { id_vars: vec!["g".into()], value_vars: None, var_name: "variable".into(), value_name: "value".into(), name: None }
+    }
+
+    /// A frame with no rows and nothing to melt melts to its empty id
+    /// columns plus an empty text variable column and an empty Float64 value
+    /// column.
+    #[test]
+    fn a_frame_with_no_rows_and_nothing_to_melt_melts_to_empty_columns() {
+        pyo3::Python::initialize();
+        let out = apply(&id_g_spec(), &id_only_batch(vec![])).unwrap();
+        let schema = out.schema();
+        let fields: Vec<(&str, &DataType)> = schema.fields().iter().map(|f| (f.name().as_str(), f.data_type())).collect();
+        assert_eq!(fields, [("g", &DataType::Utf8), ("variable", &DataType::Utf8), ("value", &DataType::Float64)]);
+        assert_eq!(out.num_rows(), 0);
+    }
+
+    /// A frame with rows whose id_vars cover every column keeps the refusal.
+    #[test]
+    fn a_frame_with_rows_and_nothing_to_melt_is_still_refused() {
+        pyo3::Python::initialize();
+        let err = apply(&id_g_spec(), &id_only_batch(vec!["a"])).expect_err("nothing to melt");
+        assert!(err.to_string().contains("no value_vars to melt"), "{err}");
+    }
+
+    /// The empty melt still refuses an id_var the frame lacks.
+    #[test]
+    fn an_empty_melt_still_refuses_a_missing_id_var() {
+        pyo3::Python::initialize();
+        let mut spec = id_g_spec();
+        spec.id_vars = vec!["zz".into()];
+        let err = apply(&spec, &id_only_batch(vec![])).expect_err("zz is missing");
+        assert!(err.to_string().contains("id_var 'zz' not found"), "{err}");
     }
 }

@@ -8,7 +8,7 @@ use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::transform::context::TransformContext;
@@ -60,6 +60,23 @@ pub(crate) fn apply_with_context(
     spec: &PivotSpec,
     batch: &RecordBatch,
     ctx: &TransformContext,
+) -> PyResult<RecordBatch> {
+    apply_demanded(spec, batch, ctx, &BTreeSet::new())
+}
+
+/// [`apply_with_context`] for a pivot whose readers' column names are known
+/// (`run::pivot_demands`). The pivot's value columns are named by its rows,
+/// so a pivot over no rows holds none; when `batch` has no rows each name in
+/// `demanded` that the output does not already hold is published as an empty
+/// `Float64` column, the dtype every pivot column has, so the steps and
+/// layers that read it find it. A pivot over one or more rows ignores
+/// `demanded`: its output is exactly its pivoted values, and a name they
+/// lack is still a missing column to whoever reads it.
+pub(crate) fn apply_demanded(
+    spec: &PivotSpec,
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+    demanded: &BTreeSet<String>,
 ) -> PyResult<RecordBatch> {
     crate::transform::vocabulary::check_declared(OPS, "data_pivot", "op", &spec.op)?;
     let schema = batch.schema();
@@ -173,13 +190,23 @@ pub(crate) fn apply_with_context(
     for pv in &pivot_values {
         out_fields.push(Field::new(pv, DataType::Float64, true));
     }
+    // A zero-row pivot has no pivot values; it publishes the names its
+    // readers ask for instead, once each (`pivot_values` is empty here, so
+    // only a groupby column can already hold one).
+    let published: Vec<&String> = match n_rows {
+        0 => demanded.iter().filter(|name| !groupby.contains(name)).collect(),
+        _ => Vec::new(),
+    };
+    for name in &published {
+        out_fields.push(Field::new(name.as_str(), DataType::Float64, true));
+    }
     let out_schema = Arc::new(Schema::new(out_fields));
 
     // Build Arrow arrays. The groupby output dtype must match the declared schema
     // field; materialize_groupby_col guarantees this (the previous code declared
     // the original dtype but emitted a StringArray, crashing RecordBatch::try_new
     // for non-Utf8 groupby columns).
-    let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(groupby.len() + pivot_values.len());
+    let mut out_cols: Vec<ArrayRef> = Vec::with_capacity(groupby.len() + pivot_values.len() + published.len());
     for (gi, dt) in group_dtypes.iter().enumerate() {
         let col = materialize_groupby_col(&group_key_vecs, gi, dt)
             .map_err(PyValueError::new_err)?;
@@ -187,6 +214,9 @@ pub(crate) fn apply_with_context(
     }
     for pv_data in pivot_data {
         out_cols.push(Arc::new(Float64Array::from(pv_data)));
+    }
+    for _ in &published {
+        out_cols.push(Arc::new(Float64Array::from(Vec::<f64>::new())));
     }
 
     RecordBatch::try_new(out_schema, out_cols)
@@ -446,5 +476,90 @@ mod tests {
                 assert_eq!(apply(&spec, &frame_of(Some(infinite))).unwrap(), twin, "op {op}");
             }
         }
+    }
+
+    fn zero_row_pivot_batch() -> RecordBatch {
+        pivot_batch(vec![], vec![], vec![])
+    }
+
+    fn demand(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_string()).collect()
+    }
+
+    fn column_names(batch: &RecordBatch) -> Vec<String> {
+        batch.schema().fields().iter().map(|field| field.name().clone()).collect()
+    }
+
+    /// A zero-row pivot publishes each demanded name once, as an empty
+    /// Float64 column after its groupby columns.
+    #[test]
+    fn a_zero_row_pivot_publishes_each_demanded_name_as_an_empty_float_column() {
+        pyo3::Python::initialize();
+        let spec = pivot_spec(Some(vec!["g".into()]));
+        let out = apply_demanded(&spec, &zero_row_pivot_batch(), &TransformContext::default(), &demand(&["b", "a"])).unwrap();
+        assert_eq!(column_names(&out), ["g", "a", "b"]);
+        assert_eq!(out.num_rows(), 0);
+        for index in [1, 2] {
+            assert_eq!(out.column(index).data_type(), &DataType::Float64);
+            assert_eq!(out.column(index).len(), 0);
+        }
+    }
+
+    /// A demanded name a groupby column already holds is not published a
+    /// second time (the output would carry two fields of that name).
+    #[test]
+    fn a_zero_row_pivot_does_not_republish_a_groupby_column() {
+        pyo3::Python::initialize();
+        let spec = pivot_spec(Some(vec!["g".into()]));
+        let out = apply_demanded(&spec, &zero_row_pivot_batch(), &TransformContext::default(), &demand(&["g", "a"])).unwrap();
+        assert_eq!(column_names(&out), ["g", "a"]);
+        assert_eq!(out.column(0).data_type(), &DataType::Utf8);
+    }
+
+    /// With nothing demanded a zero-row pivot publishes only its groupby
+    /// columns, as the context-only entry point does.
+    #[test]
+    fn a_zero_row_pivot_with_no_demand_publishes_only_its_groupby_columns() {
+        pyo3::Python::initialize();
+        let spec = pivot_spec(Some(vec!["g".into()]));
+        let out = apply_demanded(&spec, &zero_row_pivot_batch(), &TransformContext::default(), &BTreeSet::new()).unwrap();
+        assert_eq!(column_names(&out), ["g"]);
+        assert_eq!(out, apply(&spec, &zero_row_pivot_batch()).unwrap());
+    }
+
+    /// A pivot over rows ignores the demand: its output is byte-identical to
+    /// the undemanded pivot, and a name its values lack stays absent.
+    #[test]
+    fn a_pivot_with_rows_ignores_the_demand() {
+        pyo3::Python::initialize();
+        let batch = pivot_batch(vec!["a", "b"], vec!["x", "y"], vec![1.0, 2.0]);
+        let spec = pivot_spec(Some(vec!["g".into()]));
+        let plain = apply(&spec, &batch).unwrap();
+        let demanded = apply_demanded(&spec, &batch, &TransformContext::default(), &demand(&["zz", "x"])).unwrap();
+        assert_eq!(demanded, plain);
+        assert_eq!(column_names(&demanded), ["g", "x", "y"]);
+    }
+
+    /// A pivot whose rows all had null group keys is a pivot over rows: it
+    /// yields no groups and publishes nothing demanded.
+    #[test]
+    fn a_pivot_over_rows_that_form_no_group_publishes_nothing_demanded() {
+        pyo3::Python::initialize();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, true),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![None, None] as Vec<Option<&str>>)),
+                Arc::new(StringArray::from(vec!["x", "x"])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let out = apply_demanded(&pivot_spec(Some(vec!["g".into()])), &batch, &TransformContext::default(), &demand(&["a"])).unwrap();
+        assert_eq!(column_names(&out), ["g", "x"]);
     }
 }

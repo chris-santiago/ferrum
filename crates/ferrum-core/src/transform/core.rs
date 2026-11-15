@@ -731,6 +731,41 @@ impl TransformSpec {
         }
     }
 
+    /// Every column this step writes into its output by name, caller-named
+    /// ones included: [`Self::output_columns`] plus the names a step's own
+    /// `as_`/`as_field`/`as` (or `var_name`/`value_name`, or output
+    /// endpoint) parameter, or its default, gives. What a pivot over no rows
+    /// leaves to the step that makes it
+    /// ([`crate::transform::run::pivot_demands`]): a name a step computes
+    /// before anything reads it is that step's to make, so the pivot does
+    /// not publish it too. The match names every variant: a new step kind
+    /// is a compile error here until it says what it writes.
+    pub(crate) fn computed_names(&self) -> Vec<String> {
+        let pair = |names: &(String, String)| vec![names.0.clone(), names.1.clone()];
+        match self {
+            Self::Calculate(s) => vec![s.as_field.clone()],
+            Self::Fold(s) => pair(&s.as_),
+            Self::DataStack(s) => pair(&s.as_),
+            Self::DensityData(s) => pair(&s.as_),
+            Self::LoessData(s) => pair(&s.as_),
+            Self::RegressionData(s) => pair(&s.as_),
+            Self::DataWindow(s) => s.ops.iter().map(|op| op.as_.clone()).collect(),
+            Self::TimeUnit(s) => vec![s.output_name()],
+            Self::DataBin(s) => vec![s.output_name()],
+            Self::Flatten(s) => s.as_.clone().unwrap_or_else(|| s.fields.clone()),
+            Self::Unpivot(s) => vec![s.var_name.clone(), s.value_name.clone()],
+            Self::ReferenceLine(s) => vec![s.x_field.clone(), s.y_field.clone()],
+            Self::Composed(s) => s.step.computed_names(),
+            Self::Branch(_) => Vec::new(),
+            Self::Bin(_) | Self::Bin2D(_) | Self::Kde(_) | Self::Smooth(_) | Self::Aggregate(_) | Self::Summary(_)
+            | Self::Outliers(_) | Self::ErrorExtent(_) | Self::BoxStats(_) | Self::Violin(_) | Self::Kde2D(_)
+            | Self::Contour(_) | Self::Qq(_) | Self::Linkage(_) | Self::Raster(_) | Self::Hex(_) | Self::Swarm(_)
+            | Self::Reorder(_) | Self::LetterValue(_) | Self::Logistic(_) | Self::Glm(_) | Self::Robust(_)
+            | Self::Identity(_) | Self::Filter(_) | Self::Project(_) | Self::Pivot(_) | Self::JoinAggregate(_)
+            | Self::Impute(_) | Self::Sample(_) | Self::TopK(_) | Self::DataAggregate(_) => self.output_columns(),
+        }
+    }
+
     /// The step's label: the prefix every refusal raised inside its own
     /// module already carries (`"data_filter"`, `"stat_box_stats"`). It is
     /// the voice of a step's refusals raised outside its module, so a step
@@ -803,7 +838,9 @@ impl TransformSpec {
     }
 }
 
-pub(crate) use crate::transform::run::{apply_transforms_named, FINAL_OUTPUT_KEY};
+#[cfg(test)]
+pub(crate) use crate::transform::run::apply_transforms_named;
+pub(crate) use crate::transform::run::{apply_transforms_reading, DrawnReads, FINAL_OUTPUT_KEY};
 
 /// The name a step publishes its output under: a named step's `name`, a
 /// `Branch`'s own, a `Composed` copy's step's, `None` for an unnamed step,

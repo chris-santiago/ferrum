@@ -20,7 +20,7 @@ use crate::layout::{
 use crate::spec::chart::ChartSpec;
 use crate::transform::color_bin_group::{BinDemand, ColorBinPlan, LogAxisSpace, RunPlan, SpaceDemand};
 use crate::transform::context::{AllNullOutcome, AllNullPartition, LogEmptied, StepInstance, TransformContext, TransformWarning};
-use crate::transform::core::{apply_transforms_named, SpaceSlot, TransformSpec, FINAL_OUTPUT_KEY};
+use crate::transform::core::{apply_transforms_reading, DrawnReads, SpaceSlot, TransformSpec, FINAL_OUTPUT_KEY};
 use crate::transform::run::{step_spec_at, OutputLineage, OutputLineages};
 
 use super::scale_resolve::{OverlayLegends, ResolvedScales};
@@ -2165,6 +2165,23 @@ fn binned_color_reads(spec: &ChartSpec) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The columns each layer draws, by the published key it reads
+/// ([`FINAL_OUTPUT_KEY`] for a layer with no `data_source`): what a pivot
+/// over no rows publishes so that its layers find their columns. Empty for a
+/// spec whose layers cannot be built, which the render's own refusal
+/// reports.
+fn drawn_reads(spec: &ChartSpec) -> DrawnReads {
+    let mut reads = DrawnReads::new();
+    let Ok(layers) = build_layers(spec) else { return reads };
+    for layer in &layers {
+        let key = layer.data_source.clone().unwrap_or_else(|| FINAL_OUTPUT_KEY.to_string());
+        let encoding = layer.drawn_encoding();
+        let names = encoding.bindings().into_iter().map(|(_, binding)| binding.field.clone()).filter(|field| !field.is_empty());
+        reads.entry(key).or_default().extend(names);
+    }
+    reads
+}
+
 /// The edges the chart's color scale cuts when it is a binned color's,
 /// resolved over a first pipeline run's `outputs` as the render resolves it
 /// (its establishing binding, a composite's shared values or an overlay
@@ -2280,7 +2297,7 @@ fn run_transforms_with_facet(
             run_plan: run_plan.clone(),
             ..TransformContext::default()
         };
-        let (outputs, lineages) = apply_transforms_named(&spec.transforms, normalized, &ctx)
+        let (outputs, lineages) = apply_transforms_reading(&spec.transforms, normalized, &ctx, &drawn_reads(spec))
             .map_err(|e| transform_refusal(e.to_string(), &ctx))?;
         // Drain whatever this run's (possibly per-step-cloned, but
         // `Rc`-shared) sink accumulated — see `TransformContext::warnings`'s
@@ -2413,6 +2430,7 @@ fn run_transforms_with_facet(
         None => fix_transform_extents_for_facet(&spec.transforms, normalized),
     };
 
+    let drawn = drawn_reads(spec);
     let mut merged: HashMap<String, Vec<RecordBatch>> = HashMap::new();
     // Every partition runs the same transforms, so each key's lineage
     // routes the same `Swarm` and passes the same steps in every panel; the
@@ -2427,7 +2445,7 @@ fn run_transforms_with_facet(
         let (col_value, row_value) = key;
         let before_warnings = ctx.warnings.borrow().len();
         let (mut panel_outputs, panel_lineages) =
-            apply_transforms_named(&effective_transforms, partition_batch, &ctx)
+            apply_transforms_reading(&effective_transforms, partition_batch, &ctx, &drawn)
                 .map_err(|e| transform_refusal(e.to_string(), &ctx))?;
         // A per-group fit warning (`DegenerateFit`/`ParameterClamped`/
         // `IntervalUndefined`) this partition's own run just pushed names

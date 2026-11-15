@@ -20,7 +20,7 @@
 //! - the composition steps the rows met ([`crate::transform::composed`]).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
 use arrow::array::RecordBatch;
@@ -301,10 +301,28 @@ pub(crate) type NamedOutputs = (HashMap<String, RecordBatch>, OutputLineages);
 /// Linkage→Reorder→Unpivot, residplot's residuals overlay) can consume the
 /// previous unnamed transform's output; `Branch` is the route to the
 /// original input.
+#[cfg(test)]
 pub(crate) fn apply_transforms_named(
     specs: &[TransformSpec],
     batch: &RecordBatch,
     ctx: &TransformContext,
+) -> PyResult<NamedOutputs> {
+    apply_transforms_reading(specs, batch, ctx, &DrawnReads::new())
+}
+
+/// The columns each layer draws, by the published key the layer reads
+/// ([`FINAL_OUTPUT_KEY`] for a layer with no `data_source`).
+pub(crate) type DrawnReads = BTreeMap<String, BTreeSet<String>>;
+
+/// [`apply_transforms_named`] for a run whose layers' drawn columns are known:
+/// a pivot over no rows publishes the names its readers ask for
+/// ([`pivot_demands`]), the steps after it on its chain and the layers
+/// whose rows descend from it (`drawn`).
+pub(crate) fn apply_transforms_reading(
+    specs: &[TransformSpec],
+    batch: &RecordBatch,
+    ctx: &TransformContext,
+    drawn: &DrawnReads,
 ) -> PyResult<NamedOutputs> {
     let plan = ctx.run_plan.as_deref();
     let mut run = Run {
@@ -312,6 +330,7 @@ pub(crate) fn apply_transforms_named(
         demand: plan.map(|plan| &plan.color.demand),
         edges: plan.and_then(|plan| plan.color.edges.clone()),
         space: plan.map(|plan| &plan.space),
+        pivots: pivot_demands(specs, drawn),
         composed: ComposedRuns::default(),
     };
     let source = Rows::over(batch.clone());
@@ -326,7 +345,7 @@ pub(crate) fn apply_transforms_named(
 /// tail over `batch` (or over the named output its `input` names, read from
 /// `ctx`).
 pub(crate) fn apply_branch(spec: &BranchSpec, batch: &RecordBatch, ctx: &TransformContext) -> PyResult<RecordBatch> {
-    let mut run = Run { ctx, demand: None, edges: None, space: None, composed: ComposedRuns::default() };
+    let mut run = Run { ctx, demand: None, edges: None, space: None, pivots: PivotDemands::default(), composed: ComposedRuns::default() };
     let mut published = Published { outputs: ctx.named_outputs.clone(), ..Published::default() };
     run.branch(spec, &[], &Rows::over(batch.clone()), &mut published).map(|tail| tail.batch)
 }
@@ -484,6 +503,8 @@ struct Run<'s, 'c> {
     demand: Option<&'c BinDemand>,
     edges: Option<Rc<[f64]>>,
     space: Option<&'c SpaceDemand>,
+    /// The names each pivot step publishes when it has no rows ([`pivot_demands`]).
+    pivots: PivotDemands,
     composed: ComposedRuns<'s>,
 }
 
@@ -602,7 +623,12 @@ impl<'s> Run<'s, '_> {
         // what they find (`PassedStep::log_emptied`), for the same reason.
         step_ctx.groupby = spec.groupby().map(<[String]>::to_vec).unwrap_or_default();
         step_ctx.log_emptied = Rc::new(RefCell::new(Vec::new()));
-        let result = spec.apply_with_context(&current.batch, &step_ctx)?;
+        let result = match (spec, self.pivots.steps.get(id)) {
+            (TransformSpec::Pivot(pivot), Some(demanded)) => {
+                crate::transform::pivot::apply_demanded(pivot, &current.batch, &step_ctx, demanded)?
+            }
+            _ => spec.apply_with_context(&current.batch, &step_ctx)?,
+        };
         let step_log_input = step_ctx.log_input.borrow().clone();
         let step_log_emptied = step_ctx.log_emptied.borrow().clone();
         let own = lowered.map(|id| LoweredStep {
@@ -712,7 +738,12 @@ impl<'s> Run<'s, '_> {
         step_ctx.step = StepInstance::Composed(copy.group.clone());
         step_ctx.rows = rows.lineage.origin.clone();
         step_ctx.groupby = copy.step.groupby().map(<[String]>::to_vec).unwrap_or_default();
-        let out = copy.step.apply_with_context(&rows.batch, &step_ctx)?;
+        let out = match (&*copy.step, self.pivots.copies.get(&copy.group)) {
+            (TransformSpec::Pivot(pivot), Some(demanded)) => {
+                crate::transform::pivot::apply_demanded(pivot, &rows.batch, &step_ctx, demanded)?
+            }
+            _ => copy.step.apply_with_context(&rows.batch, &step_ctx)?,
+        };
         self.composed.ran(&copy.group);
         let Rows { batch, mut lineage } = rows;
         let passed_step = || PassedStep {
@@ -810,6 +841,180 @@ impl<'s> Run<'s, '_> {
         }
         Ok(tail)
     }
+}
+
+/// The names each pivot publishes when it has no rows ([`pivot_demands`]):
+/// by step for a pivot the chain holds, and by composition group for a
+/// `+` composition's pivot copy, whose copies in every operand's chain share
+/// one set.
+#[derive(Debug, Default)]
+struct PivotDemands {
+    steps: HashMap<StepId, BTreeSet<String>>,
+    copies: HashMap<String, BTreeSet<String>>,
+}
+
+/// What each pivot step publishes when it has no rows: its readers' names.
+/// A pivot's value columns are named by its rows, so a pivot over none holds
+/// none; the names asked for are
+/// - each field a step after it on its chain reads, unless a step before
+///   that one computes it (a step that reads and writes one name reads it
+///   first, so the pivot still publishes it), and
+/// - each column a layer whose rows descend from the pivot draws
+///   ([`pivot_reach`]), unless a step the layer's rows have passed computes
+///   it,
+///
+/// less the pivot's own `groupby` columns. A name a step computes before
+/// anything reads it is that step's to make.
+fn pivot_demands(root: &[TransformSpec], drawn: &DrawnReads) -> PivotDemands {
+    fn walk(root: &[TransformSpec], chain: &[TransformSpec], path: &[usize], drawn: &DrawnReads, out: &mut PivotDemands) {
+        for (index, step) in chain.iter().enumerate() {
+            let id: StepId = [path, &[index]].concat();
+            let pivot = match step {
+                TransformSpec::Branch(branch) => {
+                    walk(root, &branch.transforms, &id, drawn, out);
+                    continue;
+                }
+                TransformSpec::Pivot(pivot) => pivot,
+                TransformSpec::Composed(copy) => match &*copy.step {
+                    TransformSpec::Pivot(pivot) => pivot,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let later = &chain[index + 1..];
+            // `on_chain[n]`: what the first `n` later steps leave on the chain's rows. A
+            // named step publishes beside the chain and a branch reads it: neither
+            // changes what the steps and the tail after them hold.
+            let mut on_chain: Vec<BTreeSet<String>> = vec![BTreeSet::new()];
+            let mut demanded: BTreeSet<String> = BTreeSet::new();
+            for step in later {
+                let computed = &on_chain[on_chain.len() - 1];
+                demanded.extend(step.fields_read().into_iter().filter(|name| !computed.contains(name)));
+                let mut after = computed.clone();
+                if advances_chain(step) {
+                    after.extend(step.computed_names());
+                }
+                on_chain.push(after);
+            }
+            for (key, reach) in pivot_reach(root, &id) {
+                let mut computed = on_chain[reach.passed.min(later.len())].clone();
+                if let Some(side) = reach.side.and_then(|side| later.get(side)) {
+                    computed.extend(side.computed_names());
+                }
+                let names = drawn.get(&key).into_iter().flatten();
+                demanded.extend(names.filter(|name| !computed.contains(*name)).cloned());
+            }
+            let grouped = pivot.groupby.as_deref().unwrap_or_default();
+            let demanded = demanded.into_iter().filter(|name| !name.is_empty() && !grouped.contains(name));
+            match step {
+                TransformSpec::Composed(copy) => out.copies.entry(copy.group.clone()).or_default().extend(demanded),
+                _ => out.steps.entry(id).or_default().extend(demanded),
+            }
+        }
+    }
+    let mut out = PivotDemands::default();
+    walk(root, root, &[], drawn, &mut out);
+    out
+}
+
+/// Whether a step replaces the chain's rows with its output: an unnamed row
+/// step does. A named step publishes beside the chain and a branch starts
+/// its own, so the rows after either are the rows before it.
+fn advances_chain(step: &TransformSpec) -> bool {
+    !matches!(step, TransformSpec::Branch(_)) && spec_name(step).is_none()
+}
+
+/// How far down the chain after a pivot the rows a published key holds have
+/// come ([`pivot_reach`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Reach {
+    /// How many of the steps after the pivot the rows have passed.
+    passed: usize,
+    /// The later step whose own output the key publishes, when the key is
+    /// a named step's: that output is not on the chain after it.
+    side: Option<usize>,
+}
+
+/// The published keys whose rows descend from the pivot at `id` in `root`,
+/// each with the [`Reach`] of its rows: the keys of the steps from the pivot
+/// on (the pivot's own has passed none), the chain's own tail
+/// ([`FINAL_OUTPUT_KEY`], or its branch's name, scoped by each enclosing
+/// branch as [`Run::branch`] publishes it; all of them passed), and every
+/// branch that reads one of those keys (as the key it reads). A branch with
+/// no `input` reads the source and descends from none of them.
+fn pivot_reach(root: &[TransformSpec], id: &[usize]) -> BTreeMap<String, Reach> {
+    let Some((&from, enclosing)) = id.split_last() else { return BTreeMap::new() };
+    let mut chain = root;
+    let mut scopes: Vec<&BranchSpec> = Vec::new();
+    for &index in enclosing {
+        match chain.get(index) {
+            Some(TransformSpec::Branch(branch)) => {
+                scopes.push(branch);
+                chain = &branch.transforms;
+            }
+            _ => return BTreeMap::new(),
+        }
+    }
+    let steps = chain.get(from..).unwrap_or_default();
+    let tail = steps.len().saturating_sub(1);
+    let tail = Reach { passed: tail, side: None };
+    let mut keys: BTreeMap<String, Reach> = BTreeMap::new();
+    for (offset, step) in steps.iter().enumerate() {
+        if let (false, Some(name)) = (matches!(step, TransformSpec::Branch(_)), spec_name(step)) {
+            // Offset 0 is the pivot itself: its own key holds its output.
+            let reach = match offset.checked_sub(1) {
+                Some(side) => Reach { passed: side, side: Some(side) },
+                None => Reach { passed: 0, side: None },
+            };
+            keys.insert(name.to_string(), reach);
+        }
+    }
+    let mut visible = keys.clone();
+    for branch in scopes.iter().rev() {
+        visible = visible
+            .iter()
+            .map(|(key, reach)| (crate::transform::registry::secondary_key(Some(&branch.name), key), *reach))
+            .collect();
+        visible.insert(branch.name.clone(), tail);
+        keys.extend(visible.clone());
+    }
+    if scopes.is_empty() {
+        keys.insert(FINAL_OUTPUT_KEY.to_string(), tail);
+    }
+    let mut branches = Vec::new();
+    collect_branches(root, &mut branches);
+    loop {
+        let before = keys.len();
+        for branch in &branches {
+            let Some(&reach) = branch.input.as_ref().and_then(|input| keys.get(input)) else { continue };
+            for key in branch_keys(branch) {
+                keys.entry(key).or_insert(reach);
+            }
+        }
+        if keys.len() == before {
+            return keys;
+        }
+    }
+}
+
+fn collect_branches<'a>(chain: &'a [TransformSpec], out: &mut Vec<&'a BranchSpec>) {
+    for step in chain {
+        if let TransformSpec::Branch(branch) = step {
+            out.push(branch);
+            collect_branches(&branch.transforms, out);
+        }
+    }
+}
+
+/// The keys one branch publishes: its own name, and each key inside it
+/// under the branch's name ([`Run::branch`]).
+fn branch_keys(branch: &BranchSpec) -> Vec<String> {
+    let scoped = |key: String| crate::transform::registry::secondary_key(Some(&branch.name), &key);
+    let inner = branch.transforms.iter().flat_map(|step| match step {
+        TransformSpec::Branch(nested) => branch_keys(nested),
+        step => spec_name(step).map(str::to_string).into_iter().collect(),
+    });
+    std::iter::once(branch.name.clone()).chain(inner.map(scoped)).collect()
 }
 
 /// Whether `spec`'s `groupby` is the chart's own statistic planner's
@@ -1672,5 +1877,296 @@ mod tests {
             "seed": 0, "output": "fitted", "inject_zero_ref": false, "inject_metrics": false, "groupby": ["c"],
         });
         assert_eq!(written(serde_json::json!([rank_by("g"), marker(), smooth_by_c])), vec!["c".to_string()]);
+    }
+
+    /// `g` and `h` (text) and `v`, over no rows.
+    fn no_rows() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("g", DataType::Utf8, false),
+            Field::new("h", DataType::Utf8, false),
+            Field::new("v", DataType::Float64, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+                Arc::new(StringArray::from(Vec::<&str>::new())),
+                Arc::new(Float64Array::from(Vec::<f64>::new())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn pivot_h_by_g(name: Option<&str>) -> serde_json::Value {
+        let mut step = serde_json::json!({"type": "pivot", "field": "h", "value": "v", "groupby": ["g"]});
+        if let Some(name) = name {
+            step["name"] = serde_json::json!(name);
+        }
+        step
+    }
+
+    fn calculate(as_field: &str, expr: &str) -> serde_json::Value {
+        serde_json::json!({"type": "calculate", "as_field": as_field, "expr": expr})
+    }
+
+    fn drawn(entries: &[(&str, &[&str])]) -> DrawnReads {
+        entries
+            .iter()
+            .map(|(key, names)| ((*key).to_string(), names.iter().map(|name| (*name).to_string()).collect()))
+            .collect()
+    }
+
+    fn demanded_of_first_step(specs: &[TransformSpec], drawn: &DrawnReads) -> BTreeSet<String> {
+        pivot_demands(specs, drawn).steps.remove(&vec![0]).expect("a demand for the pivot at step 0")
+    }
+
+    fn names(batch: &RecordBatch) -> Vec<String> {
+        batch.schema().fields().iter().map(|field| field.name().clone()).collect()
+    }
+
+    fn run_reading(specs: &[TransformSpec], batch: &RecordBatch, drawn: &DrawnReads) -> HashMap<String, RecordBatch> {
+        pyo3::Python::initialize();
+        apply_transforms_reading(specs, batch, &TransformContext::default(), drawn).map(|(outputs, ..)| outputs).expect("the run succeeds")
+    }
+
+    /// A pivot's demand is the drawn names of the layers reading the chain's
+    /// tail, once each, sorted, less its groupby columns.
+    #[test]
+    fn a_pivot_is_demanded_the_names_the_tail_layers_draw() {
+        let specs = chain(serde_json::json!([pivot_h_by_g(None)]));
+        let demanded = demanded_of_first_step(&specs, &drawn(&[(FINAL_OUTPUT_KEY, &["b", "a", "g"]), ("other", &["z"])]));
+        assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["a", "b"], "`g` is the pivot's own groupby column");
+    }
+
+    /// The fields a later step reads are demanded; a name a later step
+    /// computes is not, whoever reads it; a groupby column is never.
+    #[test]
+    fn a_pivot_is_demanded_a_later_steps_reads_but_not_what_a_later_step_computes() {
+        let specs = chain(serde_json::json!([pivot_h_by_g(None), calculate("c", "datum.a + 1"), count_by_g(None)]));
+        let demanded = demanded_of_first_step(&specs, &drawn(&[(FINAL_OUTPUT_KEY, &["count", "g", "w"])]));
+        assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["a", "w"], "reads `a`; `count` is the aggregate's own; `g` is grouped");
+    }
+
+    /// Only a layer whose rows descend from the pivot names its columns: a
+    /// named step after the pivot and a branch reading it do, a branch over
+    /// the source and a key from before the pivot do not.
+    #[test]
+    fn a_pivot_is_demanded_only_what_the_layers_descending_from_it_draw() {
+        let specs = chain(serde_json::json!([
+            {"type": "filter", "predicate": "datum.v > 0", "name": "before"},
+            pivot_h_by_g(Some("wide")),
+            {"type": "filter", "predicate": "datum.g != 'x'", "name": "after"},
+            branch("fed", Some("after"), serde_json::json!([calculate("k", "datum.a")])),
+            branch("fresh", None, serde_json::json!([calculate("k", "datum.v")])),
+        ]));
+        let demands = pivot_demands(
+            &specs,
+            &drawn(&[("before", &["p"]), ("wide", &["q"]), ("after", &["r"]), ("fed", &["s"]), ("fresh", &["t"]), (FINAL_OUTPUT_KEY, &["u"])]),
+        );
+        let demanded = demands.steps.get(&vec![1]).expect("the pivot is step 1");
+        assert_eq!(demanded.iter().map(String::as_str).collect::<Vec<_>>(), ["q", "r", "s", "u"]);
+    }
+
+    /// A pivot inside a branch reaches the branch's name and the key each
+    /// of its inner steps is published under in the parent.
+    #[test]
+    fn a_pivot_inside_a_branch_reaches_the_branchs_scoped_keys() {
+        let specs = chain(serde_json::json!([branch(
+            "b",
+            None,
+            serde_json::json!([pivot_h_by_g(None), {"type": "filter", "predicate": "datum.g != 'x'", "name": "kept"}]),
+        )]));
+        let demands = pivot_demands(&specs, &drawn(&[("b", &["x"]), ("b_kept", &["y"]), (FINAL_OUTPUT_KEY, &["z"])]));
+        let demanded = demands.steps.get(&vec![0, 0]).expect("the pivot is step 0 of branch 0");
+        assert_eq!(demanded.iter().map(String::as_str).collect::<Vec<_>>(), ["x", "y"]);
+    }
+
+    /// A zero-row pivot run with its layers' drawn columns publishes them,
+    /// and a calculate over a pivoted column runs over the empty column.
+    #[test]
+    fn a_zero_row_pivot_publishes_the_columns_its_readers_ask_for() {
+        let specs = chain(serde_json::json!([pivot_h_by_g(None), calculate("c", "datum.a + 1")]));
+        let outputs = run_reading(&specs, &no_rows(), &drawn(&[(FINAL_OUTPUT_KEY, &["a", "b", "c", "g"])]));
+        let tail = &outputs[FINAL_OUTPUT_KEY];
+        assert_eq!(names(tail), ["g", "a", "b", "c"], "`c` is the calculate's, published once");
+        assert_eq!(tail.num_rows(), 0);
+        assert_eq!(tail.column_by_name("a").unwrap().data_type(), &DataType::Float64);
+    }
+
+    /// The run with no layer reads is the run as written: a zero-row pivot
+    /// holds its groupby columns only.
+    #[test]
+    fn a_zero_row_pivot_with_no_readers_publishes_only_its_groupby_columns() {
+        let specs = chain(serde_json::json!([pivot_h_by_g(None)]));
+        let outputs = run_reading(&specs, &no_rows(), &DrawnReads::new());
+        assert_eq!(names(&outputs[FINAL_OUTPUT_KEY]), ["g"]);
+    }
+
+    /// A pivot over rows is unchanged by the layers' reads: a name its
+    /// values lack stays absent.
+    #[test]
+    fn a_pivot_over_rows_ignores_the_layers_reads() {
+        let batch = {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("g", DataType::Utf8, false),
+                Field::new("h", DataType::Utf8, false),
+                Field::new("v", DataType::Float64, false),
+            ]));
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["a", "b"])),
+                    Arc::new(StringArray::from(vec!["x", "y"])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0])),
+                ],
+            )
+            .unwrap()
+        };
+        let specs = chain(serde_json::json!([pivot_h_by_g(None)]));
+        let plain = run_reading(&specs, &batch, &DrawnReads::new());
+        let reading = run_reading(&specs, &batch, &drawn(&[(FINAL_OUTPUT_KEY, &["zz", "x"])]));
+        assert_eq!(reading[FINAL_OUTPUT_KEY], plain[FINAL_OUTPUT_KEY]);
+        assert_eq!(names(&reading[FINAL_OUTPUT_KEY]), ["g", "x", "y"]);
+    }
+
+    /// Every step kind that names its own output columns keeps its names out
+    /// of a zero-row pivot's demand, whoever draws them; what it reads stays
+    /// demanded.
+    #[test]
+    fn a_pivot_is_not_demanded_what_any_later_caller_named_step_computes() {
+        let steps = [
+            (calculate("made", "datum.a + 1"), vec!["made"]),
+            (serde_json::json!({"type": "fold", "fields": ["a", "b"], "as_": ["made", "other"]}), vec!["made", "other"]),
+            (serde_json::json!({"type": "data_window", "ops": [{"op": "rank", "as": "made"}]}), vec!["made"]),
+            (
+                serde_json::json!({"type": "data_stack", "field": "a", "groupby": [], "as_": ["made", "other"], "offset": "zero"}),
+                vec!["made", "other"],
+            ),
+            (serde_json::json!({"type": "density_data", "field": "a", "as_": ["made", "other"]}), vec!["made", "other"]),
+            (serde_json::json!({"type": "loess_data", "x": "a", "y": "b", "bandwidth": 0.5, "as_": ["made", "other"]}), vec!["made", "other"]),
+            (
+                serde_json::json!({"type": "regression_data", "x": "a", "y": "b", "method": "linear", "order": 1, "as_": ["made", "other"]}),
+                vec!["made", "other"],
+            ),
+            (serde_json::json!({"type": "time_unit", "field": "a", "unit": "year", "as_": "made"}), vec!["made"]),
+            (serde_json::json!({"type": "time_unit", "field": "a", "unit": "year"}), vec!["year_a"]),
+            (serde_json::json!({"type": "data_bin", "field": "a", "as_": "made"}), vec!["made"]),
+            (serde_json::json!({"type": "data_bin", "field": "a"}), vec!["a_bin"]),
+            (serde_json::json!({"type": "flatten", "fields": ["a"], "as_": ["made"]}), vec!["made"]),
+            (serde_json::json!({"type": "unpivot", "id_vars": ["g"], "var_name": "made", "value_name": "other"}), vec!["made", "other"]),
+            (serde_json::json!({"type": "unpivot", "id_vars": ["g"]}), vec!["variable", "value"]),
+            (serde_json::json!({"type": "reference_line", "x_field": "made", "y_field": "other", "x": [0.0, 1.0], "y": [0.0, 1.0]}), vec!["made", "other"]),
+        ];
+        for (step, produced) in steps {
+            let specs = chain(serde_json::json!([pivot_h_by_g(None), step.clone()]));
+            let mut draws: Vec<&str> = produced.clone();
+            draws.push("kept");
+            let demanded = demanded_of_first_step(&specs, &drawn(&[(FINAL_OUTPUT_KEY, &draws)]));
+            for name in &produced {
+                assert!(!demanded.contains(*name), "{step}: a pivot must not publish `{name}`: {demanded:?}");
+            }
+            assert!(demanded.contains("kept"), "{step}: the drawn name nothing computes is still demanded: {demanded:?}");
+        }
+    }
+
+    /// A composition copy of a step computes what the step does; a branch
+    /// computes nothing beside its input rows.
+    #[test]
+    fn a_composed_copy_computes_its_steps_names_and_a_branch_none() {
+        let specs = chain(serde_json::json!([
+            {"type": "composed", "group": "c", "step": calculate("made", "datum.a")},
+            branch("b", None, serde_json::json!([calculate("inner", "datum.v")])),
+        ]));
+        assert_eq!(specs[0].computed_names(), ["made"]);
+        assert!(specs[1].computed_names().is_empty());
+    }
+
+    /// A pivot copy a `+` composition writes publishes what its readers ask
+    /// for as a pivot step does, and a copy over rows is as written.
+    #[test]
+    fn a_zero_row_composed_pivot_copy_publishes_the_columns_its_readers_ask_for() {
+        let specs = chain(serde_json::json!([{"type": "composed", "group": "p", "step": pivot_h_by_g(None)}]));
+        let outputs = run_reading(&specs, &no_rows(), &drawn(&[(FINAL_OUTPUT_KEY, &["b", "a", "g"])]));
+        assert_eq!(names(&outputs[FINAL_OUTPUT_KEY]), ["g", "a", "b"]);
+        let plain = run_reading(&specs, &no_rows(), &DrawnReads::new());
+        assert_eq!(names(&plain[FINAL_OUTPUT_KEY]), ["g"]);
+    }
+
+    /// A step that reads a pivoted column and writes it back under the same
+    /// name reads it first: the pivot still publishes the name, for each step
+    /// kind whose read is not an expression (an op field, a sort column, a
+    /// column to bin).
+    #[test]
+    fn a_pivot_is_demanded_a_name_a_later_step_reads_and_rewrites() {
+        let steps = [
+            calculate("a", "datum.a * 100"),
+            serde_json::json!({"type": "join_aggregate", "aggregates": [{"fn": "mean", "field": "a", "as": "a"}]}),
+            serde_json::json!({"type": "data_bin", "field": "a", "as_": "a"}),
+            serde_json::json!({"type": "data_window", "ops": [{"op": "rank", "as": "a"}], "sort": ["a"]}),
+            serde_json::json!({"type": "flatten", "fields": ["a"]}),
+        ];
+        for step in steps {
+            let specs = chain(serde_json::json!([pivot_h_by_g(None), step.clone()]));
+            let demanded = demanded_of_first_step(&specs, &drawn(&[(FINAL_OUTPUT_KEY, &["a", "b"])]));
+            assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["a", "b"], "{step}: reads `a` before it writes it");
+        }
+    }
+
+    /// A name computed before a step reads it is not demanded; the one read
+    /// before the step that computes it is.
+    #[test]
+    fn a_pivot_is_demanded_a_name_only_when_nothing_computes_it_before_the_read() {
+        let compute_then_read = chain(serde_json::json!([pivot_h_by_g(None), calculate("c", "datum.a + 1"), calculate("d", "datum.c * 2")]));
+        let demanded = demanded_of_first_step(&compute_then_read, &drawn(&[]));
+        assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["a"], "`c` is computed before `d` reads it");
+
+        let read_then_compute = chain(serde_json::json!([pivot_h_by_g(None), calculate("c", "datum.a + 1"), calculate("a", "datum.c * 2")]));
+        let demanded = demanded_of_first_step(&read_then_compute, &drawn(&[]));
+        assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["a"], "`a` is read by the first step before the second writes it");
+
+        let swapped = chain(serde_json::json!([pivot_h_by_g(None), calculate("a", "datum.b"), calculate("c", "datum.a")]));
+        let demanded = demanded_of_first_step(&swapped, &drawn(&[]));
+        assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["b"], "`a` is written before the second step reads it");
+    }
+
+    /// A drawn name is excluded only when a step the drawing layer's rows
+    /// passed computes it: a key published before the computing step still
+    /// draws it from the pivot.
+    #[test]
+    fn a_drawn_name_is_excluded_by_the_steps_its_layers_rows_passed() {
+        let specs = chain(serde_json::json!([pivot_h_by_g(Some("wide")), calculate("c", "datum.a + 1")]));
+        let demanded = demanded_of_first_step(&specs, &drawn(&[("wide", &["c"]), (FINAL_OUTPUT_KEY, &["c"])]));
+        assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["a", "c"], "`c` from `wide` (before the calculate) is the pivot's");
+
+        let tail_only = demanded_of_first_step(&specs, &drawn(&[(FINAL_OUTPUT_KEY, &["c"])]));
+        assert_eq!(tail_only.into_iter().collect::<Vec<_>>(), ["a"], "the tail passed the calculate");
+    }
+
+    /// A zero-row pivot then an in-place rewrite of a pivoted column runs
+    /// the rewrite over the empty column and publishes the name once.
+    #[test]
+    fn a_zero_row_pivot_then_an_in_place_rewrite_publishes_the_name_once() {
+        let specs = chain(serde_json::json!([pivot_h_by_g(None), calculate("a", "datum.a * 2")]));
+        let outputs = run_reading(&specs, &no_rows(), &drawn(&[(FINAL_OUTPUT_KEY, &["a", "b", "g"])]));
+        assert_eq!(names(&outputs[FINAL_OUTPUT_KEY]), ["g", "a", "b"]);
+    }
+
+    /// A named step publishes beside the chain: the name it computes is not
+    /// on the rows after it, so the steps and the tail after it still read
+    /// that name from the pivot; the key it publishes does hold it.
+    #[test]
+    fn a_named_step_hides_the_name_it_computes_from_its_own_key_only() {
+        let named = serde_json::json!({"type": "calculate", "as_field": "a", "expr": "1", "name": "side"});
+        let specs = chain(serde_json::json!([pivot_h_by_g(None), named, calculate("z", "datum.a + 1")]));
+        let demanded = demanded_of_first_step(&specs, &drawn(&[(FINAL_OUTPUT_KEY, &["a", "z"])]));
+        assert_eq!(demanded.into_iter().collect::<Vec<_>>(), ["a"], "the chain after the named step holds `a` only from the pivot");
+
+        let side_only = demanded_of_first_step(&specs, &drawn(&[("side", &["a"])]));
+        assert_eq!(side_only.into_iter().collect::<Vec<_>>(), ["a"], "`a` is read by the later calculate; the side key itself needs none");
+        let specs = chain(serde_json::json!([pivot_h_by_g(None), serde_json::json!({"type": "calculate", "as_field": "a", "expr": "1", "name": "side"})]));
+        let side_key = demanded_of_first_step(&specs, &drawn(&[("side", &["a"])]));
+        assert!(side_key.is_empty(), "the side key holds the step's own output: {side_key:?}");
+        let tail = demanded_of_first_step(&specs, &drawn(&[(FINAL_OUTPUT_KEY, &["a"])]));
+        assert_eq!(tail.into_iter().collect::<Vec<_>>(), ["a"], "the tail never holds the named step's output");
     }
 }

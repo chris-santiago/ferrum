@@ -816,7 +816,7 @@ _ZERO_ROW_OUTCOME: dict[str, tuple[str, list[str] | str]] = {
     "join_aggregate": ("warns", [_NO_ROWS_TO_DRAW]),
     "window": ("warns", [_NO_ROWS_TO_DRAW]),
     "stack": ("warns", [_NO_ROWS_TO_DRAW]),
-    "pivot": ("raises", "unknown column 'a' referenced by an encoding"),
+    "pivot": ("warns", [_NO_ROWS_TO_DRAW]),
     "top_k": ("warns", [_NO_ROWS_TO_DRAW]),
     "density": ("warns", [_NO_ROWS_TO_DRAW]),
     "regression": ("warns", [_NO_ROWS_TO_DRAW]),
