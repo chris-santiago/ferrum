@@ -1,7 +1,8 @@
 """Tests for ``ferrum._render_prepare``'s per-channel field introspection
-helpers (``_classify_field``) -- shared by
-``Chart._resolve_chart_config``/``_render_inputs`` and by this module's own
-``_extract_ordinal_domain`` single-chart lookup.
+helpers (``_classify_field``), shared by ``Chart._resolve_chart_config``/``_render_inputs``.
+
+Annotation category coordinates are not resolved here: the renderer places them through the
+axis's own scale (see ``test_annotation_categories.py``).
 """
 
 from __future__ import annotations

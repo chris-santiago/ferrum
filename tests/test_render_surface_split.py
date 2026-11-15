@@ -2,8 +2,9 @@
 
 This test file guards three pure moves that were already implemented and gate-passed:
 
-- REND-05: annotation-coordinate resolver + label-map engine moved from
-  ``ferrum._render`` to ``ferrum._render_prepare``.
+- REND-05: the label-map engine moved from ``ferrum._render`` to
+  ``ferrum._render_prepare``. (Annotation categories are placed by the renderer's own scale, so
+  ``_render_prepare`` holds no annotation-coordinate resolver.)
 - REND-06: dead exception classes ``InteractiveRenderError`` and
   ``WasmNotAvailableError`` deleted from ``ferrum._interactive``.
 - REND-08: PNG→PDF byte codec moved from ``ferrum.display`` to ``ferrum._pdf``.
@@ -47,21 +48,21 @@ def _x1_values(line_tags: list[str]) -> list[float]:
 
 
 # ---------------------------------------------------------------------------
-# REND-05 — categorical annotation coordinate resolver (_render_prepare)
+# REND-05 — categorical annotation coordinate (placed by the renderer's axis scale)
 # ---------------------------------------------------------------------------
 
 
 def test_categorical_annotation_resolves_to_band_coordinate_after_render_prepare_split():
-    """Regression: REND-05 — _resolve_category_coords_in_annotations wired from _render_prepare.
+    """Regression: REND-05 — a category annotation reaches the renderer and lands on its band.
 
     Builds a bar chart with a 3-category nominal x-axis and attaches an
     annotate_vline anchored at the middle category ("B").  After to_svg(), the
     annotation <line> element must be present and its x1 coordinate must be in
     the interior of the plot (not zero, not the right edge, finite).
 
-    If the module move broke the import wiring (_render.py forgot to import from
-    _render_prepare), the render would either raise an ImportError or the
-    annotation coordinate would default to zero/null.
+    The renderer resolves the category through the axis's own scale; if the category
+    stopped reaching it, the annotation coordinate would default to zero/null or the
+    plot centre.
     """
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [1.0, 2.0, 3.0]})
     base = fm.Chart(df).mark_bar().encode(x="cat:N", y="val:Q")
@@ -97,11 +98,10 @@ def test_categorical_annotation_resolves_to_band_coordinate_after_render_prepare
 
 
 def test_categorical_annotation_band_positions_differ_for_first_and_last():
-    """Regression: REND-05 — _build_ordinal_norm_map maps distinct categories to distinct coords.
+    """Regression: REND-05 — distinct categories land on distinct band coordinates.
 
     'A' (first band) and 'C' (last band) must produce different x1 values, and
-    A must be to the left of C.  This guards that _extract_ordinal_domain and
-    _build_ordinal_norm_map both flow correctly through the new module boundary.
+    A must be to the left of C.
     """
     df = pl.DataFrame({"cat": ["A", "B", "C"], "val": [1.0, 2.0, 3.0]})
 
@@ -120,7 +120,7 @@ def test_categorical_annotation_band_positions_differ_for_first_and_last():
     x_c = _get_x1("C")
 
     assert x_a != x_c, (
-        f"'A' and 'C' annotations share x1={x_a}; ordinal norm map must produce distinct positions."
+        f"'A' and 'C' annotations share x1={x_a}; each category must land on its own band."
     )
     assert x_a < x_c, f"'A' (x1={x_a}) must be left of 'C' (x1={x_c}) in ordinal order."
 
@@ -131,7 +131,7 @@ def test_categorical_annotation_band_positions_differ_for_first_and_last():
 
 
 def test_axis_label_map_remapped_text_appears_in_svg_after_render_prepare_split():
-    """Regression: REND-05 — _collect_label_maps/_apply_label_maps wired from _render_prepare.
+    """Regression: REND-05 — _collect_label_maps/_rename_through_label_maps wired from _render_prepare.
 
     A chart with Axis(label_map=...) must produce remapped tick labels in the
     rendered SVG.  If _render.py lost its import from _render_prepare, the
@@ -151,7 +151,7 @@ def test_axis_label_map_remapped_text_appears_in_svg_after_render_prepare_split(
     svg = chart.to_svg()
 
     assert "Alpha" in svg, (
-        "'Alpha' not found in SVG — _collect_label_maps/_apply_label_maps "
+        "'Alpha' not found in SVG — _collect_label_maps/_rename_through_label_maps "
         "must be imported from _render_prepare and called during render."
     )
     assert "Beta" in svg, "'Beta' not found in SVG after label_map remapping."
@@ -227,8 +227,8 @@ def test_new_modules_import_cleanly_after_render_surface_split():
     import ferrum._pdf  # noqa: F401
 
     # Verify the key public symbols are present in each module.
-    assert hasattr(ferrum._render_prepare, "_resolve_category_coords_in_annotations"), (
-        "_resolve_category_coords_in_annotations missing from ferrum._render_prepare"
+    assert not hasattr(ferrum._render_prepare, "_resolve_category_coords_in_annotations"), (
+        "annotation categories are resolved by the renderer's scale, not by ferrum._render_prepare"
     )
     assert hasattr(ferrum._render_prepare, "_collect_label_maps"), (
         "_collect_label_maps missing from ferrum._render_prepare"

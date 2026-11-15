@@ -955,7 +955,6 @@ KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
         "_channel_class_for",  # internal channel-name -> class lookup, not a column read
         "_eager_post_build_channel",  # _eager_post_build_channel(out, "x"/"y", called_field=, drawn_column=...) -- the CHANNEL SLOT positional (same shape as _refuse_statistic_input), drawn_column/called_field the figure's own hardcoded literals
         "_extent_alignment",  # _extent_alignment(f, l, "x"|"y") -- an AXIS token, never a column
-        "_extract_ordinal_domain",  # internal helper, positional field name
         "_histogram_categorical_reads",  # _histogram_categorical_reads("x"/"y") -- the OPPOSITE axis's channel name for the remedy text, never a transform's output column read
         "_refuse_statistic_input",  # _refuse_statistic_input(entry, "x"/"y", ch, reason=...) -- the channel SLOT, never a transform's output column read
         "_set_composite_mark",  # internal composite-mark metadata setter

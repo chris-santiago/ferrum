@@ -644,8 +644,10 @@ def annotate_arrow(
         Which end of the arrow to place the label.  ``"start"`` anchors
         the text at ``(x1, y1)``; ``"end"`` places it at ``(x2, y2)``.
     stroke : str, optional
-        Hex colour string for the arrow line (e.g. ``"#ff0000"``).
-        Inherits the theme's foreground colour when omitted.
+        Hex colour string for the arrow line (e.g. ``"#ff0000"``). When omitted,
+        an unlabelled arrow with numeric or date ends takes the theme's
+        foreground colour; a labelled arrow, or one with a category,
+        ``fm.NormCoord`` or ``fm.PixelCoord`` end, draws ``"#333"``.
 
     Returns
     -------
@@ -666,6 +668,7 @@ def annotate_arrow(
     >>> fm.annotate_arrow(0.1, 0.5, 0.8, 0.9, label="threshold", label_side="end")
     Chart(mark='segment', encoding=['x', 'y', 'x2', 'y2'])
     """
+    from ferrum.annotation.coords import NormCoord, OrdinalCategoryCoord, PixelCoord
     from ferrum.annotation.primitives import AnnotationArrow
 
     x1_coord, y1_coord = _coerce_coord(x1), _coerce_coord(y1)
@@ -688,15 +691,17 @@ def annotate_arrow(
             y2="_y2",
         )
     )
-    if label is None:
-        # No annotation primitive attached: unlabelled `+` overlay merges the
-        # `mark_segment` layer directly, same as before this primitive
-        # machinery existed. `AnnotationArrow` hardcodes a stroke default
-        # ("#333") the way `AnnotationLine` does for hline/vline, whereas the
-        # mark falls back to the chart's *themed* stroke color when `stroke`
-        # is omitted — routing the unlabelled case through the primitive
-        # would silently override that themed default, so it stays on the
-        # mark-merge path.
+    if label is None and not any(
+        isinstance(c, (PixelCoord, NormCoord, OrdinalCategoryCoord))
+        for c in (x1_coord, y1_coord, x2_coord, y2_coord)
+    ):
+        # All-numeric (data or temporal) ends: no annotation primitive attached, so an
+        # unlabelled `+` overlay merges the `mark_segment` layer directly. `AnnotationArrow`
+        # hardcodes a stroke default ("#333") the way `AnnotationLine` does for hline/vline,
+        # whereas the mark falls back to the chart's *themed* stroke color when `stroke` is
+        # omitted, so this case stays on the mark-merge path. A category, pixel or norm end
+        # has no data value for the mark layer (it would be a zero placeholder), so those
+        # take the primitive route below, which carries the real coordinates.
         return arrow_chart
     lx: CoordValue = x1_coord if label_side == "start" else x2_coord
     ly: CoordValue = y1_coord if label_side == "start" else y2_coord

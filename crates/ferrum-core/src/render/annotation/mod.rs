@@ -30,8 +30,83 @@ pub enum CoordValue {
     Pixel { px: f64 },
     /// `{"norm": 0.5}` — normalized fraction [0,1] of the plot-area extent.
     Norm { norm: f64 },
+    /// `{"category": "b"}`: a category label, placed by the named axis's own
+    /// categorical scale (the band centre marks use). A span whose two ends are
+    /// both categories covers whole bands instead.
+    Category { category: String },
     /// Plain number — data-space value mapped through the panel's scale.
     Data(f64),
+}
+
+impl CoordValue {
+    fn category(&self) -> Option<&str> {
+        match self {
+            CoordValue::Category { category } => Some(category),
+            _ => None,
+        }
+    }
+}
+
+/// An annotation coordinate the renderer refuses rather than misplaces.
+/// `Display` is the message the caller sees; `axis` is always the caller's
+/// axis letter.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AnnotationRefusal {
+    /// A category on an axis whose scale holds no categories.
+    CategoryOnContinuousAxis { label: String, axis: AlignAxis },
+    /// A category under a projected coord (`CoordPolar`, `CoordGeo`).
+    CategoryUnderCoord { label: String, axis: AlignAxis, coord: &'static str },
+    /// A span with one category end and one non-category end, on a categorical
+    /// axis. `category_end` is the end that holds `label`.
+    MixedSpanEnds { axis: AlignAxis, category_end: SpanEnd, label: String },
+}
+
+/// One end of a span, named as the caller's `start`/`end` argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanEnd {
+    Start,
+    End,
+}
+
+impl SpanEnd {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::End => "end",
+        }
+    }
+
+    fn other(self) -> Self {
+        match self {
+            Self::Start => Self::End,
+            Self::End => Self::Start,
+        }
+    }
+}
+
+impl std::fmt::Display for AnnotationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CategoryOnContinuousAxis { label, axis } => write!(
+                f,
+                "annotation category '{label}' on the {axis} axis: the {axis} scale is continuous, \
+                 so it holds no categories; pass a number, a date, an ISO-8601 string, \
+                 fm.NormCoord or fm.PixelCoord"
+            ),
+            Self::CategoryUnderCoord { label, axis, coord } => write!(
+                f,
+                "annotation category '{label}' on the {axis} axis: a category cannot be placed \
+                 under {coord}; pass fm.NormCoord or fm.PixelCoord"
+            ),
+            Self::MixedSpanEnds { axis, category_end, label } => write!(
+                f,
+                "annotation span on the {axis} axis: {} '{label}' is a category and {} is not; \
+                 pass categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends",
+                category_end.name(),
+                category_end.other().name()
+            ),
+        }
+    }
 }
 
 // ── Annotation spec ─────────────────────────────────────────────────────────
@@ -335,6 +410,9 @@ impl<'a> ScaleContext<'a> {
             }
             CoordValue::Pixel { px } => self.plot_area.x + px,
             CoordValue::Norm { norm } => self.plot_area.x + norm * self.plot_area.w,
+            CoordValue::Category { category } => self
+                .category_centre(self.x_scale, category)
+                .unwrap_or(self.plot_area.x + self.plot_area.w / 2.0),
         }
     }
 
@@ -351,7 +429,39 @@ impl<'a> ScaleContext<'a> {
             }
             CoordValue::Pixel { px } => self.plot_area.y + px,
             CoordValue::Norm { norm } => self.plot_area.y + norm * self.plot_area.h,
+            CoordValue::Category { category } => self
+                .category_centre(self.y_scale, category)
+                .unwrap_or(self.plot_area.y + self.plot_area.h / 2.0),
         }
+    }
+
+    /// The `(start, end)` pixels of a span along `axis`.
+    ///
+    /// Two category ends the axis holds cover whole bands: from the outer edge
+    /// of the lower-placed band to the outer edge of the higher-placed one,
+    /// whichever order they were written in, so `start == end` shades that
+    /// band. Every other pair resolves end by end, which places a category
+    /// the axis lacks at the plot centre.
+    fn resolve_span(&self, axis: AlignAxis, start: &CoordValue, end: &CoordValue) -> (f64, f64) {
+        let scale = if axis.is_y() { self.y_scale } else { self.x_scale };
+        let whole_bands = start.category().zip(end.category()).and_then(|(a, b)| {
+            let (a, b) = (self.category_centre(scale, a)?, self.category_centre(scale, b)?);
+            let half = scale.bandwidth()? / 2.0;
+            Some((a.min(b) - half, a.max(b) + half))
+        });
+        whole_bands.unwrap_or_else(|| {
+            if axis.is_y() {
+                (self.resolve_y(start), self.resolve_y(end))
+            } else {
+                (self.resolve_x(start), self.resolve_x(end))
+            }
+        })
+    }
+
+    /// Where `scale` places the category `label`, or `None` when the scale is
+    /// not categorical or does not hold the label.
+    fn category_centre(&self, scale: &ScaleKind, label: &str) -> Option<f64> {
+        scale.to_pixel_str(label).filter(|px| px.is_finite())
     }
 
     /// Fold `base` (a pixel already resolved against the UNBROKEN `x_scale`/
@@ -558,6 +668,7 @@ fn parse_baseline(s: &str) -> TextBaseline {
 /// `below_marks` slot (GH #89B; painted immediately after `grid`, before data
 /// marks).  `above_marks` contains nodes that route into the post-marks
 /// `annotations` slot (painted after marks, and after any `chrome_above`).
+#[derive(Debug)]
 pub struct AnnotationNodes {
     pub below_marks: Vec<SceneNode>,
     pub above_marks: Vec<SceneNode>,
@@ -889,8 +1000,7 @@ fn emit_span(
     out: &mut Vec<SceneNode>,
 ) {
     let (x, y, w, h) = if axis == "x" {
-        let x_start = ctx.resolve_x(start);
-        let x_end = ctx.resolve_x(end);
+        let (x_start, x_end) = ctx.resolve_span(AlignAxis::X, start, end);
         // Guard NaN: either coordinate being NaN produces NaN width — skip emission.
         if !x_start.is_finite() || !x_end.is_finite() {
             return;
@@ -899,8 +1009,7 @@ fn emit_span(
         let w = (x_end - x_start).abs();
         (x, ctx.plot_area.y, w, ctx.plot_area.h)
     } else {
-        let y_start = ctx.resolve_y(start);
-        let y_end = ctx.resolve_y(end);
+        let (y_start, y_end) = ctx.resolve_span(AlignAxis::Y, start, end);
         // Guard NaN: either coordinate being NaN produces NaN height — skip emission.
         if !y_start.is_finite() || !y_end.is_finite() {
             return;
@@ -1200,13 +1309,19 @@ fn emit_callout(
 /// so every entry is still consulted. Empty for every chart without an effective
 /// `BreakAxis`, which short-circuits to the plain build: un-broken and
 /// ordinal-axis-broken charts stay byte-identical and push no warnings.
+///
+/// A category coordinate is checked first ([`check_categories`]): it refuses
+/// where the panel cannot place it and warns once per label the axis lacks.
+/// `projected_coord` names a `CoordPolar`/`CoordGeo` panel ([`projected_coord_name`]).
 pub fn build_annotations_through_breaks(
     specs: &[AnnotationSpec],
     ctx: &ScaleContext<'_>,
+    projected_coord: Option<&'static str>,
     warnings: &mut Vec<RenderWarning>,
-) -> AnnotationNodes {
+) -> Result<AnnotationNodes, AnnotationRefusal> {
+    check_categories(specs, ctx, projected_coord, warnings)?;
     if ctx.breaks.is_empty() {
-        return build_annotations(specs, ctx);
+        return Ok(build_annotations(specs, ctx));
     }
     // Per-axis rollup accumulators (#240-3): small `Vec`s, not `HashMap`s, so
     // the emitted warnings stay in first-seen-axis order — deterministic for a
@@ -1237,7 +1352,109 @@ pub fn build_annotations_through_breaks(
     for (axis, kinds) in spanning {
         warnings.push(RenderWarning::AnnotationSpansBreakGap { axis, kinds });
     }
-    nodes
+    Ok(nodes)
+}
+
+/// The public spelling of a coord a category annotation cannot be placed
+/// under, or `None` for a coord whose axes can hold one.
+pub fn projected_coord_name(coord: Option<&crate::spec::coord::CoordKind>) -> Option<&'static str> {
+    use crate::spec::coord::CoordKind;
+    match coord {
+        Some(CoordKind::Polar { .. }) => Some("CoordPolar"),
+        Some(CoordKind::Geo { .. }) => Some("CoordGeo"),
+        Some(CoordKind::Cartesian { .. } | CoordKind::Flip | CoordKind::Fixed { .. }) | None => None,
+    }
+}
+
+/// Every coordinate `spec` carries, with the axis it is measured on.
+///
+/// Exhaustive over `AnnotationSpec`'s 8 shapes, so a new variant is a compile
+/// error here rather than a coordinate that skips the category check.
+fn coords_with_axes(spec: &AnnotationSpec) -> Vec<(AlignAxis, &CoordValue)> {
+    use AlignAxis::{X, Y};
+    match spec {
+        AnnotationSpec::Text { x, y, .. } | AnnotationSpec::Image { x, y, .. } => {
+            vec![(X, x), (Y, y)]
+        }
+        AnnotationSpec::Arrow { x, y, x2, y2, .. } => vec![(X, x), (Y, y), (X, x2), (Y, y2)],
+        AnnotationSpec::Rect { x1, y1, x2, y2, .. }
+        | AnnotationSpec::Line { x1, y1, x2, y2, .. }
+        | AnnotationSpec::Bracket { x1, y1, x2, y2, .. } => {
+            vec![(X, x1), (Y, y1), (X, x2), (Y, y2)]
+        }
+        AnnotationSpec::Span { axis, start, end, .. } => {
+            let axis = if axis == "x" { X } else { Y };
+            vec![(axis, start), (axis, end)]
+        }
+        AnnotationSpec::Callout { x, y, text_x, text_y, .. } => {
+            let mut v = vec![(X, x), (Y, y)];
+            v.extend(text_x.as_ref().map(|t| (X, t)));
+            v.extend(text_y.as_ref().map(|t| (Y, t)));
+            v
+        }
+    }
+}
+
+/// Refuse every category coordinate the panel cannot place, and warn once per
+/// label a categorical axis does not hold (it is then drawn at the plot
+/// centre). The order is the coord, then the axis kind, then the span's shape,
+/// so a span with one category end is refused for its shape only on a
+/// categorical axis, where both ends as categories is a remedy that renders.
+fn check_categories(
+    specs: &[AnnotationSpec],
+    ctx: &ScaleContext<'_>,
+    projected_coord: Option<&'static str>,
+    warnings: &mut Vec<RenderWarning>,
+) -> Result<(), AnnotationRefusal> {
+    let mut unknown: Vec<(AlignAxis, &str)> = Vec::new();
+    for spec in specs {
+        for (axis, value) in coords_with_axes(spec) {
+            let Some(label) = value.category() else { continue };
+            if let Some(coord) = projected_coord {
+                return Err(AnnotationRefusal::CategoryUnderCoord {
+                    label: label.to_string(),
+                    axis,
+                    coord,
+                });
+            }
+            let scale = if axis.is_y() { ctx.y_scale } else { ctx.x_scale };
+            if !matches!(scale, ScaleKind::Ordinal(_)) {
+                return Err(AnnotationRefusal::CategoryOnContinuousAxis {
+                    label: label.to_string(),
+                    axis,
+                });
+            }
+            if ctx.category_centre(scale, label).is_none() && !unknown.contains(&(axis, label)) {
+                unknown.push((axis, label));
+            }
+        }
+        if let AnnotationSpec::Span { axis, start, end, .. } = spec {
+            let (category_end, label) = match (start.category(), end.category()) {
+                (Some(label), None) => (SpanEnd::Start, label),
+                (None, Some(label)) => (SpanEnd::End, label),
+                _ => continue,
+            };
+            return Err(AnnotationRefusal::MixedSpanEnds {
+                axis: if axis == "x" { AlignAxis::X } else { AlignAxis::Y },
+                category_end,
+                label: label.to_string(),
+            });
+        }
+    }
+    for (axis, label) in unknown {
+        let scale = if axis.is_y() { ctx.y_scale } else { ctx.x_scale };
+        let mut domain = match scale {
+            ScaleKind::Ordinal(ordinal) => ordinal.ticks_internal(),
+            _ => Vec::new(),
+        };
+        domain.sort();
+        warnings.push(RenderWarning::AnnotationCategoryNotFound {
+            axis,
+            label: label.to_string(),
+            domain,
+        });
+    }
+    Ok(())
 }
 
 /// Build one CUT annotation: against the unbroken scale, then re-placed piece by

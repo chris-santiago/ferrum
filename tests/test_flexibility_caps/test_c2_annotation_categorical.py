@@ -12,8 +12,8 @@
    ``_coerce_temporal(PixelCoord(40))`` tries ``float(PixelCoord(40))`` which fails.
 
 3. The annotation primitive is serialized with a ``{"category": ...}`` dict that
-   must be resolved to a ``{"norm": ...}`` pixel fraction before reaching the Rust
-   renderer.
+   the Rust renderer resolves through the axis's own scale (placement under every
+   axis setting is pinned in ``tests/test_annotation_categories.py``).
 
 ## Tests
 
@@ -21,7 +21,8 @@
 - px/norm coordinates accepted by annotate_text, annotate_arrow, annotate_hline,
   annotate_vline.
 - Temporal ISO-8601 string annotations still resolve correctly (regression guard).
-- Non-ISO string on a temporal axis is treated as a category literal, not mis-parsed.
+- Non-ISO string on a temporal axis is treated as a category literal, not mis-parsed, and
+  refused with the continuous-axis remedy.
 """
 
 from __future__ import annotations
@@ -303,23 +304,27 @@ def test_annotate_hline_numeric_still_works(temporal_df: pl.DataFrame) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C2-D — non-ISO string on temporal axis is treated as category, not mis-parsed
+# C2-D — non-ISO string on temporal axis is a category, so the axis refuses it
 # ---------------------------------------------------------------------------
 
 
-def test_non_iso_string_on_temporal_axis_does_not_raise(temporal_df: pl.DataFrame) -> None:
-    """A non-ISO string coord like 'peak_date' does not raise even on a temporal chart.
+def test_non_iso_string_on_temporal_axis_is_refused_with_the_continuous_axis_remedy(
+    temporal_df: pl.DataFrame,
+) -> None:
+    """A non-ISO string coord like 'peak_date' is a category literal, not a mis-parsed date.
 
-    Contract: the string is treated as a category literal, not silently mis-parsed
-    as a date.  The annotation renders without error, falls back to plot center,
-    and emits a UserWarning naming the unresolved category and the axis searched.
+    A temporal scale holds no categories, so the render refuses it (the string would otherwise
+    land at the plot centre and read as a data position) and names the coordinates that do
+    place on a continuous axis.
     """
     base = fm.Chart(temporal_df).mark_line().encode(x="date:T", y="val:Q")
-    ann = annotate_vline("peak_date")
-    composed = base + ann
-    with pytest.warns(UserWarning, match="peak_date"):
-        svg = composed.to_svg()
-    assert isinstance(svg, str), "to_svg must return a string"
+    composed = base + annotate_vline("peak_date")
+    with pytest.raises(ValueError) as refused:
+        composed.to_svg()
+    assert str(refused.value) == (
+        "annotation category 'peak_date' on the x axis: the x scale is continuous, so it holds "
+        "no categories; pass a number, a date, an ISO-8601 string, fm.NormCoord or fm.PixelCoord"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -427,17 +432,17 @@ def test_annotate_arrow_non_iso_string_coords_store_ordinal_in_primitive() -> No
 
     ann = annotate_arrow("cat_start", 0.0, "cat_end", 1.0)
     prim = ann._annotation_primitive
-    if prim is not None:
-        assert isinstance(prim.x1, OrdinalCategoryCoord), (
-            f"Non-ISO string 'cat_start' in annotate_arrow must produce "
-            f"OrdinalCategoryCoord in the primitive, got {type(prim.x1)}"
-        )
-        assert prim.x1.value == "cat_start"
-        assert isinstance(prim.x2, OrdinalCategoryCoord), (
-            f"Non-ISO string 'cat_end' in annotate_arrow must produce "
-            f"OrdinalCategoryCoord for x2, got {type(prim.x2)}"
-        )
-        assert prim.x2.value == "cat_end"
+    assert prim is not None, "a category end takes the primitive route"
+    assert isinstance(prim.x, OrdinalCategoryCoord), (
+        f"Non-ISO string 'cat_start' in annotate_arrow must produce "
+        f"OrdinalCategoryCoord in the primitive, got {type(prim.x)}"
+    )
+    assert prim.x.value == "cat_start"
+    assert isinstance(prim.x2, OrdinalCategoryCoord), (
+        f"Non-ISO string 'cat_end' in annotate_arrow must produce "
+        f"OrdinalCategoryCoord for x2, got {type(prim.x2)}"
+    )
+    assert prim.x2.value == "cat_end"
 
 
 def test_annotate_arrow_with_label_and_categorical_coords_does_not_raise() -> None:

@@ -10,6 +10,8 @@ All coordinate arguments accept:
 - ``datetime.date`` / ``datetime.datetime`` — temporal data-space coordinates
   (converted to epoch-milliseconds UTC at serialization time)
 - ISO-8601 date/datetime strings — parsed and converted to epoch-milliseconds
+- any other string — a category label, placed where the axis draws that
+  category (the band centre; a span covers whole bands)
 - [PixelCoord][ferrum.PixelCoord] — absolute pixel offset
 - [NormCoord][ferrum.NormCoord] — normalized [0, 1] fraction
 """
@@ -368,7 +370,8 @@ def text(
     Parameters
     ----------
     x, y : CoordValue
-        Position (data-space float, [px][ferrum.px], or [norm][ferrum.norm]).
+        Position (data-space float, a category label, [px][ferrum.px], or
+        [norm][ferrum.norm]).
     text : str
         Label text.
     font_size : float, default 12
@@ -554,9 +557,12 @@ def span(
     axis : str
         Axis to span: ``"x"`` or ``"y"``.
     start : CoordValue
-        Start of the span in data coordinates.
+        Start of the span in data coordinates. Both ends are categories or both
+        are values; a span over categories shades whole bands, from the outer
+        edge of the lower-placed category's band to the outer edge of the
+        higher-placed one (``start == end`` shades that band).
     end : CoordValue
-        End of the span in data coordinates.
+        End of the span, of the same kind as ``start``.
     fill : str
         Band fill color.
     opacity : float, default 0.3

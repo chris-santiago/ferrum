@@ -710,8 +710,10 @@ pub fn build_scene(
             super::annotation::build_annotations_through_breaks(
                 &chart_config.annotations,
                 &ann_ctx,
+                super::annotation::projected_coord_name(spec.coord.as_ref()),
                 warnings,
             )
+            .map_err(RenderError::AnnotationRefused)?
         } else {
             super::annotation::AnnotationNodes {
                 below_marks: Vec::new(),

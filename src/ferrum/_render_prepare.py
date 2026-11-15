@@ -2,75 +2,128 @@
 
 This module holds the self-contained pre-render transforms that the render
 mixin invokes but that are not part of render dispatch itself: the
-``Axis(label_map=...)`` column-value remap engine and the ordinal-domain /
-annotation category-coordinate resolver.  Most of these are pure helpers
-driven by ``_RenderMixin._resolve_chart_config`` / ``_render_inputs`` in
-``ferrum._render``; the per-channel field/column introspection helpers
-(``_chart_bindings``, used by this module's own
-:func:`_extract_ordinal_domain`, and ``_classify_field``, read by
-``ferrum._render``) answer "which field is bound to this channel, and what
-does its data look like" for a single chart.
+``Axis(label_map=...)`` column-value remap engine and ``_classify_field``.
+Most of these are pure helpers driven by ``_RenderMixin._resolve_chart_config`` /
+``_render_inputs`` in ``ferrum._render``. Annotation category coordinates are not
+resolved here: they cross to the renderer as ``{"category": label}`` and are placed
+through the axis's own scale.
 """
 
 from __future__ import annotations
 
-import warnings
-from typing import Any, Iterable
+from typing import Any, Iterator
 
 import polars as pl
 
-from ferrum._levels import distinct_non_null_levels
 from ferrum.encoding.base import ChannelBase
 
 
-def _collect_label_maps(chart: Any) -> dict[str, dict[str, str]]:
-    """Collect Axis(label_map=...) entries from a chart's encoding.
+def _label_map_entries(chart: Any) -> Iterator[tuple[str, str, dict[str, str]]]:
+    """Yield ``(channel, column, label_map)`` for every ``Axis(label_map=...)`` on *chart*.
 
-    Returns a mapping of ``{column_name: {old_value: new_value, ...}}``
-    by scanning the chart's ``_encoding`` dict (single-mark path) and
-    the ``_layers`` list (layered-mark path).
-
-    Only x and y channels are checked because axis label remapping only
-    applies to positional axes.
+    Scans the chart's ``_encoding`` dict (single-mark path) and the ``_layers`` list
+    (layered-mark path), x and y channels only (label remapping applies to positional axes).
+    :func:`_collect_label_maps` folds the entries by column and :func:`_axis_label_maps` by
+    channel.
     """
     from ferrum.axis import Axis as _Axis
 
-    result: dict[str, dict[str, str]] = {}
-
-    def _check_enc(enc_dict: dict) -> None:
+    def _entries(enc_dict: dict) -> Iterator[tuple[str, str, dict[str, str]]]:
         for ch_name in ("x", "y"):
             ch = enc_dict.get(ch_name)
             if not isinstance(ch, ChannelBase):
                 continue
             axis_kwarg = ch._kwargs.get("axis")
-            if not isinstance(axis_kwarg, _Axis):
+            if not isinstance(axis_kwarg, _Axis) or axis_kwarg.label_map is None:
                 continue
-            if axis_kwarg.label_map is None:
+            if ch.field is None:
                 continue
-            col = ch.field
-            if col is None:
-                continue
-            if col in result:
-                # Merge: later layers override earlier for same column.
-                result[col].update(axis_kwarg.label_map)
-            else:
-                result[col] = dict(axis_kwarg.label_map)
+            yield ch_name, ch.field, axis_kwarg.label_map
 
-    # Single-mark or top-level encoding
-    _check_enc(chart._encoding)
-
-    # Layered chart: each _Layer has its own encoding dict
+    yield from _entries(chart._encoding)
     if chart._layers:
         for layer in chart._layers:
-            _check_enc(layer.encoding)
+            yield from _entries(layer.encoding)
 
+
+def _collect_label_maps(chart: Any) -> dict[str, dict[str, str]]:
+    """Collect Axis(label_map=...) entries from a chart's encoding.
+
+    Returns a mapping of ``{column_name: {old_value: new_value, ...}}``; later
+    layers override earlier ones for the same column.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for _channel, column, label_map in _label_map_entries(chart):
+        result.setdefault(column, {}).update(label_map)
     return result
 
 
-def _apply_label_maps(
+def _takes_label_map(df: pl.DataFrame, column: str) -> bool:
+    """Whether ``label_map`` renames *column*: present, and text or categorical.
+
+    The one gate the data rename reads, so the annotation rename (which follows the
+    maps the data rename applied) cannot disagree with it.
+    """
+    return column in df.columns and df[column].dtype in (pl.Utf8, pl.String, pl.Categorical)
+
+
+def _axis_label_maps(chart: Any, applied: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
+    """The label map each positional axis was renamed through: ``{"x": {...}, "y": {...}}``.
+
+    *applied* is what :func:`_rename_through_label_maps` reports it renamed in the data, so a
+    category written as a data value is renamed exactly when the rows that hold that value
+    were.
+    """
+    axes: dict[str, dict[str, str]] = {"x": {}, "y": {}}
+    for channel, column, label_map in _label_map_entries(chart):
+        taken = applied.get(column, {})
+        axes[channel].update({k: v for k, v in label_map.items() if k in taken})
+    return axes
+
+
+# The coordinate fields of an annotation spec dict, by the axis each is measured on. A span's
+# ``start`` and ``end`` follow its own ``axis``. Mirrors ``coords_with_axes`` in the renderer's
+# annotation module.
+_X_COORD_FIELDS = frozenset({"x", "x1", "x2", "text_x"})
+_Y_COORD_FIELDS = frozenset({"y", "y1", "y2", "text_y"})
+
+
+def _rename_annotation_categories(
+    annotations: list[dict[str, Any]],
+    axis_maps: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    """Rename every ``{"category": value}`` through the label map of the axis it sits on.
+
+    A value that is a key of the axis's map crosses as the mapped display label (the label
+    the data was renamed to); any other value crosses unchanged. Returns new dicts.
+    """
+    if not any(axis_maps.values()):
+        return annotations
+    renamed = []
+    for annotation in annotations:
+        out = dict(annotation)
+        for key, value in annotation.items():
+            if not (isinstance(value, dict) and "category" in value):
+                continue
+            if key in _X_COORD_FIELDS:
+                axis = "x"
+            elif key in _Y_COORD_FIELDS:
+                axis = "y"
+            elif key in ("start", "end"):
+                axis = annotation.get("axis", "")
+            else:
+                continue
+            label_map = axis_maps.get(axis, {})
+            category = value["category"]
+            out[key] = {**value, "category": label_map.get(category, category)}
+        renamed.append(out)
+    return renamed
+
+
+def _rename_through_label_maps(
     data: Any,
     label_maps: dict[str, dict[str, str]],
-) -> Any:
+) -> tuple[Any, dict[str, dict[str, str]]]:
     """Apply label remapping to a polars DataFrame.
 
     For each ``(column_name, mapping)`` pair in *label_maps*, replaces
@@ -79,9 +132,12 @@ def _apply_label_maps(
 
     If the column does not exist in *data* or the data is not a polars
     DataFrame, the data is returned unchanged.
+
+    Returns the data and, per renamed column, the entries of its map whose key
+    some row of the column held (the renames that changed the data).
     """
     if not label_maps:
-        return data
+        return data, {}
 
     if not isinstance(data, pl.DataFrame):
         # Non-polars data: coerce first, but we can't modify Arrow tables
@@ -99,49 +155,20 @@ def _apply_label_maps(
                 "Axis label_map could not be applied (data coercion failed); labels unchanged.",
                 stacklevel=2,
             )
-            return data
+            return data, {}
     else:
         df = data
 
+    applied: dict[str, dict[str, str]] = {}
     for col, mapping in label_maps.items():
-        if col not in df.columns:
+        if not _takes_label_map(df, col):
             continue
-        series = df[col]
-        if series.dtype not in (pl.Utf8, pl.String, pl.Categorical):
-            continue
+        held = {str(v) for v in df[col].drop_nulls().unique().to_list()}
+        applied[col] = {k: v for k, v in mapping.items() if k in held}
         # replace(mapping) without a default leaves unmatched values unchanged.
-        df = df.with_columns(series.replace(mapping).alias(col))
+        df = df.with_columns(df[col].replace(mapping).alias(col))
 
-    return df
-
-
-def _extract_field_name(ch: Any) -> str | None:
-    """Return the field name bound to an encoding value, or ``None``.
-
-    Encoding values are either bare strings (``encode(x="hp")``) or
-    ``ChannelBase`` instances (``encode(x=X("hp", scale=...))``).
-    """
-    if isinstance(ch, str):
-        return ch
-    field = getattr(ch, "field", None)
-    return field if isinstance(field, str) else None
-
-
-def _chart_bindings(chart: Any, channel: str) -> Iterable[str | None]:
-    """Yield every field name bound to *channel* across *chart*'s layers.
-
-    Layered charts (``Chart + Chart`` composites) keep per-layer encoding
-    dicts on ``_layers``; unlayered charts keep a single ``_encoding`` dict at
-    the top level. Shared by :func:`_extract_ordinal_domain` (single-chart
-    ordinal-domain lookup).
-    """
-    layers = getattr(chart, "_layers", None)
-    if layers:
-        for layer in layers:
-            yield _extract_field_name(layer.encoding.get(channel))
-        return
-    encoding = getattr(chart, "_encoding", {}) or {}
-    yield _extract_field_name(encoding.get(channel))
+    return df, applied
 
 
 def _classify_field(data, field: str) -> str | None:
@@ -162,169 +189,3 @@ def _classify_field(data, field: str) -> str | None:
     if dtype in (pl.Utf8, pl.Categorical):
         return "ordinal"
     return None
-
-
-def _build_ordinal_norm_map(domain: list) -> dict[str, float]:
-    """Build a category → norm-center mapping for an ordinal domain list.
-
-    Each category occupies an equal band of width ``1/n``.  The band center
-    for item at index *i* (0-based) is ``(i + 0.5) / n``.
-
-    Parameters
-    ----------
-    domain : list
-        Ordered list of category values as they appear in the data.
-
-    Returns
-    -------
-    dict[str, float]
-        ``{str(category): norm_center}``
-
-    Examples
-    --------
-    >>> norm = _build_ordinal_norm_map(["a", "b", "c"])
-    >>> {k: round(v, 4) for k, v in norm.items()}
-    {'a': 0.1667, 'b': 0.5, 'c': 0.8333}
-    """
-    n = len(domain)
-    if n == 0:
-        return {}
-    # NOTE: (i+0.5)/n is exact when the axis is a band scale at its unset
-    # (default) padding, an ordinal scale with no padding set, or a point
-    # scale at its default padding -- each places category i's center at
-    # that fraction of the plot width. It drifts whenever the axis sets an
-    # explicit padding away from those defaults, an explicit range, sort=,
-    # domain=, or reverse=: the annotation still lands in the correct
-    # band/order, but is not pixel-aligned to the bar center.
-    return {str(v): (i + 0.5) / n for i, v in enumerate(domain)}
-
-
-def _extract_ordinal_domain(chart: Any, channel: str) -> list:
-    """Return the ordered distinct non-null values for *channel* in *chart*, or an empty list.
-
-    Checks the chart's ``_data`` attribute against the field name(s) bound to
-    *channel* in ``_encoding`` (single-mark path) and ``_layers`` (layered path).
-    Only processes columns whose dtype is ordinal-compatible (string or
-    categorical).
-
-    Parameters
-    ----------
-    chart : Chart
-        Chart to inspect.
-    channel : str
-        Encoding channel, typically ``"x"`` or ``"y"``.
-
-    Returns
-    -------
-    list
-        Distinct non-null values in first-appearance order.
-    """
-
-    data = getattr(chart, "_data", None)
-    if data is None or not isinstance(data, pl.DataFrame):
-        return []
-
-    for field in _chart_bindings(chart, channel):
-        if field is None:
-            continue
-        try:
-            col = data[field]
-        except (KeyError, AttributeError, pl.exceptions.ColumnNotFoundError):
-            continue
-        if col.dtype not in (pl.Utf8, pl.String, pl.Categorical):
-            continue
-        # A null category has no band, so it is not a level: the annotation's band centre is
-        # read over the levels the axis draws, in order of first appearance.
-        return distinct_non_null_levels(col)
-
-    return []
-
-
-def _resolve_category_coords_in_annotations(
-    ann_list: list[dict],
-    chart: Any,
-) -> list[dict]:
-    """Replace ``{"category": value}`` annotation coordinate dicts with ``{"norm": frac}``.
-
-    The Rust annotation renderer's ``CoordValue`` enum only accepts
-    ``Data(f64)``, ``Pixel { px }``, and ``Norm { norm }``.  Ordinal category
-    coordinates (strings that are not ISO-8601 dates) are serialized by
-    ``_coord()`` as ``{"category": value}`` so they can be post-processed here
-    using the chart's ordinal domain before the annotation list is sent to Rust.
-
-    Resolution rules:
-    - Build the ordinal domain for the x and y axes from the chart's data.
-    - For each coordinate dict that is ``{"category": v}``, look up ``v`` in
-      the appropriate axis domain and replace the dict with
-      ``{"norm": band_center}`` where ``band_center = (index + 0.5) / n``.
-    - If the category is not found in the domain (unknown label, or wrong axis),
-      fall back to ``{"norm": 0.5}`` (plot center) so the annotation renders
-      without crashing.
-
-    Parameters
-    ----------
-    ann_list : list[dict]
-        Annotation spec dicts (as produced by ``to_dict_list()``).
-    chart : Chart
-        The chart whose ordinal domain is used for resolution.
-
-    Returns
-    -------
-    list[dict]
-        Annotation spec dicts with all ``{"category": ...}`` entries resolved.
-    """
-    # Lazily build the norm maps only when at least one {"category": ...} entry
-    # exists to avoid scanning chart data on every render.
-    _x_map: dict[str, float] | None = None
-    _y_map: dict[str, float] | None = None
-
-    def _x_norm_map() -> dict[str, float]:
-        nonlocal _x_map
-        if _x_map is None:
-            _x_map = _build_ordinal_norm_map(_extract_ordinal_domain(chart, "x"))
-        return _x_map
-
-    def _y_norm_map() -> dict[str, float]:
-        nonlocal _y_map
-        if _y_map is None:
-            _y_map = _build_ordinal_norm_map(_extract_ordinal_domain(chart, "y"))
-        return _y_map
-
-    # Coordinate keys that belong to the x-axis vs y-axis.
-    _X_KEYS = frozenset({"x", "x1", "x2"})
-    _Y_KEYS = frozenset({"y", "y1", "y2"})
-
-    def _resolve_coord(key: str, val: Any) -> Any:
-        """Replace a single coordinate value if it is a category dict."""
-        if not isinstance(val, dict) or "category" not in val:
-            return val
-        cat = val["category"]
-        if key in _X_KEYS:
-            norm_map = _x_norm_map()
-            axis_label = "x"
-        elif key in _Y_KEYS:
-            norm_map = _y_norm_map()
-            axis_label = "y"
-        else:
-            # Unrecognised key — fall back to center.
-            norm_map = {}
-            axis_label = key
-        cat_str = str(cat)
-        if cat_str not in norm_map:
-            domain_repr = sorted(norm_map.keys()) if norm_map else []
-            warnings.warn(
-                f"annotation category {cat_str!r} not found in {axis_label}-axis domain "
-                f"{domain_repr}; placing at plot center",
-                UserWarning,
-                stacklevel=2,
-            )
-        norm_val = norm_map.get(cat_str, 0.5)
-        return {"norm": norm_val}
-
-    resolved = []
-    for ann in ann_list:
-        new_ann = dict(ann)
-        for key, val in ann.items():
-            new_ann[key] = _resolve_coord(key, val)
-        resolved.append(new_ann)
-    return resolved

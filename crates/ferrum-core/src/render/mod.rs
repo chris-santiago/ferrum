@@ -356,6 +356,10 @@ impl ChannelNaming {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     InvalidViewport { width: f64, height: f64 },
+    /// An annotation coordinate the panel cannot place (a category on a
+    /// continuous axis or under a projected coord, a span with one category
+    /// end). `Display` is the refusal's own text.
+    AnnotationRefused(annotation::AnnotationRefusal),
     UnknownColumn { name: String },
     /// A user-supplied color string that `render::color::parse_color` rejects.
     /// The payload is the `ColorParseError` `parse_color` returned; `Display`
@@ -1346,6 +1350,10 @@ pub(crate) fn with_coord_flipped(err: RenderError, coord_flipped: bool) -> Rende
         // their field docs on `RenderError`. The remaining variants carry no
         // user-channel token at all.
         other @ (RenderError::InvalidViewport { .. }
+        // Worded in the letter of the axis the annotation field is measured on,
+        // as the field stands when the annotation is built; it carries no
+        // encoding channel token, so there is nothing to un-flip here.
+        | RenderError::AnnotationRefused(_)
         | RenderError::UnknownColumn { .. }
         | RenderError::RasterColorNotQuantitative(_)
         | RenderError::InvalidColor(_)
@@ -1896,6 +1904,7 @@ impl std::fmt::Display for RenderError {
                  remove the break or render this chart under Cartesian coords",
                 axis.wire_name()
             ),
+            Self::AnnotationRefused(refusal) => write!(f, "{refusal}"),
             Self::IndependentYIncompatibleCoord { coord } => write!(
                 f,
                 "SecondaryY (a layer with an independent y scale) is not supported under {coord}: its right y \
@@ -2835,6 +2844,14 @@ pub enum RenderWarning {
         axis: AlignAxis,
         kinds: Vec<String>,
     },
+    /// An annotation names category `label` on a categorical `axis` whose
+    /// `domain` (sorted) does not hold it; it is drawn at the plot centre.
+    /// Pushed once per label and axis, in the caller's axis letter.
+    AnnotationCategoryNotFound {
+        axis: AlignAxis,
+        label: String,
+        domain: Vec<String>,
+    },
     /// A `BreakAxis` resolved to zero effective gaps, so the chart rendered
     /// exactly as if the break had not been declared: no indicator, no
     /// compressed scale, no moved mark. Either every gap fell outside the
@@ -3397,6 +3414,14 @@ impl std::fmt::Display for RenderWarning {
                     if n == 1 { "" } else { "s" },
                     dedup_kinds_for_display(kinds),
                     if n == 1 { "was" } else { "were" },
+                )
+            }
+            RenderWarning::AnnotationCategoryNotFound { axis, label, domain } => {
+                let domain = domain.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ");
+                write!(
+                    f,
+                    "annotation category '{label}' not found in {axis}-axis domain [{domain}]; \
+                     placing at plot center"
                 )
             }
             RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
@@ -4404,6 +4429,15 @@ mod tests {
             .to_string(),
             "1 annotation element (bracket) on the x axis spans a BreakAxis gap \
              and was suppressed"
+        );
+        assert_eq!(
+            RenderWarning::AnnotationCategoryNotFound {
+                axis: AlignAxis::X,
+                label: "zz".into(),
+                domain: vec!["a".into(), "b".into()],
+            }
+            .to_string(),
+            "annotation category 'zz' not found in x-axis domain ['a', 'b']; placing at plot center"
         );
         assert_eq!(
             RenderWarning::BreakAxisIneffective {

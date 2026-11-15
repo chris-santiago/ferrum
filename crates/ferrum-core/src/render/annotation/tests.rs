@@ -1356,7 +1356,7 @@ impl BrokenPanel {
             breaks,
         };
         let mut warnings = Vec::new();
-        let nodes = build_annotations_through_breaks(specs, &ctx, &mut warnings);
+        let nodes = build_annotations_through_breaks(specs, &ctx, None, &mut warnings).unwrap();
         assert!(
             nodes.below_marks.is_empty(),
             "these fixtures use above-marks specs only"
@@ -1947,7 +1947,7 @@ fn no_breaks_routes_straight_to_the_plain_build() {
         breaks: &[],
     };
     let mut warnings = Vec::new();
-    let routed = build_annotations_through_breaks(&specs, &ctx, &mut warnings);
+    let routed = build_annotations_through_breaks(&specs, &ctx, None, &mut warnings).unwrap();
     let plain = build_annotations(&specs, &ctx);
 
     assert_eq!(routed.above_marks, plain.above_marks);
@@ -1986,7 +1986,7 @@ fn a_below_marks_text_untouched_by_the_break_still_routes_to_below_marks() {
         breaks: &[y],
     };
     let mut warnings = Vec::new();
-    let nodes = build_annotations_through_breaks(&[text], &ctx, &mut warnings);
+    let nodes = build_annotations_through_breaks(&[text], &ctx, None, &mut warnings).unwrap();
 
     assert!(warnings.is_empty());
     assert!(
@@ -2028,5 +2028,334 @@ fn a_mixed_coordinate_rect_drops_whole_when_its_data_bound_is_in_the_gap() {
             assert_eq!(kinds, &["rect".to_string()]);
         }
         other => panic!("expected one AnnotationSuppressedByBreak, got {other:?}"),
+    }
+}
+
+// ── Category coordinates ────────────────────────────────────────────────────
+
+mod categories {
+    use super::*;
+    use crate::scale::discrete::DiscreteLayout;
+    use crate::scale::ordinal::OrdinalScale;
+
+    const PLOT: Rect = Rect { x: 50.0, y: 20.0, w: 400.0, h: 300.0 };
+
+    /// A band axis over `domain` spanning `range` with `padding_inner`.
+    fn band(domain: &[&str], range: [f64; 2], padding_inner: f64) -> ScaleKind {
+        ScaleKind::Ordinal(OrdinalScale::new_internal(
+            domain.iter().map(|c| c.to_string()).collect(),
+            range.to_vec(),
+            DiscreteLayout::band(padding_inner, 0.0, 0.5),
+        ))
+    }
+
+    fn linear() -> ScaleKind {
+        let (x, _, _) = test_ctx();
+        x
+    }
+
+    fn category(label: &str) -> CoordValue {
+        CoordValue::Category { category: label.to_string() }
+    }
+
+    fn span(axis: &str, start: CoordValue, end: CoordValue) -> AnnotationSpec {
+        AnnotationSpec::Span {
+            axis: axis.to_string(),
+            start,
+            end,
+            fill: "#cccccc".to_string(),
+            opacity: 0.2,
+            label_position: "center".to_string(),
+            label: None,
+        }
+    }
+
+    fn text(x: CoordValue, y: CoordValue) -> AnnotationSpec {
+        AnnotationSpec::Text {
+            x,
+            y,
+            text: "t".to_string(),
+            font_size: 12.0,
+            color: "#333333".to_string(),
+            anchor: "middle".to_string(),
+            baseline: "middle".to_string(),
+            angle: 0.0,
+            dx: 0.0,
+            dy: 0.0,
+            z: "above_marks".to_string(),
+        }
+    }
+
+    fn run(
+        specs: &[AnnotationSpec],
+        x: &ScaleKind,
+        y: &ScaleKind,
+        projected: Option<&'static str>,
+    ) -> (Result<AnnotationNodes, AnnotationRefusal>, Vec<RenderWarning>) {
+        let ctx = ScaleContext { plot_area: PLOT, x_scale: x, y_scale: y, breaks: &[] };
+        let mut warnings = Vec::new();
+        let built = build_annotations_through_breaks(specs, &ctx, projected, &mut warnings);
+        (built, warnings)
+    }
+
+    fn rect_extent_of(nodes: &AnnotationNodes) -> (f64, f64, f64, f64) {
+        match nodes.above_marks.first() {
+            Some(SceneNode::Rect { x, y, w, h, .. }) => (*x, *y, *w, *h),
+            other => panic!("expected a rect, got {other:?}"),
+        }
+    }
+
+    fn text_position(nodes: &AnnotationNodes) -> (f64, f64) {
+        match nodes.above_marks.first() {
+            Some(SceneNode::Text { x, y, .. }) => (*x, *y),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_form_is_a_category_object() {
+        let v: CoordValue = serde_json::from_str(r#"{"category": "b"}"#).unwrap();
+        assert_eq!(v.category(), Some("b"));
+        let n: CoordValue = serde_json::from_str("2.5").unwrap();
+        assert!(matches!(n, CoordValue::Data(d) if d == 2.5));
+    }
+
+    #[test]
+    fn a_point_lands_on_the_band_centre_the_scale_gives_it() {
+        // Domain order c, a, b, d (a sorted axis): `b` is the third band.
+        let x = band(&["c", "a", "b", "d"], [50.0, 450.0], 0.0);
+        let (built, warnings) = run(&[text(category("b"), CoordValue::Data(0.0))], &x, &linear(), None);
+        let (px, _) = text_position(&built.unwrap());
+        assert!((px - 300.0).abs() < 1e-9, "band b centre is 300, got {px}");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn a_point_on_the_vertical_axis_lands_on_its_band() {
+        let y = band(&["a", "b", "c", "d"], [20.0, 320.0], 0.0);
+        let (built, _) = run(&[text(CoordValue::Data(0.0), category("c"))], &linear(), &y, None);
+        let (_, py) = text_position(&built.unwrap());
+        assert!((py - 207.5).abs() < 1e-9, "band c centre is 207.5, got {py}");
+    }
+
+    #[test]
+    fn a_span_covers_whole_bands_in_either_order() {
+        let x = band(&["a", "b", "c", "d"], [50.0, 450.0], 0.0);
+        for (start, end) in [("b", "c"), ("c", "b")] {
+            let (built, _) = run(&[span("x", category(start), category(end))], &x, &linear(), None);
+            let (rx, ry, rw, rh) = rect_extent_of(&built.unwrap());
+            assert!((rx - 150.0).abs() < 1e-9 && (rw - 200.0).abs() < 1e-9, "{rx} {rw}");
+            assert!((ry - PLOT.y).abs() < 1e-9 && (rh - PLOT.h).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn a_span_over_one_category_shades_that_whole_band() {
+        let x = band(&["a", "b", "c", "d"], [50.0, 450.0], 0.0);
+        let (built, _) = run(&[span("x", category("b"), category("b"))], &x, &linear(), None);
+        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
+        assert!((rx - 150.0).abs() < 1e-9 && (rw - 100.0).abs() < 1e-9, "{rx} {rw}");
+    }
+
+    #[test]
+    fn a_span_on_the_vertical_axis_covers_whole_bands() {
+        let y = band(&["a", "b", "c", "d"], [20.0, 320.0], 0.0);
+        let (built, _) = run(&[span("y", category("b"), category("c"))], &linear(), &y, None);
+        let (_, ry, _, rh) = rect_extent_of(&built.unwrap());
+        assert!((ry - 95.0).abs() < 1e-9 && (rh - 150.0).abs() < 1e-9, "{ry} {rh}");
+    }
+
+    #[test]
+    fn a_span_band_is_the_scales_bandwidth_under_padding() {
+        let x = band(&["a", "b", "c", "d"], [50.0, 450.0], 0.5);
+        let ScaleKind::Ordinal(scale) = &x else { return };
+        let centre = scale.scale_internal("b").unwrap_or(f64::NAN);
+        let half = scale.bandwidth() / 2.0;
+        let (built, _) = run(&[span("x", category("b"), category("b"))], &x, &linear(), None);
+        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
+        assert!((rx - (centre - half)).abs() < 1e-9 && (rw - 2.0 * half).abs() < 1e-9);
+        assert!(rw < 100.0, "padding narrows the band: {rw}");
+    }
+
+    #[test]
+    fn a_span_follows_a_reversed_range() {
+        let x = band(&["a", "b", "c", "d"], [450.0, 50.0], 0.0);
+        let (built, _) = run(&[span("x", category("a"), category("a"))], &x, &linear(), None);
+        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
+        assert!((rx - 350.0).abs() < 1e-9 && (rw - 100.0).abs() < 1e-9, "{rx} {rw}");
+    }
+
+    #[test]
+    fn a_category_on_a_continuous_axis_is_refused_naming_the_axis() {
+        let y = band(&["a", "b"], [20.0, 320.0], 0.0);
+        let (x_case, _) = run(&[text(category("b"), CoordValue::Data(1.0))], &linear(), &y, None);
+        assert_eq!(
+            x_case.unwrap_err().to_string(),
+            "annotation category 'b' on the x axis: the x scale is continuous, so it holds no \
+             categories; pass a number, a date, an ISO-8601 string, fm.NormCoord or fm.PixelCoord"
+        );
+        let (y_case, _) = run(&[text(CoordValue::Data(1.0), category("b"))], &linear(), &linear(), None);
+        assert!(y_case.unwrap_err().to_string().starts_with("annotation category 'b' on the y axis:"));
+    }
+
+    #[test]
+    fn a_span_category_on_a_continuous_axis_is_refused() {
+        let (built, _) = run(&[span("x", category("b"), category("c"))], &linear(), &linear(), None);
+        assert!(matches!(
+            built,
+            Err(AnnotationRefusal::CategoryOnContinuousAxis { axis: AlignAxis::X, .. })
+        ));
+    }
+
+    #[test]
+    fn a_category_under_a_projected_coord_is_refused_before_the_axis_kind_is_read() {
+        // A linear axis on both x and y: were the axis-kind check first, the
+        // continuous-axis text would win here.
+        for coord in ["CoordPolar", "CoordGeo"] {
+            for (x, y, axis) in [
+                (category("b"), CoordValue::Data(1.0), "x"),
+                (CoordValue::Data(1.0), category("b"), "y"),
+            ] {
+                let (built, _) = run(&[text(x, y)], &linear(), &linear(), Some(coord));
+                assert_eq!(
+                    built.unwrap_err().to_string(),
+                    format!(
+                        "annotation category 'b' on the {axis} axis: a category cannot be placed \
+                         under {coord}; pass fm.NormCoord or fm.PixelCoord"
+                    )
+                );
+            }
+        }
+        // The named remedy renders under the same coord.
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let (built, _) = run(
+            &[text(CoordValue::Norm { norm: 0.5 }, CoordValue::Pixel { px: 40.0 })],
+            &x,
+            &linear(),
+            Some("CoordPolar"),
+        );
+        assert!(built.is_ok());
+    }
+
+    #[test]
+    fn a_mixed_span_on_a_category_axis_is_refused_naming_its_category_end() {
+        let x = band(&["a", "b", "c"], [50.0, 450.0], 0.0);
+        for (start, end, named, other) in [
+            (category("b"), CoordValue::Data(2.5), "start", "end"),
+            (CoordValue::Data(2.5), category("b"), "end", "start"),
+            (category("b"), CoordValue::Norm { norm: 0.5 }, "start", "end"),
+        ] {
+            let (built, _) = run(&[span("x", start, end)], &x, &linear(), None);
+            assert_eq!(
+                built.unwrap_err().to_string(),
+                format!(
+                    "annotation span on the x axis: {named} 'b' is a category and {other} is not; \
+                     pass categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends"
+                )
+            );
+        }
+        let (y_case, _) = run(
+            &[span("y", category("b"), CoordValue::Data(2.5))],
+            &linear(),
+            &band(&["a", "b"], [20.0, 320.0], 0.0),
+            None,
+        );
+        assert_eq!(
+            y_case.unwrap_err().to_string(),
+            "annotation span on the y axis: start 'b' is a category and end is not; pass \
+             categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends"
+        );
+    }
+
+    #[test]
+    fn a_mixed_span_is_refused_for_its_coord_or_axis_before_its_shape() {
+        let (built, _) = run(&[span("x", category("b"), CoordValue::Data(2.5))], &linear(), &linear(), None);
+        assert!(matches!(
+            built,
+            Err(AnnotationRefusal::CategoryOnContinuousAxis { axis: AlignAxis::X, .. })
+        ));
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let (built, _) = run(&[span("x", category("b"), CoordValue::Data(2.5))], &x, &linear(), Some("CoordPolar"));
+        assert!(matches!(built, Err(AnnotationRefusal::CategoryUnderCoord { .. })));
+    }
+
+    #[test]
+    fn an_unknown_category_warns_once_with_the_axis_letter_and_sits_at_the_plot_centre() {
+        let x = band(&["b", "a", "c", "d"], [50.0, 450.0], 0.0);
+        let specs = [
+            text(category("zz"), CoordValue::Data(1.0)),
+            text(category("zz"), CoordValue::Data(2.0)),
+        ];
+        let (built, warnings) = run(&specs, &x, &linear(), None);
+        let (px, _) = text_position(&built.unwrap());
+        assert!((px - 250.0).abs() < 1e-9, "plot centre is 250, got {px}");
+        let shown: Vec<String> = warnings.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            shown,
+            ["annotation category 'zz' not found in x-axis domain ['a', 'b', 'c', 'd']; placing at plot center"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_span_or_callout_position_names_the_axis_not_the_field() {
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let callout = AnnotationSpec::Callout {
+            x: category("a"),
+            y: CoordValue::Data(1.0),
+            text: "n".to_string(),
+            arrow: "straight".to_string(),
+            padding: 4.0,
+            background: "#ffffff".to_string(),
+            border_color: "#333333".to_string(),
+            border_radius: 0.0,
+            text_x: Some(category("zz")),
+            text_y: None,
+        };
+        for spec in [span("x", category("a"), category("zz")), callout] {
+            let (_, warnings) = run(&[spec], &x, &linear(), None);
+            assert_eq!(warnings.len(), 1);
+            assert!(warnings[0].to_string().contains("not found in x-axis domain ['a', 'b']"));
+        }
+    }
+
+    #[test]
+    fn a_span_with_an_unknown_end_resolves_both_ends_as_points() {
+        // Band `a` centre is 100 on [50, 450]; the unknown end sits at the plot
+        // centre (250), so the span runs centre to centre, not whole bands.
+        let x = band(&["a", "b", "c", "d"], [50.0, 450.0], 0.0);
+        let (built, _) = run(&[span("x", category("a"), category("zz"))], &x, &linear(), None);
+        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
+        let (lo, hi) = (rx.min(rx + rw), rx.max(rx + rw));
+        assert!((lo - 100.0).abs() < 1e-9 && (hi - 250.0).abs() < 1e-9, "{lo} {hi}");
+    }
+
+    #[test]
+    fn a_known_category_warns_nothing() {
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let (_, warnings) = run(&[text(category("a"), CoordValue::Data(1.0))], &x, &linear(), None);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn numeric_coordinates_on_a_band_axis_keep_their_placement() {
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let (built, warnings) = run(&[text(CoordValue::Data(0.5), CoordValue::Data(50.0))], &x, &linear(), None);
+        let (px, py) = text_position(&built.unwrap());
+        // A number on a band axis centres on the range; the linear y maps 50 of [0, 100].
+        assert!((px - 250.0).abs() < 1e-9, "x {px}");
+        assert!((py - 300.0).abs() < 1e-9, "y {py}");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn a_projected_coord_name_covers_only_polar_and_geo() {
+        use crate::spec::coord::CoordKind;
+        let named = |json: &str| projected_coord_name(serde_json::from_str::<CoordKind>(json).ok().as_ref());
+        assert_eq!(named(r#"{"kind": "polar"}"#), Some("CoordPolar"));
+        assert_eq!(named(r#"{"kind": "geo"}"#), Some("CoordGeo"));
+        assert_eq!(named(r#"{"kind": "cartesian"}"#), None);
+        assert_eq!(named(r#"{"kind": "fixed"}"#), None);
+        assert_eq!(projected_coord_name(Some(&CoordKind::Flip)), None);
+        assert_eq!(projected_coord_name(None), None);
     }
 }

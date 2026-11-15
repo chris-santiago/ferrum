@@ -2190,7 +2190,7 @@ def test_label_map_with_dict_encoded_x_column():
     label_map runs in polars space before _sanitize_for_rust, so the
     dictionary encoding should be handled by the polars conversion.
 
-    Targets _render.py lines 414-415: _apply_label_maps then _sanitize_for_rust.
+    Targets _render.py lines 414-415: _rename_through_label_maps then _sanitize_for_rust.
     """
     import ferrum as fr
     from ferrum.encoding import X

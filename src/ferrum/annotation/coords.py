@@ -17,13 +17,14 @@ Coordinates in annotation primitives can be expressed in these ways:
 - ``numpy.datetime64`` — the same, via an exact microsecond conversion that
   refuses an out-of-range value rather than letting a fixed-width cast wrap.
 - ISO-8601 date or datetime string — parsed and converted to epoch-milliseconds.
-- Non-ISO-8601 string — treated as an ordinal category label, stored as
-  ``OrdinalCategoryCoord`` and resolved against the axis ordinal domain at
-  render time.
+- Non-ISO-8601 string — treated as a category label, stored as
+  ``OrdinalCategoryCoord`` and placed by the renderer through the axis's own
+  scale (the band centre; a span covers whole bands). A category on an axis
+  that holds none (numeric, temporal, polar, geo) is refused.
 - ``PixelCoord`` — absolute pixel offset from the plot origin
 - ``NormCoord`` — normalized [0, 1] fraction of the plot area
-- ``OrdinalCategoryCoord`` — a category label resolved to a band center at
-  render time via the chart's ordinal domain
+- ``OrdinalCategoryCoord`` — a category label the renderer places on its band
+  through the axis's own scale
 
 Use the [px][ferrum.px] and [norm][ferrum.norm] factory functions as readable shorthands.
 """
@@ -69,12 +70,14 @@ class NormCoord:
 
 @dataclass(frozen=True)
 class OrdinalCategoryCoord:
-    """A category label coordinate that resolves to its band center at render time.
+    """A category label coordinate the renderer places through the axis's own scale.
 
     Use this (or rely on automatic coercion from a non-ISO-8601 string) when
     annotating a chart whose axis is an ordinal (categorical) scale.  The
-    category string is matched against the axis ordinal domain and the
-    annotation is placed at the band center for that category.
+    renderer matches the label against the axis's own categories, so the
+    annotation lands where that axis draws the category (the band centre; a
+    span covers whole bands), whatever the axis's sort, domain, order or
+    padding.
 
     Parameters
     ----------
@@ -87,8 +90,8 @@ class OrdinalCategoryCoord:
 
 # CoordValue accepts numbers, temporal Python types, ISO strings, coordinate
 # wrappers, or ordinal category labels.  Temporal ISO strings are converted to
-# epoch-ms at serialization time; ordinal category labels are resolved to norm
-# coordinates against the chart's domain at render time.
+# epoch-ms at serialization time; ordinal category labels cross to the renderer
+# as ``{"category": label}`` and are placed there through the axis's own scale.
 CoordValue: TypeAlias = Union[
     float,
     int,
@@ -538,8 +541,8 @@ def _classify_raw_coord(v: CoordValue) -> CoordValue:
     - ``datetime.date`` / ``datetime.datetime`` / ``numpy.datetime64`` →
       epoch-milliseconds float.
     - String that IS an ISO-8601 date/datetime → epoch-milliseconds float.
-    - String that is NOT ISO-8601 → ``OrdinalCategoryCoord`` (resolved against
-      the chart's ordinal domain at render time).
+    - String that is NOT ISO-8601 → ``OrdinalCategoryCoord`` (placed by the
+      renderer through the axis's own scale).
     - Numeric (float, int) → float (data-space value).
 
     The returned value is always a type that :func:`_coord` knows how to
@@ -576,7 +579,7 @@ def _coerce_coord_to_numeric(v: CoordValue) -> float:
     and is not used for rendering when the primitive is present).
 
     ``OrdinalCategoryCoord`` is mapped to 0.0 similarly — its true pixel
-    position is resolved at render time from the ordinal domain.
+    position is resolved at render time through the axis's own scale.
     """
     if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
         return 0.0
@@ -598,9 +601,10 @@ def _coord(v: CoordValue) -> Any:
     Rust renderer's temporal scale — the same units that ``_coerce.py``
     produces for temporal data columns.  Numeric values and coordinate
     wrappers pass through unchanged.
-    ``OrdinalCategoryCoord`` is serialized as ``{"category": value}``; this
-    dict is resolved to a ``{"norm": ...}`` entry by ``_resolve_chart_config``
-    before the annotation list is sent to the Rust renderer.
+    ``OrdinalCategoryCoord`` is serialized as ``{"category": value}`` and
+    crosses to the renderer as is, which places it through the axis's own scale.
+    A plain string is classified as :func:`_classify_raw_coord` does: an ISO-8601
+    date or datetime string is temporal, any other string is a category.
     """
     if isinstance(v, PixelCoord):
         return {"px": _sanitize_coord(v.value)}
@@ -612,11 +616,10 @@ def _coord(v: CoordValue) -> Any:
     if isinstance(v, (_dt.datetime, _dt.date)):
         return temporal_coord_to_epoch_ms(v)
     if isinstance(v, str):
-        # Plain strings reaching _coord() should already have been coerced to
-        # OrdinalCategoryCoord or epoch-ms by _coerce_coord().  Strings that
-        # arrive here are treated as ISO-8601 (legacy path / direct primitive
-        # construction); non-ISO strings raise so the caller is aware.
-        return temporal_coord_to_epoch_ms(v)
+        # A primitive built from a plain string (``fm.annotation.text("b", ...)``) reaches
+        # here unclassified: the same rule the ``annotate_*`` helpers apply decides whether
+        # it is a date or a category.
+        return _coord(_classify_raw_coord(v))
     if _is_datetime64(v):
         # Primitives constructed directly (not through _coerce_coord) can
         # still carry a raw datetime64; it used to reach json.dumps as-is and
