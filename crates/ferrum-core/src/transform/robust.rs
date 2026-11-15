@@ -730,7 +730,15 @@ use pyo3::prelude::*;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_smooth(method="robust").encode(x="x", y="y")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], "y": [1.1, 2.3, 2.9, 4.2, 9.0, 6.1, 6.8, 8.2]})
+/// >>> chart = fm.lmplot(df, x="x", y="y", method="robust")
+/// >>> svg = chart.to_svg()
+///
+/// The same fit as a transform, drawn as a line:
+///
+/// >>> chart = fm.Chart(df).transform(fm.Robust("x", "y")).mark_line().encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Robust")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyRobust(pub(crate) TransformSpec);

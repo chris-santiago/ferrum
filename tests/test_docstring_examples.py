@@ -33,6 +33,7 @@ import contextvars
 import doctest
 import importlib
 import pkgutil
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,7 +45,6 @@ MUST_PASS = [
     "ferrum._coerce",
     "ferrum._layer",
     "ferrum._render",
-    "ferrum._render_prepare",
     "ferrum._shorthand",
     "ferrum._warn",
     "ferrum.annotation.container",
@@ -80,7 +80,7 @@ MUST_PASS = [
 ILLUSTRATIVE_FAILURES = {
     "ferrum": 11,
     "ferrum._configure_mixin": 1,
-    "ferrum._core": 34,
+    "ferrum._core": 29,
     "ferrum._metric_labels": 8,
     "ferrum.annotations": 4,
     "ferrum.chart": 9,
@@ -258,6 +258,94 @@ def test_illustrative_failures_are_only_undefined_names(module_name):
     result = _run_module_doctests(module_name)
     rot = [(where, kind) for where, kind in result.failures if kind != "NameError"]
     assert not rot, f"{module_name}: examples fail with more than an undefined name: {rot}"
+
+
+REGRESSION_FAMILY = ("Glm", "Logistic", "Robust", "Smooth")
+
+
+def _core_class_doctests(class_name: str) -> list[doctest.DocTest]:
+    module = importlib.import_module("ferrum._core")
+    return [
+        test
+        for test in doctest.DocTestFinder().find(module)
+        if test.name == f"ferrum._core.{class_name}" and test.examples
+    ]
+
+
+def _example_sources(class_name: str) -> list[str]:
+    return [
+        example.source.strip()
+        for test in _core_class_doctests(class_name)
+        for example in test.examples
+    ]
+
+
+_CHART_EXAMPLE = re.compile(r"(\w+) = fm\.")
+
+
+def _is_chart_example(source: str) -> bool:
+    return _CHART_EXAMPLE.match(source) is not None
+
+
+def _unrendered_charts(sources: list[str]) -> list[str]:
+    """Return each example that builds a chart (``<name> = fm...``) and is not
+    directly followed by the example that renders that name, so a chart that
+    is built but never drawn (and so never refused at render time) cannot
+    pass."""
+    unrendered = []
+    for source, following in zip(sources, [*sources[1:], ""], strict=True):
+        match = _CHART_EXAMPLE.match(source)
+        if match and not re.fullmatch(rf"\w+ = {match.group(1)}\.to_svg\(\)", following):
+            unrendered.append(source)
+    return unrendered
+
+
+@pytest.mark.parametrize("class_name", REGRESSION_FAMILY)
+def test_regression_family_examples_run_and_render(class_name):
+    """Each regression-family class docstring carries examples that all run
+    as written (no ``NameError``, no refusal), and every chart one builds is
+    rendered by the example that follows it."""
+    result = _run_doctests(_core_class_doctests(class_name))
+    assert result.attempted > 0, f"{class_name} has no docstring examples"
+    assert not result.failures, f"{class_name}: {result.summary()}"
+    sources = _example_sources(class_name)
+    assert any(_is_chart_example(source) for source in sources)
+    assert not _unrendered_charts(sources), f"{class_name}: built but never rendered"
+
+
+@pytest.mark.parametrize(
+    ("class_name", "doors"),
+    [
+        ("Logistic", ('method="logistic"', "fm.Logistic(")),
+        ("Robust", ('method="robust"', "fm.Robust(")),
+    ],
+)
+def test_logistic_and_robust_examples_show_the_doors_that_exist(class_name, doors):
+    """Logistic and Robust are reached through ``lmplot(method=...)`` and
+    ``.transform(...)``, never ``mark_smooth(method=...)``, which refuses them.
+    Each door is its own chart example, rendered by the example after it."""
+    sources = _example_sources(class_name)
+    assert not any("mark_smooth" in source for source in sources)
+    for door in doors:
+        built = [
+            i for i, source in enumerate(sources) if _is_chart_example(source) and door in source
+        ]
+        assert len(built) == 1, f"{class_name}: expected one chart example using {door}"
+        assert not _unrendered_charts(sources[built[0] : built[0] + 2])
+
+
+def test_unrendered_chart_is_detected():
+    """The render check fails when one example's render line is removed."""
+    sources = _example_sources("Logistic")
+    assert not _unrendered_charts(sources)
+    first_render = sources.index("svg = chart.to_svg()")
+    assert _unrendered_charts(sources[:first_render] + sources[first_render + 1 :])
+    last_render = len(sources) - 1 - sources[::-1].index("svg = chart.to_svg()")
+    assert _unrendered_charts(sources[:last_render])
+    renamed = [source.replace("chart", "fig") for source in sources]
+    assert not _unrendered_charts(renamed)
+    renamed[first_render] = "svg = chart.to_svg()"
+    assert _unrendered_charts(renamed)
 
 
 def test_doctests_do_not_leak_process_defaults():

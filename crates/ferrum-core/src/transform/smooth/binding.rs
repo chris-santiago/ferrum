@@ -106,11 +106,15 @@ use super::{SmoothMethod, SmoothOutput, SmoothSpec, DEFAULT_LOESS_BANDWIDTH};
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_smooth(method="lm", ci=0.95).encode(x="x", y="y")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], "y": [1.1, 2.3, 2.9, 4.2, 9.0, 6.1, 6.8, 8.2]})
+/// >>> chart = fm.Chart(df).mark_smooth(method="lm", ci=0.95).encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 ///
 /// LOESS curve with custom bandwidth:
 ///
-/// >>> fm.Chart(df).mark_smooth(method="loess", bandwidth=0.4).encode(x="x", y="y")
+/// >>> chart = fm.Chart(df).mark_smooth(method="loess", bandwidth=0.4).encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Smooth")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySmooth(pub(crate) TransformSpec);

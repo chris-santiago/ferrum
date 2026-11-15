@@ -444,7 +444,15 @@ use pyo3::prelude::*;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_smooth(method="logistic").encode(x="x", y="binary_y")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], "y": [0, 0, 1, 0, 1, 0, 1, 1]})
+/// >>> chart = fm.lmplot(df, x="x", y="y", method="logistic")
+/// >>> svg = chart.to_svg()
+///
+/// The same fit as a transform, drawn as a line:
+///
+/// >>> chart = fm.Chart(df).transform(fm.Logistic("x", "y")).mark_line().encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Logistic")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLogistic(pub(crate) TransformSpec);
