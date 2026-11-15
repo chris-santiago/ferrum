@@ -651,7 +651,9 @@ use crate::transform::core::TransformSpec;
 /// extent : (float, float, float, float), optional
 ///     ``(xmin, xmax, ymin, ymax)`` clipping box; all values must be finite
 ///     and satisfy ``xmin < xmax``, ``ymin < ymax``.
-/// groupby : list[str] or str or None, optional
+/// groupby : list[str] or None, optional
+///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
+///     string, bytes, set or mapping is refused.
 ///     One or more group-key columns. When set, one 2-D KDE surface is
 ///     computed per distinct group combination. Output schema gains one
 ///     column per groupby field after the 6th field.

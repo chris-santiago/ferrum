@@ -906,7 +906,9 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// group : str, optional
 ///     Single group-key column; letter-values computed independently per
 ///     group.
-/// groupby : list of str, default []
+/// groupby : list[str] or None, optional
+///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
+///     string, bytes, set or mapping is refused.
 ///     Further key columns; letter values are computed per combination of
 ///     ``group`` and these, and every output carries one column per field,
 ///     named and typed as its input column. A row with a null on a

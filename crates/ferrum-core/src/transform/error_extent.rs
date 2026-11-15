@@ -287,7 +287,9 @@ use pyo3::prelude::*;
 ///     ``n_boot``); ``"stderr"`` — standard error of the mean;
 ///     ``"stdev"`` — one standard deviation; ``"iqr"`` — inter-quartile
 ///     range.
-/// groupby : list of str, default []
+/// groupby : list[str] or None, optional
+///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
+///     string, bytes, set or mapping is refused.
 ///     Columns to group by before computing statistics.
 /// seed : int, default 0
 ///     RNG seed for the bootstrap (``method="ci"``). Seeds ``ChaCha8Rng``

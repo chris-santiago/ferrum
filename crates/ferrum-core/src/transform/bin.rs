@@ -1239,10 +1239,11 @@ use crate::transform::core::TransformSpec;
 ///     Round bin edges to visually clean numbers.
 /// cumulative : bool, default False
 ///     When True, append a ``cumulative`` count column.
-/// groupby : list[str] or str or None, optional
+/// groupby : list[str] or None, optional
+///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
+///     string, bytes, set or mapping is refused.
 ///     One or more group-key columns; bins computed independently per group.
-///     Pass a single string or a one-element list for single-column groupby
-///     (byte-identical to the old ``Option<String>`` behavior).
+///     Pass a one-element list for a single group-key column.
 /// agg_field : str, optional
 ///     Column to aggregate per bin. Must be set together with ``agg``.
 /// agg : str, optional

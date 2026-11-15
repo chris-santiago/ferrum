@@ -227,7 +227,9 @@ use crate::transform::core::TransformSpec;
 ///     Numeric column to summarize (any integer, unsigned, or float dtype;
 ///     widened to Float64). A non-numeric column raises, naming the
 ///     transform, column, and dtype.
-/// groupby : list of str, optional
+/// groupby : list[str] or None, optional
+///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
+///     string, bytes, set or mapping is refused.
 ///     Columns to group by. Default is ``[]`` (whole-batch summary).
 /// error_fn : {"ci", "stderr", "stdev"}, default "ci"
 ///     Error measure. ``"ci"`` uses a bootstrap confidence interval (see

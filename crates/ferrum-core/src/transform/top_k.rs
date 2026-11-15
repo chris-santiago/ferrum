@@ -408,9 +408,9 @@ impl PyTopK {
         groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
-        // Normalized through the same boundary helper as PyBin/PyKde/PyKde2d/
-        // PySmooth so `str | list[str] | None` is accepted uniformly across
-        // the transform family (quality-review finding, cycle 2).
+        // Read through the one boundary helper every groupby constructor uses:
+        // None or an ordered sequence of column names; a bare string, bytes,
+        // set or mapping is refused.
         let groupby = parse_groupby_pyany("TopK", groupby)?;
         let groupby = (!groupby.is_empty()).then_some(groupby);
         Ok(PyTopK(TransformSpec::TopK(TopKSpec {

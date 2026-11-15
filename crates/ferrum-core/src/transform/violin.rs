@@ -486,7 +486,9 @@ use pyo3::prelude::*;
 ///     Numeric column to estimate (any integer, unsigned, or float dtype;
 ///     widened to Float64). A non-numeric column raises, naming the
 ///     transform, column, and dtype.
-/// groupby : list of str, default []
+/// groupby : list[str] or None, optional
+///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
+///     string, bytes, set or mapping is refused.
 ///     Columns to group by; a separate density curve is produced per group.
 /// bandwidth : float or {"scott", "silverman"}, optional
 ///     Kernel bandwidth. Default is ``"scott"``.

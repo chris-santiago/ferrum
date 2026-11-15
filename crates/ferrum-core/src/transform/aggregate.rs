@@ -552,7 +552,9 @@ pub(crate) fn extract_aggregate_ops(label: &str, ops: &Bound<'_, PyAny>) -> PyRe
 /// ops : list of AggregateOp
 ///     Aggregation operations to perform, each specifying ``field``,
 ///     ``fn_``, and output ``as_``. Must be non-empty.
-/// groupby : list of str, optional
+/// groupby : list[str] or None, optional
+///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
+///     string, bytes, set or mapping is refused.
 ///     Column names to group by. Default is ``[]`` (whole-batch aggregate).
 /// name : str, optional
 ///     Named output label used by ``Reorder(from_=...)`` to look up this
