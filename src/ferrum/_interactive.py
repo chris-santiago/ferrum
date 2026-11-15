@@ -240,11 +240,13 @@ class InteractiveChart:
     ) -> None:
         """Save the underlying chart to a file, dispatching on extension/format.
 
-        Routes through :func:`ferrum.display.save_chart` — the single
-        save-format router shared with ``Chart.save`` and the composition
-        ``save`` methods — so the path extension is honored (``.html`` /
-        ``.svg`` / ``.png`` / ``.json`` / ``.pdf``) rather than always writing
-        HTML.  The interactive ``toolbar`` flag captured at construction time
+        Routes through the save-format router shared with ``Chart.save`` and
+        the composition ``save`` methods, so the path extension is honored
+        (``.html`` / ``.svg`` / ``.png`` / ``.json`` / ``.pdf``).  The HTML
+        and JSON outputs are built from the scene rendered at construction;
+        SVG, PNG and PDF render their own output at call time, so a change to the
+        chart's data or the default theme after construction shows in those
+        three and not in the HTML and JSON.  The interactive ``toolbar`` flag captured at construction time
         is carried into HTML output.
 
         Parameters
@@ -273,11 +275,12 @@ class InteractiveChart:
             If the path extension (or *format*) is not a recognised export
             format.
         """
-        from ferrum.display import save_chart
+        from ferrum.display import _save_chart
 
-        save_chart(
+        _save_chart(
             self._chart,
             path,
+            scene=(self._scene_json, self._packed_data),
             format=format,
             embed_wasm=embed_wasm,
             csp_nonce=csp_nonce,
@@ -297,10 +300,12 @@ class InteractiveChart:
         write it to disk.  The returned string is byte-identical to what
         ``save(path)`` writes for an ``.html`` destination.
 
-        Routes through :func:`ferrum.display.html_string` — the same
-        HTML-assembly path used by ``Chart.to_html`` and the composition
-        ``to_html`` methods — so HTML assembly and tab-title resolution stay
-        identical across every entry point.  It does **not** construct a
+        Builds from the scene rendered at construction, through the same
+        HTML assembly :func:`ferrum.display.html_string` uses for
+        ``Chart.to_html`` and the composition ``to_html`` methods, so the
+        bytes and the tab title match those entry points and no second render
+        runs.  The document shows the chart as it was when this object was
+        constructed.  It does **not** construct a
         second ``InteractiveChart`` widget, so it works in environments
         without ``anywidget`` installed.  The interactive ``toolbar`` flag
         captured at construction time is carried into the output, mirroring
@@ -322,10 +327,11 @@ class InteractiveChart:
         str
             A complete, self-contained interactive HTML document.
         """
-        from ferrum.display import html_string
+        from ferrum.display import _html_from_scene
 
-        return html_string(
+        return _html_from_scene(
             self._chart,
+            (self._scene_json, self._packed_data),
             embed_wasm=embed_wasm,
             csp_nonce=csp_nonce,
             toolbar=self._toolbar,

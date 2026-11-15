@@ -802,11 +802,10 @@ def test_the_view_storage_warning_names_the_users_frame(route):
 
 @pytest.mark.parametrize(
     ("route", "renders"),
-    [("static", 1), ("interactive", 2)],
+    [("static", 1), ("interactive", 1)],
 )
 def test_an_extension_with_view_storage_names_the_wrapper_it_drops(route, renders):
-    # The interactive route reads the chart's data in two passes, so the ingest of one
-    # column runs twice there; the default warning filter shows the repeat once.
+    # Each route renders once, so the ingest of the column runs once.
     assert _warnings_of("view_storage", route) == [("UserWarning", _VIEW_STORAGE_DROPPED)] * renders
 
 

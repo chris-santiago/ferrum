@@ -4993,15 +4993,14 @@ def _scene_legend_labels(scene_json: str) -> list[str]:
 def test_the_interactive_route_reports_an_emptied_level_as_a_static_render_does(
     door: _StatisticDoor,
 ):
-    """``.interactive()`` renders a static fallback and the scene, so the one message appears once
-    per render (twice for the export, once for the scene), and the legend of the scene keeps the
-    emptied level."""
+    """``.interactive()`` renders once and the export reuses that scene, so the one message appears
+    once on the export as on the scene, and the legend of the scene keeps the emptied level."""
     chart = door.build(_level_frame(_OFF_SIDE_LEVEL))
     _, static = _render_capturing(chart.to_svg)
     _, exported = _render_capturing(lambda: chart.interactive().to_html())
     scene, from_scene = _render_capturing(lambda: chart.interactive().scene_json)
     assert static == [_log_message("x", "v", 3)]
-    assert exported == static * 2
+    assert exported == static
     assert from_scene == static
     assert {"a", "b", "c"} <= set(_scene_legend_labels(scene))
 

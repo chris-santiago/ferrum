@@ -152,11 +152,11 @@ def _assert_route_matches_static(
     *,
     draws: bool = True,
 ) -> None:
-    """The interactive route warns the static route's list once per step and builds the scene the
+    """The interactive route warns the static route's list once and builds the scene the
     kept rows build, with no ``null`` label."""
     static = _render_capturing(build(df).to_svg)[1]
     shown, scene = _route(build(df))
-    assert shown == static + static
+    assert shown == static
     kept_shown, kept_scene = _route(build(kept))
     assert kept_shown == []
     assert scene == kept_scene
@@ -350,7 +350,7 @@ def test_a_catplot_whose_every_category_is_null_gives_the_interactive_route_the_
     chart = _catplot(kind)(_frame(c=_ALL))
     static = _render_capturing(chart.to_svg)[1]
     shown, scene = _route(chart)
-    assert shown == static + static
+    assert shown == static
     assert _scene_marks(scene) == 0
     assert '"null"' not in scene
 
@@ -673,7 +673,7 @@ def test_a_pie_drops_its_null_slice_on_the_interactive_route_too():
     kept = fm.Chart(pl.DataFrame({"n": [3.0, 2.0], "h": ["x", "y"]}))
     kept_chart = kept.mark_arc().encode(theta="n", color="h").coord(fm.CoordPolar())
     kept_shown, kept_scene = _route(kept_chart)
-    assert shown == [_null_key_dropped_message("mark_arc", 1, "h")] * 2
+    assert shown == [_null_key_dropped_message("mark_arc", 1, "h")]
     assert kept_shown == []
     assert _scene_marks(scene) > 0
     assert scene == kept_scene
@@ -684,7 +684,7 @@ def test_an_all_null_pie_gives_the_interactive_route_the_static_list():
     static = _render_capturing(chart.to_svg)[1]
     shown, scene = _route(chart)
     assert static == [_all_keys_null_message("mark_arc", "h"), _NO_ROWS_TO_DRAW]
-    assert shown == static + static
+    assert shown == static
     assert _scene_marks(scene) == 0
 
 
@@ -1082,7 +1082,7 @@ def test_a_composition_gives_the_interactive_route_the_static_list(door: str):
     df = _frame(c=_SOME)
     shown, scene = _route(build(df))
     static = _render_capturing(build(df).to_svg)[1]
-    assert shown == static + static == [_NULL_C, _NULL_C]
+    assert shown == static == [_NULL_C]
     assert '"null"' not in scene
 
 
@@ -1286,9 +1286,9 @@ def test_a_layer_keyed_on_another_field_gives_the_interactive_route_the_static_l
     static = _render_capturing(chart.to_svg)[1]
     shown, scene = _route(chart)
     assert static == [_LINE_DROP]
-    assert shown == static + static
+    assert shown == static
     neutral_shown, neutral_scene = _route(_LAYERED_DOORS[door](_neutral(df)))
-    assert neutral_shown == [_NEUTRAL_CELL] * 2
+    assert neutral_shown == [_NEUTRAL_CELL]
     assert _scene_marks(scene) > 0
     assert scene == neutral_scene
     assert '"null"' not in scene
@@ -1760,7 +1760,7 @@ def test_an_annotation_on_a_band_gives_the_interactive_route_the_static_scene(ki
     static = _render_capturing(_annotated(kind, dirty).to_svg)[1]
     shown, scene = _route(_annotated(kind, dirty))
     clean_shown, clean_scene = _route(_annotated(kind, clean))
-    assert shown == static + static == [_null_key_dropped_message("mark_point", 1, "c")] * 2
+    assert shown == static == [_null_key_dropped_message("mark_point", 1, "c")]
     assert clean_shown == []
     assert scene == clean_scene
 
@@ -2050,7 +2050,7 @@ def test_a_clustermap_gives_the_interactive_route_the_drawn_rows():
     shown, scene = _route(chart)
     clean_shown, clean_scene = _route(fm.clustermap(clean_rows))
     assert clean_shown == []
-    assert shown == static + static == [_CLUSTER_DROP] * 6
+    assert shown == static == [_CLUSTER_DROP] * 3
     assert scene == clean_scene
 
 
@@ -2081,7 +2081,7 @@ def test_a_clustermap_whose_every_row_label_is_null_says_so_per_step_and_draws_i
     assert shown == expected
     assert mark_layer(svg) == ""
     route_shown, scene = _route(chart)
-    assert route_shown == expected + expected
+    assert route_shown == expected
     assert _scene_marks(scene) == 0
 
 

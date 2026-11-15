@@ -3395,15 +3395,15 @@ def test_a_boxen_category_a_log_axis_cuts_is_reported_by_the_log_warning_alone()
 def test_an_emptied_histogram_level_and_boxen_category_reach_the_interactive_route(
     build: Callable[[], fm.Chart],
 ):
-    """The interactive export renders a static fallback and the scene, so an emptied unit is named
-    once per layer per render, twice what a static render names; the scene it ships holds no NaN
-    or infinity, since the placeholder row draws nothing."""
+    """The interactive export renders once, so an emptied unit is named as often as a static
+    render names it; the scene it ships holds no NaN or infinity, since the placeholder row draws
+    nothing."""
     chart = build()
     _, static = _render_capturing(chart.to_svg)
     _, interactive = _render_capturing(lambda: chart.interactive().to_html())
     scene, _ = _render_capturing(lambda: chart.interactive().scene_json)
     assert static
-    assert interactive == static * 2
+    assert interactive == static
     assert "NaN" not in scene and "Infinity" not in scene
 
 

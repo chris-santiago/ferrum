@@ -347,9 +347,9 @@ def test_a_faceted_boxen_whose_every_category_is_null_names_it_once_and_draws_ev
 
 
 def test_a_boxen_whose_every_category_is_null_gives_the_interactive_route_the_static_warnings():
-    """The interactive route renders at each of its two steps (``.interactive()`` and
-    ``to_html()``), so its warnings are the static route's, once per step, and the scene holds no
-    mark and no ``null`` label."""
+    """The interactive route renders once, at ``.interactive()``, and ``to_html()`` reuses that
+    scene, so its warnings are the static route's once, and the scene holds no mark and no
+    ``null`` label."""
     chart = _CATEGORY_DOORS["mark"](_frame(c=None))
     static = _render_capturing(chart.to_svg)[1]
     assert static == [_ALL_NULL_C, _NO_ROWS_TO_DRAW]
@@ -360,7 +360,7 @@ def test_a_boxen_whose_every_category_is_null_gives_the_interactive_route_the_st
         scene["json"] = interactive.scene_json
         return interactive.to_html()
 
-    assert _render_capturing(build)[1] == static + static
+    assert _render_capturing(build)[1] == static
     panels = json.loads(scene["json"])["panels"]
     assert sum(len(b["nodes"]) for p in panels for b in p["marks"]) == 0
     assert '"null"' not in scene["json"]

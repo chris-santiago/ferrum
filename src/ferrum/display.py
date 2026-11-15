@@ -22,10 +22,10 @@ def save_chart(
 ) -> None:
     """Save a chart-like object to disk, dispatching on extension or ``format``.
 
-    This is the single save-format router for the whole library: ``Chart``,
-    every composition wrapper (``HConcatChart`` / ``VConcatChart`` /
-    ``JointChart`` / ``LayerChart`` / ...), and ``InteractiveChart`` all route
-    their ``.save()`` through here so there is one format table and one HTML /
+    This is the single save-format router for the whole library: ``Chart``
+    and every composition wrapper (``HConcatChart`` / ``VConcatChart`` /
+    ``JointChart`` / ``LayerChart`` / ...) route their ``.save()`` through here,
+    and ``InteractiveChart.save`` shares the same router body, so there is one format table and one HTML /
     title resolution path.
 
     Parameters
@@ -72,6 +72,35 @@ def save_chart(
     >>> save_chart(chart, "scatter.pdf")
     >>> save_chart(chart, "scatter.out", format="svg")
     """
+    _save_chart(
+        chart,
+        path,
+        scene=None,
+        format=format,
+        embed_wasm=embed_wasm,
+        csp_nonce=csp_nonce,
+        scale=scale,
+        toolbar=toolbar,
+    )
+
+
+def _save_chart(
+    chart: SupportsRender,
+    path: Union[str, Path],
+    *,
+    scene: tuple[str, bytes] | None,
+    format: str | None,
+    embed_wasm: bool,
+    csp_nonce: str | None,
+    scale: float,
+    toolbar: bool,
+) -> None:
+    """Write ``chart`` to ``path`` in the format its extension or ``format`` names.
+
+    ``scene`` is an already rendered ``(scene_json, packed_data)`` pair for the HTML
+    and JSON formats; ``None`` renders one. SVG, PNG and PDF always render their own
+    output kind.
+    """
     path = Path(path)
     fmt = format or path.suffix.lstrip(".").lower()
     if fmt == "svg":
@@ -81,8 +110,9 @@ def save_chart(
     elif fmt == "html":
         from ferrum._html import _copy_wasm_sidecar
 
-        html = html_string(
+        html = _html_from_scene(
             chart,
+            scene if scene is not None else _render_scene_json(chart),
             embed_wasm=embed_wasm,
             toolbar=toolbar,
             csp_nonce=csp_nonce,
@@ -91,7 +121,7 @@ def save_chart(
         if not embed_wasm:
             _copy_wasm_sidecar(path)
     elif fmt == "json":
-        scene_json, _ = _render_scene_json(chart)
+        scene_json, _ = scene if scene is not None else _render_scene_json(chart)
         path.write_text(scene_json)
     elif fmt == "pdf":
         save_chart_svg(chart.to_svg(), str(path), scale=scale)
@@ -117,10 +147,11 @@ def html_string(
     browser-tab ``<title>`` via :func:`figure_title_text`, and calls
     :func:`ferrum._html.assemble_html`.
 
-    ``Chart.to_html``, ``_CompositeBase.to_html``, :func:`save_chart`'s HTML
-    branch, and ``InteractiveChart.save`` all route through here, so the HTML
-    output and tab title are identical regardless of which entry point a caller
-    reaches.  It never constructs a live widget, so it works in environments
+    ``Chart.to_html``, ``_CompositeBase.to_html`` and :func:`save_chart`'s HTML
+    branch route through here, and ``InteractiveChart`` builds its HTML through
+    the same :func:`_html_from_scene` assembly from the scene it rendered at
+    construction, so the HTML output and tab title are identical regardless of
+    which entry point a caller reaches.  It never constructs a live widget, so it works in environments
     without ``anywidget`` installed.
 
     Parameters
@@ -137,9 +168,32 @@ def html_string(
         When provided, both the ``<style>`` and ``<script type="module">`` tags
         receive a ``nonce="..."`` attribute for strict Content-Security-Policy.
     """
+    return _html_from_scene(
+        chart_like,
+        _render_scene_json(chart_like),
+        embed_wasm=embed_wasm,
+        toolbar=toolbar,
+        csp_nonce=csp_nonce,
+    )
+
+
+def _html_from_scene(
+    chart_like: SupportsRender,
+    scene: tuple[str, bytes],
+    *,
+    embed_wasm: bool,
+    toolbar: bool,
+    csp_nonce: str | None,
+) -> str:
+    """Assemble the HTML document for ``chart_like`` from an already rendered scene.
+
+    ``scene`` is the ``(scene_json, packed_data)`` pair the chart rendered to; the
+    title still resolves from ``chart_like``.  Rendering stays with the caller, so a
+    holder of a scene (``InteractiveChart``) builds HTML without rendering again.
+    """
     from ferrum._html import assemble_html
 
-    scene_json, packed_data = _render_scene_json(chart_like)
+    scene_json, packed_data = scene
     return assemble_html(
         scene_json,
         packed_data=packed_data,

@@ -147,12 +147,13 @@ def test_lazyframe_is_collected_once_per_plus(monkeypatch, shared):
 
 
 def test_lazyframe_is_collected_once_per_interactive_render(monkeypatch):
-    # `.interactive()` renders the scene once on construction and `to_html`
-    # renders it again; each render collects once.
+    # `.interactive()` renders the scene once on construction and collects once;
+    # `to_html` builds from that scene and collects nothing.
     lazy = _frame().lazy()
     chart = fm.Chart(lazy).mark_point().encode(x="x", y="y", color="g")
-    view = _quiet(lambda c: c.interactive(), chart)
     counter = _CollectCounter(monkeypatch, lazy)
+    view = _quiet(lambda c: c.interactive(), chart)
+    assert counter.calls == 1
     view.to_html()
     assert counter.calls == 1
 
