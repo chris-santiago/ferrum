@@ -722,7 +722,7 @@ use pyo3::prelude::*;
 ///     instead of the fitted values.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or mapping is refused.
+///     string, bytes, set or a mapping other than a dict is refused.
 ///     When set, partition the input by these column(s) and refit
 ///     independently per group, appending the group-key column(s) (at
 ///     their original dtype) to the output. Mirrors ``Smooth(groupby=)``.

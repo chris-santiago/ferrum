@@ -410,7 +410,7 @@ impl PyTopK {
     ) -> PyResult<Self> {
         // Read through the one boundary helper every groupby constructor uses:
         // None or an ordered sequence of column names; a bare string, bytes,
-        // set or mapping is refused.
+        // set or a mapping other than a dict is refused.
         let groupby = parse_groupby_pyany("TopK", groupby)?;
         let groupby = (!groupby.is_empty()).then_some(groupby);
         Ok(PyTopK(TransformSpec::TopK(TopKSpec {

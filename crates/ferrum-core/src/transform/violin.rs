@@ -488,7 +488,7 @@ use pyo3::prelude::*;
 ///     transform, column, and dtype.
 /// groupby : list[str] or None, optional
 ///     An ordered sequence of column names (list, tuple, dict view) or None. A bare
-///     string, bytes, set or mapping is refused.
+///     string, bytes, set or a mapping other than a dict is refused.
 ///     Columns to group by; a separate density curve is produced per group.
 /// bandwidth : float or {"scott", "silverman"}, optional
 ///     Kernel bandwidth. Default is ``"scott"``.
