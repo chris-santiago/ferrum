@@ -487,10 +487,10 @@ def test_a_transform_after_attaching_to_a_named_only_composite_runs_as_it_would_
     assert late.to_svg() == early.to_svg()
 
 
-def test_an_encode_after_attaching_a_rug_moves_it():
-    """Rejects resolved binding: the rug takes the later written ``x``."""
+def test_an_encode_after_attaching_a_rug_rebuilds_the_histogram_and_moves_the_rug():
+    """The histogram bins the later written ``x`` and the rug takes it, as written before ``.layer()``."""
     chart = H().layer(fm.Layer(mark="tick")).encode(x="y")
-    oracle = H().layer(tick(x="y"))
+    oracle = H().encode(x="y").layer(fm.Layer(mark="tick"))
     assert mark_layer(chart.to_svg()) == mark_layer(oracle.to_svg())
 
 

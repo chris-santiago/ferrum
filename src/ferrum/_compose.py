@@ -58,6 +58,7 @@ from ferrum._layer_transforms import (
     _transforms_to_json_list_named,
     _with_statistics_marker,
 )
+from ferrum.encoding._aliases import _channel_field
 from ferrum.encoding.base import _FORMAT_TYPE_ALIASES, ChannelBase
 
 #: The key an operand's rows are published under, after its own steps and the
@@ -68,6 +69,10 @@ ROWS_KEY = "_rows"
 #: A pass-through step: the chain of an operand branch over the composition's
 #: own frame with no step of its own.
 _PASS_THROUGH = {"type": "identity"}
+
+#: The channels a statistic reads its columns from, and so the ones whose
+#: binding a rebuild records as an input (:attr:`_CompositeSource.inputs`).
+_INPUT_CHANNELS = ("x", "y")
 
 
 def _memoized(rebuild: Callable[..., Any]) -> Callable[..., Any]:
@@ -124,17 +129,28 @@ class _CompositeSource:
         The layers the build drew, before any merge rewrote them.
     steps :
         The statistics the build lowered, by identity in the chain.
+    inputs :
+        For each positional channel (:data:`_INPUT_CHANNELS`),
+        ``(channel, input, built)``: the binding the statistics read
+        (``None`` when the chart left the channel unbound), and the binding
+        the build left on the chart's own encoding (``None`` when it left
+        none). A binding on the chart that is not the *built*
+        object and names another field than the *input* does was written
+        after the build (:func:`written_inputs`).
     rebuild :
-        ``rebuild(own, parent, facet)``: the record of the same build under
-        own grouping bindings *own* and parent grouping bindings *parent*,
-        within *facet*'s panels.
+        ``rebuild(own, parent, facet, written)``: the record of the same build
+        under own grouping bindings *own*, parent grouping bindings *parent*
+        and the positional bindings *written* after the build (a
+        ``{channel: binding}`` mapping, :func:`written_inputs`), within
+        *facet*'s panels.
     """
 
     own: tuple
     grouping: tuple
     layers: tuple
     steps: tuple
-    rebuild: Callable[[dict, dict, Any], "_CompositeSource"]
+    inputs: tuple
+    rebuild: Callable[[dict, dict, Any, dict], "_CompositeSource"]
 
 
 def composite_source(pre: Any, resolved: Any, parent: dict | None = None) -> _CompositeSource:
@@ -142,18 +158,19 @@ def composite_source(pre: Any, resolved: Any, parent: dict | None = None) -> _Co
 
     Its rebuild resolves *pre*'s pending mark again
     (:func:`ferrum._desugar._resolve_pending_impl`, the one place a
-    composite's statistics are built), *pre*'s grouping bindings replaced by
-    the new own ones. The rebuild is memoized (:func:`_memoized`), so
-    rendering the same chart more than once under the same grouping resolves
-    the mark again only the first time, not once per render.
+    composite's statistics are built), *pre*'s grouping and positional
+    bindings replaced by the new ones. The rebuild is memoized
+    (:func:`_memoized`), so rendering the same chart more than once under the
+    same grouping and inputs resolves the mark again only the first time, not
+    once per render.
     """
     from ferrum._desugar import _resolve_pending_impl
     from ferrum.composition import _expand_layers
 
-    def rebuild(own: dict, parent: dict, facet: Any) -> _CompositeSource:
-        chart = _with_grouping_bindings(pre, own)
+    def rebuild(own: dict, parent: dict, facet: Any, written: dict) -> _CompositeSource:
+        chart = _with_statistic_bindings(pre, own, written)
         return composite_source(
-            pre, _resolve_pending_impl(chart, parent=parent, facet=facet), parent
+            chart, _resolve_pending_impl(chart, parent=parent, facet=facet), parent
         )
 
     rebuild = _memoized(rebuild)
@@ -165,12 +182,16 @@ def composite_source(pre: Any, resolved: Any, parent: dict | None = None) -> _Co
         grouping=tuple((parent or {}).items()),
         layers=tuple(_expand_layers(resolved)[0]),
         steps=tuple(lowered[before:]),
+        inputs=tuple(
+            (channel, pre._encoding.get(channel), resolved._encoding.get(channel))
+            for channel in _INPUT_CHANNELS
+        ),
         rebuild=rebuild,
     )
 
 
-def _with_grouping_bindings(chart: Any, own: dict) -> Any:
-    """A clone of *chart* whose grouping bindings are *own*, its other bindings unchanged."""
+def _with_statistic_bindings(chart: Any, own: dict, written: dict) -> Any:
+    """A clone of *chart* whose grouping bindings are *own* and positional bindings *written*, its others unchanged."""
     new = chart._clone()
     new._encoding = {
         **{
@@ -179,8 +200,51 @@ def _with_grouping_bindings(chart: Any, own: dict) -> Any:
             if channel not in COMPOSITE_GROUPING_CHANNELS
         },
         **own,
+        **written,
     }
     return new
+
+
+def written_inputs(chart: Any, record: _CompositeSource) -> dict:
+    """The positional bindings the caller wrote on *chart* after *record*'s build, as ``{channel: binding}``.
+
+    On a chart of one operand (attached data-less layers included), a live
+    x/y binding is a written input when it is not the object the build left
+    there and names a field other than the field the statistics read: a
+    binding restating the same column, one without a field, or the build's
+    own binding with another title is not (the chart keeps drawing what it
+    draws). A composition's x/y is never one:
+    it is a parent binding, and each operand's layers bind their own. A
+    chart carrying a regression figure's post-build record reads its
+    verdict from that record (:func:`_post_build_written_inputs`).
+    """
+    if chart._operands:
+        return {}
+    if chart._post_build_positional is not None:
+        return _post_build_written_inputs(chart)
+    written = {}
+    for channel, input_binding, built in record.inputs:
+        live = chart._encoding.get(channel)
+        if live is None or live is built:
+            continue
+        field = _channel_field(live)
+        if field is None or field == _channel_field(input_binding):
+            continue
+        if built is not None and live == built._with_options(title=live.option("title")):
+            # The build's own binding retitled (``Chart.labs``), not another column.
+            continue
+        written[channel] = live
+    return written
+
+
+def _post_build_written_inputs(chart: Any) -> dict:
+    """The written inputs of a chart carrying a regression figure's post-build record.
+
+    The record's classifier owns what a later regression binding means
+    (:func:`apply_post_build_positional`); until it hands a binding over as
+    an input, such a chart has none.
+    """
+    return {}
 
 
 @dataclass(frozen=True)
@@ -640,9 +704,11 @@ def _figure_source(
         layers = tuple(layer for layer in chart._layers or [] if layer.operand == operand)
         steps = chart._operands[operand].statistics
 
-    def rebuild(own: dict, parent: dict, facet: Any) -> _CompositeSource:
+    def rebuild(own: dict, parent: dict, facet: Any, written: dict) -> _CompositeSource:
         # A figure takes no facet: its statistics run inside each panel's
-        # rows, as they do when the caller facets the figure itself.
+        # rows, as they do when the caller facets the figure itself. It
+        # records no positional inputs (`inputs=()` below), so *written* is
+        # always empty here.
         return _figure_source(rebuilt(own, parent), operand, own, tuple(parent.items()), rebuilt)
 
     return _CompositeSource(
@@ -650,6 +716,7 @@ def _figure_source(
         grouping=grouping,
         layers=layers,
         steps=tuple(steps),
+        inputs=(),
         rebuild=rebuild,
     )
 
@@ -756,7 +823,7 @@ def regrouped(chart: Any) -> Any:
         parent = tuple(_over(dict(op.carried), shared).items())
         if parent == op.source.grouping:
             continue
-        source = op.source.rebuild(dict(op.source.own), dict(parent), chart._facet)
+        source = op.source.rebuild(dict(op.source.own), dict(parent), chart._facet, {})
         operands[i] = replace(
             op,
             statistics=_with_run_replaced(op.statistics, op.source.steps, source.steps),
@@ -781,22 +848,56 @@ def _regrouped_alone(chart: Any) -> Any:
     if record is None:
         return chart
     own = _grouping_bindings(chart._encoding)
-    if own == dict(record.own):
+    written = written_inputs(chart, record)
+    if own == dict(record.own) and not written:
         return chart
-    source = record.rebuild(own, {}, chart._facet)
+    source = record.rebuild(own, {}, chart._facet, written)
     new = chart._clone()
     new._transforms = list(_with_run_replaced(tuple(chart._transforms), record.steps, source.steps))
     new._composite_source = source
+    # The chart's own x/y on a channel it left to the build, or took from the
+    # caller after it, are the rebuilt build's: the next resolution reads
+    # them against the rebuilt record's own, and a binding that is not the
+    # build's own object reads as the caller's.
+    left = {channel: binding for channel, _, binding in record.inputs}
+    for channel, _, binding in source.inputs:
+        if channel in written or (
+            new._encoding.get(channel) is not None and new._encoding[channel] is left.get(channel)
+        ):
+            if binding is None:
+                new._encoding.pop(channel, None)
+            else:
+                new._encoding[channel] = binding
     if chart._layers is not None:
         new._layers = _redrawn_layers(
             list(chart._layers), list(range(len(chart._layers))), record, source
         )
         return new
-    # A flat chart draws its one mark from its own fields, which the rebuild
-    # may change only in the bindings the caller already wrote on it.
+    # A flat chart draws its one mark from its own fields, which a grouping
+    # rebuild may change only in the bindings the caller already wrote on it.
     if len(source.layers) != 1 or replace(record.layers[0], encoding={}) != replace(
         source.layers[0], encoding={}
     ):
+        if written:
+            # A binding on another column can change what the mark is (a
+            # density over a second variable draws polygons, not an area):
+            # the chart draws the layers the rebuild draws.
+            new._layers = list(source.layers)
+            new._mark = None
+            new._mark_kwargs = {}
+            # The style the caller gave the flat mark after it resolved goes
+            # through the door that styled it, held to the layers now drawn.
+            built = record.layers[0].mark_kwargs or {}
+            style = {
+                key: value
+                for key, value in (chart._mark_kwargs or {}).items()
+                if key not in built or built[key] != value
+            }
+            if style:
+                from ferrum._overrides import _apply_mark_overrides
+
+                return _apply_mark_overrides(new, style, entry=chart._entry or "mark")
+            return new
         raise RuntimeError(
             "a chart drew a different mark when its statistics were grouped by a "
             "binding made after it was built; it cannot be rebuilt"

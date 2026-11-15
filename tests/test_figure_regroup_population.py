@@ -717,6 +717,104 @@ def test_every_composite_mark_regroups_through_every_door(door: str, case: str) 
     _assert_renders(build, door, mark_name)
 
 
+# ── Another column bound after the mark resolved ───────────────────────────
+#
+# The statistic a composite mark builds reads the x/y it held when it
+# resolved. A later x/y binding to another column of the same kind draws what
+# the same binding written before the resolution draws: the twin comparison
+# below, over every composite mark whose build binds a positional channel,
+# with a negative control that disables the reader of written inputs.
+
+#: Another column of ``_df()`` of the same kind (numeric or categorical).
+_OTHER_COLUMN = {"v": "w", "w": "v", "g": "h", "h": "g"}
+
+
+def _rebound_channels(build: Callable[[], Any]) -> dict[str, Any]:
+    """Each of the build's x/y bound to another column of its data, as an ``.encode()`` mapping."""
+    chart = build()
+    out: dict[str, Any] = {}
+    for channel in ("x", "y"):
+        binding = chart._encoding.get(channel)
+        field = getattr(binding, "field", None)
+        if field in _OTHER_COLUMN:
+            out[channel] = _OTHER_COLUMN[field]
+    return out
+
+
+def _marks_binding_a_positional_channel() -> list[str]:
+    return sorted(case for case, (_, build) in _MARK_CASES.items() if _rebound_channels(build))
+
+
+def test_the_marks_binding_no_positional_channel_are_the_diagnostics() -> None:
+    """A mark whose build binds neither x nor y has no positional input to rebuild on."""
+    unbound = sorted(
+        case for case in _MARK_CASES if case not in _marks_binding_a_positional_channel()
+    )
+    assert unbound == sorted(_DIAGNOSTIC_MARK_BUILDS)
+
+
+def _twin_svgs(case: str) -> tuple[str, str]:
+    _, build = _MARK_CASES[case]
+    later = _rebound_channels(build)
+    door = build().encode(**later).layer()
+    late = build().layer().encode(**later)
+    return late.to_svg(), door.to_svg()
+
+
+@pytest.mark.parametrize("case", _marks_binding_a_positional_channel())
+def test_every_composite_mark_rebuilds_on_another_column_after_layer(case: str) -> None:
+    late, door = _twin_svgs(case)
+    assert late == door
+
+
+def _marks_leaving_a_positional_channel_unbound() -> list[str]:
+    return sorted(
+        case
+        for case, (_, build) in _MARK_CASES.items()
+        if case not in _DIAGNOSTIC_MARK_BUILDS
+        and len(_rebound_channels(build)) < 2
+        and any(build()._encoding.get(c) is None for c in ("x", "y"))
+    )
+
+
+def _outcome(build: Callable[[], Any]) -> tuple:
+    """The SVG and ordered warnings of ``build().to_svg()``, or the refusal's type and text."""
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            result: tuple = ("svg", build().to_svg())
+        except Exception as err:  # noqa: BLE001 - the refusal is part of the outcome
+            result = ("refused", type(err), str(err))
+    return (*result, [str(w.message) for w in caught])
+
+
+@pytest.mark.parametrize("case", _marks_leaving_a_positional_channel_unbound())
+def test_every_composite_mark_takes_a_column_on_an_unbound_channel_as_its_door_does(
+    case: str,
+) -> None:
+    """A later x/y on a channel the build left unbound draws, or is refused, as the same binding written first."""
+    _, build = _MARK_CASES[case]
+    unbound = {c: "w" for c in ("x", "y") if build()._encoding.get(c) is None}
+    late = _outcome(lambda: build().layer().encode(**unbound))
+    door = _outcome(lambda: build().encode(**unbound).layer())
+    assert late == door
+
+
+def test_the_marks_leaving_a_channel_unbound_include_the_one_d_statistics() -> None:
+    cases = _marks_leaving_a_positional_channel_unbound()
+    assert {"mark_density", "mark_histogram", "mark_qq"} <= set(cases)
+
+
+@pytest.mark.parametrize("case", ["mark_smooth", "mark_histogram", "mark_boxplot"])
+def test_the_population_twin_differs_when_the_rebuild_is_disabled(monkeypatch, case: str) -> None:
+    """Control: with written inputs ignored the twin comparison fails, so it is not vacuous."""
+    monkeypatch.setattr(ferrum._compose, "written_inputs", lambda chart, record: {})
+    late, door = _twin_svgs(case)
+    assert late != door
+
+
 # ── The guards stay internal-invariant RuntimeErrors ────────────────────────
 
 

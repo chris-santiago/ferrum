@@ -197,3 +197,51 @@ def test_a_figure_composed_of_two_fit_operands_shares_one_memo_across_them(entry
         grouped.to_svg()
         grouped.to_json()
     assert entry_calls == ["two_fit_figure", "two_fit_figure"]
+
+
+def _resolved_smooth():
+    return (
+        fm.Chart(_DF)
+        .mark_smooth(ci=None)
+        .encode(x="x", y="y")
+        .layer(fm.Layer(mark="tick", encoding={"x": "x"}))
+    )
+
+
+def test_a_composite_mark_rebuilt_on_a_later_binding_resolves_once_per_input(resolve_calls) -> None:
+    """``.layer(...).encode(y='y2')`` resolves the fit again once, however many times it renders."""
+    chart = _resolved_smooth()
+    assert resolve_calls["n"] == 1
+
+    rebound = chart.encode(y="y2")
+    first = rebound.to_svg()
+    assert resolve_calls["n"] == 2
+    assert rebound.to_svg() == first
+    assert rebound.to_json()
+    assert rebound.interactive().to_html()
+    assert resolve_calls["n"] == 2
+
+
+def test_a_second_distinct_input_costs_exactly_one_more_resolution(resolve_calls) -> None:
+    chart = _resolved_smooth()
+    chart.encode(y="y2").to_svg()
+    assert resolve_calls["n"] == 2
+
+    chart.encode(x="y2").to_svg()
+    chart.encode(x="y2").to_svg()
+    assert resolve_calls["n"] == 3
+
+
+def test_a_grouping_and_an_input_rebuild_in_one_resolution(resolve_calls) -> None:
+    """``.encode(y=, color=)`` after ``.layer()`` is one rebuild, not one per kind of change."""
+    chart = _resolved_smooth()
+    both = chart.encode(y="y2", color="g")
+    both.to_svg()
+    both.to_svg()
+    assert resolve_calls["n"] == 2
+
+
+def test_a_same_column_restatement_does_not_resolve_again(resolve_calls) -> None:
+    chart = _resolved_smooth()
+    chart.encode(y=fm.Y("y", title="T")).to_svg()
+    assert resolve_calls["n"] == 1

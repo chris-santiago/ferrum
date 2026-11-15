@@ -1386,6 +1386,15 @@ class Chart(
         operand under its own grouping bindings, a composition's operands
         under the composition's (:func:`ferrum._compose.regrouped`).
 
+        The same rebuild reads the positional bindings written after the
+        build (:func:`ferrum._compose.written_inputs`). On a chart of one
+        operand, a later x/y binding that names another field than the one
+        the statistics read builds them again from it, in one rebuild with
+        any grouping change, as the same binding written before the
+        resolution does, and the chart's own x/y on that channel become the
+        rebuilt build's. A same-column restatement and a binding on a
+        composition leave the build as it is.
+
         A regression figure's x/y binding carries its own, separate
         record (``_post_build_positional``): applied first
         (:func:`ferrum._compose.apply_post_build_positional`), before the
