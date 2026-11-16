@@ -138,22 +138,28 @@ def test_overlay_x_reads_the_encode_x(two_col_df, overlay):
 @pytest.mark.parametrize("overlay", ["kde", "rug"])
 @pytest.mark.parametrize("door", ["encode", "posthoc"])
 def test_an_overlaid_ecdf_reads_the_x_it_was_called_with(two_col_df, overlay, door):
-    """With a kde= or rug= overlay, displot builds the ECDF and its overlays
-    before it returns. An ``encode=`` x is the call's own x, so the line
-    counts and draws w, byte-identical to ``x="w"``; a post-hoc ``.encode()``
-    reaches none of them, so the line keeps counting and drawing v."""
+    """With a kde= or rug= overlay, an ``encode=`` x is the call's own x, and a
+    post-hoc ``.encode(x=...)`` on another column builds the figure again with
+    it: either way the line counts and draws w, byte-identical to ``x="w"``,
+    and the overlay is drawn on w too."""
     if door == "encode":
         chart = fm.displot(two_col_df, x="v", kind="ecdf", encode={"x": "w"}, **{overlay: True})
-        counted = "w"
     else:
         chart = fm.displot(two_col_df, x="v", kind="ecdf", **{overlay: True}).encode(x="w")
-        counted = "v"
+    counted = "w"
     plain = fm.displot(two_col_df, x=counted, kind="ecdf", **{overlay: True})
     assert chart.to_svg() == plain.to_svg()
+    assert chart.to_svg() != fm.displot(two_col_df, x="v", kind="ecdf", **{overlay: True}).to_svg()
     spec = json.loads(chart.to_spec().to_json())
     (window,) = [step for step in all_steps(spec) if step["type"] == "data_window"]
     assert window["sort"] == [counted]
     assert window["ops"][0]["field"] == counted
+    if overlay == "kde":
+        (kde_step,) = [step for step in all_steps(spec) if step["type"] == "kde"]
+        assert kde_step["field"] == counted
+    else:
+        rug_layer = next(layer for layer in spec["layers"] if layer.get("name") == "rug")
+        assert rug_layer["encoding"]["x"]["field"] == counted
 
 
 def test_encode_x_with_no_x_keyword_is_the_calls_own_x(two_col_df):

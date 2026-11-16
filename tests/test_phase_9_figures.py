@@ -482,17 +482,38 @@ class TestResidplot:
         assert len(d["layers"]) >= 2
 
     def test_dropna_removes_null_rows(self, reg_data):
-        data_with_nulls = reg_data.with_columns(
-            pl.when(pl.col("x") < 2).then(None).otherwise(pl.col("y")).alias("y")
+        import warnings
+
+        # Every third row falls in facet level "r"; those rows are null in y,
+        # and rows of "p" below x=2 are null as well.
+        faceted = reg_data.with_columns(
+            pl.Series("f", [("p", "q", "r")[i % 3] for i in range(reg_data.height)])
+        )
+        data_with_nulls = faceted.with_columns(
+            pl.when((pl.col("f") == "r") | (pl.col("x") < 2))
+            .then(None)
+            .otherwise(pl.col("y"))
+            .alias("y")
         )
         n_nulls = data_with_nulls.filter(pl.col("y").is_null()).height
         assert n_nulls > 0
-        chart = fe.residplot(
-            data_with_nulls, x="x", y="y", dropna=True, show_metrics=False, zero_line=False
-        )
-        # dropna=True should have removed the null rows before the chart
-        # received them. The chart's internal data should have fewer rows.
-        assert chart._data.height == reg_data.height - n_nulls
+        dropped = data_with_nulls.drop_nulls()
+        chart = fe.residplot(data_with_nulls, x="x", y="y", dropna=True, lowess=True)
+        # The null rows are out of the chart's own rows, so a facet level whose
+        # rows are all null draws no panel and warns nothing.
+        assert chart._data.height == faceted.height - n_nulls
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            svg = chart.facet(col="f").to_svg()
+            html = chart.facet(col="f").interactive().to_html()
+        assert [str(w.message) for w in caught] == []
+        pre_dropped = fe.residplot(dropped, x="x", y="y", dropna=False, lowess=True).facet(col="f")
+        assert svg == pre_dropped.to_svg()
+        assert html == pre_dropped.interactive().to_html()
+        assert ">r<" not in svg
+        # dropna=False keeps the rows, so the all-null level is a panel there.
+        kept = fe.residplot(data_with_nulls, x="x", y="y", dropna=False, lowess=True)
+        assert ">r<" in kept.facet(col="f").to_svg()
 
     def test_label_adds_color_encoding(self, reg_data):
         chart = fe.residplot(

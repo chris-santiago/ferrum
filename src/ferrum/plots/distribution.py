@@ -1751,7 +1751,23 @@ def _reject_per_row_appearance_channels(kind: str, caller_channels: dict) -> Non
     )
 
 
-@_figure_entry
+def _catplot_inputs(params: dict) -> dict[str, Any]:
+    """Return the category and value a catplot call read, by the chart channel each draws (x category, y value).
+
+    ``encode=`` is written in the chart's own space under both
+    orientations, so under ``orient="h"`` its x is merged against the
+    caller's ``y=`` (the category) and its y against ``x=`` (the value), as
+    the call merges them.
+    """
+    encode = params.get("encode")
+    if params.get("orient") == "h":
+        category, value, _ = _merged_xy(params.get("y"), params.get("x"), encode)
+    else:
+        category, value, _ = _merged_xy(params.get("x"), params.get("y"), encode)
+    return {"x": category, "y": value}
+
+
+@_figure_entry(inputs=_catplot_inputs)
 def catplot(
     data: Any,
     *,
@@ -2093,7 +2109,7 @@ def _catplot_build(
     )
     # True exactly when `cat_type` came FROM `native_scale`, not from the
     # caller's own explicit `type_=` statement -- gates every native-scale
-    # safety mitigation below (the Float64 cast, the jitter-width rescale,
+    # safety mitigation below (the jitter-width rescale,
     # the domain padding) so an explicitly-typed channel's own statement is
     # honored verbatim, untouched by any of them, the same as its `type_`
     # already is.
@@ -2127,27 +2143,14 @@ def _catplot_build(
 
     stats: "_NativeScaleStats | None" = None
     if native_typed:
-        # `native_scale=True` types the category channel "quantitative", but
-        # Rust's position-adjustment pipeline uses TWO different signals for
-        # "is this axis a categorical band or a continuous one", and they
-        # disagree for a non-Float64 numeric column: `apply_jitter`
-        # (`render/position.rs`) reads the RESOLVED SCALE KIND, so it
-        # correctly takes the continuous branch for an Int64 column typed
-        # quantitative here -- then crashes writing a Float64 noise array
-        # back into a still-Int64-schemaed column. `apply_dodge` instead
-        # reads the RAW COLUMN DTYPE (`is_ordinal_band = dtype != Float64`),
-        # so the SAME Int64 column takes the ORDINAL branch and silently
-        # no-ops instead of dodging. Casting the category column to Float64
-        # whenever it is typed quantitative makes both signals agree --
-        # which is also simply the correct representation for a column the
-        # chart is declaring continuous. DELETE CONDITION: when
-        # `apply_dodge`'s `is_ordinal_band` reads the resolved scale kind
-        # instead of the raw dtype (matching Jitter's own check), this cast
-        # becomes redundant and can be dropped.
+        # The category column's stats are read as the floats the axis places,
+        # whatever integer width the caller's column has: the renderer retypes
+        # the column Jitter and Dodge adjust, so the frame is left as it came.
         import polars as pl
 
-        data = to_polars(data).with_columns(pl.col(cat_name).cast(pl.Float64))
-        stats = _native_scale_stats(data, cat_name)
+        stats = _native_scale_stats(
+            to_polars(data).select(pl.col(cat_name).cast(pl.Float64)), cat_name
+        )
 
     # Position adjustment.
     #

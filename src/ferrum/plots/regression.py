@@ -43,7 +43,6 @@ from ferrum._encode_lowering import (
     _rebind_positional,
     _refuse_bin_aggregate_fit,
     _refuse_categorical_input,
-    _refuse_residplot_another_variable,
     _refuse_residplot_bin_aggregate,
     _refuse_undrawn_positional,
     _refuse_unreadable_positional_options,
@@ -908,7 +907,6 @@ def _eager_post_build_channel(
     type_remedy: Callable[[str], str] | None = None,
     always_honors_drawn_column: bool = False,
     restore_declared_type: str | None = None,
-    refuse_another_variable: Callable[[str, str, ChannelBase], None] | None = None,
 ) -> _PostBuildChannel:
     """Build a regression figure's ``_PostBuildChannel`` for *channel*.
 
@@ -931,9 +929,9 @@ def _eager_post_build_channel(
     if it wants one. *type_remedy* overrides the default declared-type
     ending for a form whose call door drops a declared ``T`` too
     (``scatter=False``, no sibling layer drawn).
-    *always_honors_drawn_column*/*restore_declared_type*/*refuse_another_variable*
-    pass straight through to :class:`~ferrum._compose._PostBuildChannel`
-    (residplot's own use, documented there).
+    *always_honors_drawn_column*/*restore_declared_type* pass straight
+    through to :class:`~ferrum._compose._PostBuildChannel` (residplot's own
+    use, documented there).
     """
     own = out._encoding.get(channel)
     call_type = own.option("type") if isinstance(own, ChannelBase) else None
@@ -955,7 +953,6 @@ def _eager_post_build_channel(
         type_remedy=type_remedy,
         always_honors_drawn_column=always_honors_drawn_column,
         restore_declared_type=restore_declared_type,
-        refuse_another_variable=refuse_another_variable,
     )
 
 
@@ -1112,7 +1109,6 @@ def _residplot_post_build_positional(
     drawn_x: str,
     drawn_residual: str,
     x_declared_type: str | None,
-    flat: bool,
 ) -> _PostBuildPositional:
     """Residplot's ``_PostBuildPositional`` record, attached to *out* before it is returned.
 
@@ -1145,14 +1141,10 @@ def _residplot_post_build_positional(
     name, or whose response shares the drawn residual column's, is naming
     the column the figure already draws -- read as the figure's own
     drawn-column binding is, never refused as a rewrite of the called
-    field. *flat* is ``True`` only when no overlay is drawn: flat
-    residplot's one mark reads x/y straight from the chart-level encoding,
-    with no layer to shadow a later binding naming neither the called
-    field nor the drawn column, so only there does each channel also pass
-    ``refuse_another_variable`` (:func:`~ferrum._encode_lowering._refuse_residplot_another_variable`),
-    naming this call's own field. The layered form passes none: its
-    layers keep drawing their own columns regardless of what the
-    chart-level encoding says, as `regplot`/`lmplot` already do.
+    field. A binding naming neither the called field nor the drawn column
+    is another variable, on the flat form and the layered one alike: it is
+    not read here, the figure is called again with it
+    (:func:`~ferrum._compose.written_inputs`).
 
     ``refuse_undrawn`` refuses ``x2``/``y2``, which no mark the figure
     draws reads (:data:`_RESIDPLOT_UNDRAWN_WHY`), before either channel's
@@ -1168,11 +1160,6 @@ def _residplot_post_build_positional(
                 drawn_column=drawn_x,
                 always_honors_drawn_column=True,
                 restore_declared_type=x_declared_type,
-                refuse_another_variable=(
-                    partial(_refuse_residplot_another_variable, called_field=x_field)
-                    if flat
-                    else None
-                ),
             ),
             "y": _eager_post_build_channel(
                 out,
@@ -1186,11 +1173,6 @@ def _residplot_post_build_positional(
                 unreadable=("scale", "format"),
                 check_unreadable=_refuse_residplot_y_unreadable,
                 always_honors_drawn_column=True,
-                refuse_another_variable=(
-                    partial(_refuse_residplot_another_variable, called_field=y_field)
-                    if flat
-                    else None
-                ),
             ),
         },
         statistic_refusal=_refuse_residplot_bin_aggregate,
@@ -1344,29 +1326,6 @@ def _lmplot_impl(
                 "log, sqrt, gam), or leave truncate=True (the default)."
             )
         x_range_pad = _TRUNCATE_FALSE_X_RANGE_PAD
-
-    # `x_jitter` offsets the scatter's x column by writing a Float64 noise
-    # array back into it (`apply_jitter`, `render/position.rs`), which fails
-    # Arrow's schema check on any other numeric dtype: `Jitter: ... expected
-    # Int64 but found Float64`. Widen the column once, here, so BOTH charts
-    # built below share it -- the merged chart carries the scatter chart's own
-    # data, so casting one and not the other would put two dtypes on one
-    # column. Gated on `scatter` because `x_jitter` adjusts nothing without a
-    # scatter layer to adjust, and on the dtype so a Float64 column is
-    # untouched (a non-numeric x is left alone too: the renderer refuses it in
-    # its own terms rather than failing here on a cast).
-    #
-    # This widening step can be deleted once `apply_jitter` coerces the
-    # column it writes itself, the way the transform engine already
-    # coerces its other inputs (`numeric_util::coerce_to_float64`).
-    # `catplot(native_scale=True)` carries the same workaround for the
-    # same renderer behavior.
-    if scatter and x_jitter is not None:
-        jitter_frame = to_polars(data)
-        jitter_column = x_field
-        dtype = jitter_frame.schema.get(jitter_column)
-        if dtype is not None and dtype.is_numeric() and dtype != pl.Float64:
-            data = jitter_frame.with_columns(pl.col(jitter_column).cast(pl.Float64))
 
     # Shared encoding.
     #
@@ -1787,9 +1746,9 @@ def lmplot(
         aggregates the response within each ``x_bins`` bin, never the
         predictor, so it is never the remedy), the remedy is to compute it
         ahead of the fit with ``.transform(...)`` and pass its output
-        column as the call's own ``x=`` (``y=`` for the response): the fit
-        is built at the call from the columns it names, so a column bound
-        by a later ``.encode()`` is not read. ``y``'s ``bin=``/
+        column as the call's own ``x=`` (``y=`` for the response); a
+        column bound by a later ``.encode()`` is read the same way, the fit
+        being built again from it. ``y``'s ``bin=``/
         ``aggregate=`` take that same remedy on every method but
         ``"logistic"``, whose response must be the raw 0/1 column (a bin
         start or a mean of it is not binary, so the fit would refuse the
@@ -2012,7 +1971,10 @@ def residplot(
         ``zero_line=True`` (annotations flow through the Robust
         transform's same opt-in kwargs).
     dropna : bool, default True
-        Drop rows where ``x`` or ``y`` is null before fitting.
+        Drop rows where ``x`` or ``y`` is null before fitting, out of the
+        chart's own rows too (a facet level whose rows are all null draws no
+        panel). A column a ``.transform(...)`` step computes is read by the
+        fit, which leaves its null rows out itself.
     show_metrics : bool or None, default None
         Schwabish SB-followup (2026-05-12): overlay a top-right corner
         annotation with ``R^2`` / ``RMSE`` / ``MAE`` computed inside the
@@ -2105,9 +2067,7 @@ def residplot(
         string -- carries a ``bin=``/``aggregate=``: residuals are
         computed from the raw predictor/response columns, never a bin or
         aggregate of them. Compute it ahead of time with
-        ``.transform(...)`` and bind its output column (the remedy call
-        needs ``dropna=False``, since the default drops rows before any
-        ``.transform()`` step runs), or drop the kwarg.
+        ``.transform(...)`` and bind its output column, or drop the kwarg.
     ValueError
         If ``x2`` or ``y2`` is bound, through a keyword, ``encode=`` or a
         later ``.encode()``: the residual points place one value per row,
@@ -2117,15 +2077,6 @@ def residplot(
     ValueError
         If ``x`` declares type ``N``/``O``, or ``y`` declares ``N``,
         ``O`` or ``T``: see ``x``/``y`` above.
-    ValueError
-        On the flat form (no overlay drawn), if an ``x``/``y`` binding
-        written by a later ``.encode()`` names another column of the data:
-        the figure's one mark would draw that column without refitting
-        against it. Naming the call as the remedy. An ``encode=`` naming
-        another column is the call's own ``x``/``y`` and refits, on both
-        forms. The layered form is unaffected by a later ``.encode()``
-        -- its layers bind ``x``/``y`` themselves, as ``regplot``/``lmplot``
-        already do.
 
     Examples
     --------
@@ -2179,9 +2130,7 @@ def residplot(
     # The residual transform reads x/y as the raw predictor/response; a
     # bin= or aggregate= on either (through a keyword, `encode=`, or a
     # shorthand string) would be dropped silently once the channel is
-    # rebound to the residual output. dropna=True drops nulls over the
-    # input frame before any transform runs, so the generic remedy's own
-    # .transform() step needs dropna=False to see the column it binds.
+    # rebound to the residual output.
     drawn = _drawn_positional_channels({"x": x_ch, "y": y_ch}, encode)
     _refuse_residplot_bin_aggregate(drawn)
     # Neither secondary positional channel reaches a mark residplot draws:
@@ -2204,8 +2153,17 @@ def residplot(
         reads=_residual_axis_categorical_reads,
         disallowed=("N", "O", "T"),
     )
+
+    # `dropna=True` keeps the rows null in either fit column out of the frame,
+    # so every reader of the chart's rows (a facet's panels, a layer attached
+    # afterwards) sees only the complete rows. A fit column the frame lacks is
+    # one a later `.transform()` step computes, or one that does not exist:
+    # the fit drops its own null rows and refuses a missing column in its own
+    # words, so nothing is dropped for it here.
     if dropna:
-        data = data.drop_nulls(subset=[x_field, y_field])
+        data = data.drop_nulls(
+            subset=[field for field in dict.fromkeys((x_field, y_field)) if field in data.columns]
+        )
 
     # `color=` is documented two ways -- a grouping column or a constant
     # color -- and the dispatch runs against the INPUT frame, before the
@@ -2525,7 +2483,6 @@ def residplot(
             drawn_x=names["x"],
             drawn_residual=names["residual"],
             x_declared_type=x_ch.option("type"),
-            flat=not layered,
         )
     )
 

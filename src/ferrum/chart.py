@@ -2976,7 +2976,9 @@ class Chart(
         rhs_operands = chart_operands(rhs)
         if rhs._operands:
             rhs_operands = carried_by(rhs_operands, rhs._encoding)
-        frames, moved = merged_frames(chart_frames(lhs_in), chart_frames(rhs_in))
+        # The resolved operands' frames, the ones their operands and layers
+        # index: a figure rebuilt on a written input draws over its rebuilt rows.
+        frames, moved = merged_frames(chart_frames(lhs), chart_frames(rhs))
         new._operands = lhs_operands + tuple(
             replace(op, frame=moved[op.frame]) for op in rhs_operands
         )

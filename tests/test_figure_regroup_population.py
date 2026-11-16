@@ -868,3 +868,287 @@ def test_the_rebuild_invariants_stay_internal_runtime_errors() -> None:
     messages = _rebuild_runtime_error_messages()
     assert len(messages) == len(_REBUILD_GUARD_SITES)
     assert all(message.endswith("rebuilt") for message in messages)
+
+
+# ── Another column bound after a figure was called ────────────────────────
+#
+# Every public figure that takes a caller's x and y reads a later binding on
+# another column as it reads the same column in its own call: the twin
+# comparison below, over every door, on a build whose statistics are built at
+# the call (and on the pending forms that read their final encoding), with a
+# negative control that disables the reader of written inputs. The population
+# is derived from the package.
+
+
+def _caller_xy_population() -> set[str]:
+    """Every public figure whose call takes ``x=``, ``y=`` and ``encode=``."""
+    return {
+        fn.__name__
+        for _, fn in _plots_functions()
+        if {"x", "y", "encode"} <= set(inspect.signature(fn).parameters)
+    }
+
+
+@functools.lru_cache(maxsize=None)
+def _xy_df() -> pl.DataFrame:
+    return _df().with_columns(
+        (pl.col("w") * 2 + 1).alias("w2"),
+        (pl.col("v").abs() + pl.col("w") * 0.5).alias("u"),
+    )
+
+
+#: figure -> [(variant id, build(**keywords), keywords of the build, the later
+#: binding[, the keywords the call takes for it])]. Each variant's later binding
+#: names another column of the data than the build's; the door is the same build
+#: with that column as its keyword. A binding is written in the chart's space, so
+#: a horizontal catplot's later ``y`` is the call's ``x``.
+_XY = {"x": "v", "y": "w"}
+_CALLER_XY_CASES: dict[str, list[tuple]] = {
+    "regplot": [
+        ("default", lambda **kw: fm.regplot(_xy_df(), **kw), _XY, {"y": "w2"}),
+        ("x", lambda **kw: fm.regplot(_xy_df(), **kw), _XY, {"x": "u"}),
+        (
+            "no-scatter",
+            lambda **kw: fm.regplot(_xy_df(), scatter=False, method="robust", **kw),
+            _XY,
+            {"y": "w2"},
+        ),
+        (
+            "no-scatter-pending",
+            lambda **kw: fm.regplot(_xy_df(), scatter=False, **kw),
+            _XY,
+            {"y": "w2"},
+        ),
+    ],
+    "lmplot": [
+        ("default", lambda **kw: fm.lmplot(_xy_df(), **kw), _XY, {"y": "w2"}),
+        ("col-hue", lambda **kw: fm.lmplot(_xy_df(), col="h", hue="g", **kw), _XY, {"x": "u"}),
+    ],
+    "residplot": [
+        ("layered", lambda **kw: fm.residplot(_xy_df(), **kw), _XY, {"y": "w2"}),
+        (
+            "flat",
+            lambda **kw: fm.residplot(_xy_df(), zero_line=False, show_metrics=False, **kw),
+            _XY,
+            {"x": "u"},
+        ),
+        ("lowess", lambda **kw: fm.residplot(_xy_df(), lowess=True, **kw), _XY, {"y": "w2"}),
+    ],
+    "displot": [
+        ("hist", lambda **kw: fm.displot(_xy_df(), **kw), {"x": "v"}, {"x": "u"}),
+        ("hist-kde", lambda **kw: fm.displot(_xy_df(), kde=True, **kw), {"x": "v"}, {"x": "u"}),
+        ("rug-overlay", lambda **kw: fm.displot(_xy_df(), rug=True, **kw), {"x": "v"}, {"x": "u"}),
+        ("kde", lambda **kw: fm.displot(_xy_df(), kind="kde", **kw), {"x": "v"}, {"x": "u"}),
+        (
+            "hist-mark",
+            lambda **kw: fm.displot(_xy_df(), mark={"opacity": 0.5}, **kw),
+            {"x": "v"},
+            {"x": "u"},
+        ),
+    ],
+    "catplot": [
+        (
+            "point",
+            lambda **kw: fm.catplot(_xy_df(), kind="point", **kw),
+            {"x": "g", "y": "v"},
+            {"y": "w"},
+        ),
+        (
+            "bar",
+            lambda **kw: fm.catplot(_xy_df(), kind="bar", **kw),
+            {"x": "g", "y": "v"},
+            {"x": "h"},
+        ),
+        (
+            "box",
+            lambda **kw: fm.catplot(_xy_df(), kind="box", **kw),
+            {"x": "g", "y": "v"},
+            {"y": "w"},
+        ),
+        (
+            "point-horizontal",
+            lambda **kw: fm.catplot(_xy_df(), kind="point", orient="h", **kw),
+            {"y": "g", "x": "v"},
+            {"y": "w"},
+            {"x": "w"},
+        ),
+    ],
+    "relplot": [
+        ("scatter", lambda **kw: fm.relplot(_xy_df(), **kw), _XY, {"y": "w2"}),
+        ("line", lambda **kw: fm.relplot(_xy_df(), kind="line", **kw), _XY, {"x": "u"}),
+    ],
+}
+
+#: A figure that returns a grid composite has no ``.encode()`` of its own:
+#: its ``encode=`` door is the only later door.
+_CALLER_XY_GRID_CASES: dict[str, Callable[..., Any]] = {
+    "jointplot": lambda **kw: fm.jointplot(_xy_df(), **kw),
+}
+
+#: Every door a later binding can arrive through, as ``(late, door)`` builders
+#: over a build, its keywords and the later binding.
+_XY_DOORS = (
+    "encode-after",
+    "encode-kwarg",
+    "layer-then-encode",
+    "encode-then-plus",
+    "plus-before",
+    "leaf",
+    "vconcat",
+    "facet-then-encode",
+    "encode-then-facet",
+    "layer-chart",
+)
+
+
+def _tick_rule() -> Any:
+    return fm.Chart(_xy_df()).mark_tick().encode(x="v")
+
+
+def _xy_pair(
+    door: str, build: Callable[..., Any], base: dict, later: dict, call: dict | None = None
+) -> tuple[Any, Any]:
+    """(the chart that took *later* through *door*, the call that was given it)."""
+    called = {**base, **(later if call is None else call)}
+    if door == "encode-after":
+        return (lambda: build(**base).encode(**later)), (lambda: build(**called))
+    if door == "encode-kwarg":
+        return (lambda: build(**base, encode=later)), (lambda: build(**called))
+    if door == "layer-then-encode":
+        return (
+            (lambda: build(**base).layer().encode(**later)),
+            (lambda: build(**called).layer()),
+        )
+    if door == "encode-then-plus":
+        return (
+            (lambda: build(**base).encode(**later) + _tick_rule()),
+            (lambda: build(**called) + _tick_rule()),
+        )
+    if door == "plus-before":
+        return (
+            (lambda: _tick_rule() + build(**base).encode(**later)),
+            (lambda: _tick_rule() + build(**called)),
+        )
+    if door == "vconcat":
+        return (
+            (lambda: fm.vconcat(build(**base).encode(**later), _tick_rule())),
+            (lambda: fm.vconcat(build(**called), _tick_rule())),
+        )
+    if door == "facet-then-encode":
+        return (
+            (lambda: build(**base).facet(col="h").encode(**later)),
+            (lambda: build(**called).facet(col="h")),
+        )
+    if door == "encode-then-facet":
+        return (
+            (lambda: build(**base).encode(**later).facet(col="h")),
+            (lambda: build(**called).facet(col="h")),
+        )
+    if door == "layer-chart":
+        return (
+            (lambda: fm.LayerChart(build(**base).encode(**later), _tick_rule())),
+            (lambda: fm.LayerChart(build(**called), _tick_rule())),
+        )
+    assert door == "leaf"
+    return (
+        (lambda: fm.hconcat(build(**base).encode(**later), _tick_rule())),
+        (lambda: fm.hconcat(build(**called), _tick_rule())),
+    )
+
+
+_XY_VARIANTS = sorted(
+    (name, variant[0]) for name, variants in _CALLER_XY_CASES.items() for variant in variants
+)
+
+
+def _xy_variant(name: str, variant_id: str) -> tuple[Callable[..., Any], dict, dict, dict | None]:
+    _, build, base, later, *call = next(v for v in _CALLER_XY_CASES[name] if v[0] == variant_id)
+    return build, base, later, (call[0] if call else None)
+
+
+#: A plain primitive chart given another column after a data-less ``.layer()``
+#: reads it as it always has (the build is no statistic), so that door is not a
+#: refit and is left out for the relational figure.
+_XY_DOORS_NOT_APPLICABLE = {
+    ("relplot", "scatter"): {"layer-then-encode"},
+    ("relplot", "line"): {"layer-then-encode"},
+}
+
+
+def test_every_figure_taking_caller_xy_has_a_case() -> None:
+    covered = set(_CALLER_XY_CASES) | set(_CALLER_XY_GRID_CASES)
+    assert _missing_build_cases(_caller_xy_population(), covered) == []
+    assert {"regplot", "lmplot", "residplot", "displot", "catplot", "relplot", "jointplot"} <= (
+        _caller_xy_population()
+    )
+
+
+def test_the_caller_xy_population_check_catches_a_figure_without_a_case() -> None:
+    population = _caller_xy_population() | {"not_a_real_figure"}
+    covered = set(_CALLER_XY_CASES) | set(_CALLER_XY_GRID_CASES)
+    assert _missing_build_cases(population, covered) == ["not_a_real_figure"]
+
+
+@pytest.mark.parametrize("door", _XY_DOORS)
+@pytest.mark.parametrize(("name", "variant"), _XY_VARIANTS)
+def test_every_figure_given_another_column_through_every_door_equals_its_call(
+    name: str, variant: str, door: str
+) -> None:
+    if door in _XY_DOORS_NOT_APPLICABLE.get((name, variant), ()):
+        pytest.skip("a primitive mark's own layer door, not a statistic")
+    build, base, later, call = _xy_variant(name, variant)
+    late, building = _xy_pair(door, build, base, later, call)
+    assert _outcome(late) == _outcome(building)
+
+
+@pytest.mark.parametrize("door", ["encode-after", "encode-then-plus", "plus-before", "layer-chart"])
+@pytest.mark.parametrize(("name", "variant"), _XY_VARIANTS)
+def test_every_figure_given_another_column_equals_its_call_interactively(
+    name: str, variant: str, door: str
+) -> None:
+    build, base, later, call = _xy_variant(name, variant)
+    late, building = _xy_pair(door, build, base, later, call)
+
+    def html(make: Callable[[], Any]) -> tuple:
+        # A door the call itself refuses (a continuous rule left of a band axis)
+        # is compared by its refusal.
+        try:
+            return ("html", make().interactive().to_html())
+        except Exception as err:  # noqa: BLE001 - the refusal is part of the outcome
+            return ("refused", type(err), str(err))
+
+    assert html(late) == html(building)
+
+
+@pytest.mark.parametrize("name", sorted(_CALLER_XY_GRID_CASES))
+def test_a_grid_figure_reads_encode_x_and_y_as_its_own(name: str) -> None:
+    build = _CALLER_XY_GRID_CASES[name]
+    assert build(x="v", y="w", encode={"y": "w2"}).to_svg() == build(x="v", y="w2").to_svg()
+
+
+#: The variants whose statistics are built at the call: with the reader of
+#: written inputs disabled their twin must differ from the call.
+_EAGER_XY_VARIANTS = [
+    ("regplot", "default"),
+    ("regplot", "x"),
+    ("regplot", "no-scatter"),
+    ("lmplot", "default"),
+    ("residplot", "layered"),
+    ("residplot", "flat"),
+    ("residplot", "lowess"),
+    ("displot", "hist-kde"),
+    ("displot", "rug-overlay"),
+    ("displot", "hist-mark"),
+    ("catplot", "point"),
+    ("catplot", "point-horizontal"),
+]
+
+
+@pytest.mark.parametrize(("name", "variant"), _EAGER_XY_VARIANTS)
+def test_the_caller_xy_twin_differs_when_the_rebuild_is_disabled(
+    monkeypatch, name: str, variant: str
+) -> None:
+    monkeypatch.setattr(ferrum._compose, "written_inputs", lambda chart, record: {})
+    build, base, later, call = _xy_variant(name, variant)
+    late, building = _xy_pair("encode-after", build, base, later, call)
+    assert _outcome(late) != _outcome(building)

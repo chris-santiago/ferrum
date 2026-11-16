@@ -494,6 +494,16 @@ def test_text_channel_on_a_point_is_not_drawn(form, kwargs, tooltip_names):
 # ---------------------------------------------------------------------------
 
 
+def _smooth_step(chart: Any) -> dict:
+    """The residual fit's own ``smooth`` step on the wire, whatever steps run before it."""
+    (step,) = [
+        step
+        for step in json.loads(chart.to_spec().to_json())["transforms"]
+        if step.get("type") == "smooth"
+    ]
+    return step
+
+
 @pytest.mark.parametrize(
     "collision_column", ["residual", "_ref_zero", "_metrics_text", "_metrics_y", "x"]
 )
@@ -513,11 +523,9 @@ def test_an_unbound_clashing_column_stays_the_callers_and_renders_byte_identical
     # setting for the clashing role, naming the fresh column it chose --
     # not merely a render that happens to look right.
     role = collision_column.lstrip("_")
-    smooth_spec = json.loads(chart.to_spec().to_json())["transforms"][1]
+    smooth_spec = _smooth_step(chart)
     assert smooth_spec["residual_columns"][role] == f"{collision_column}_1"
-    no_clash_spec = json.loads(fm.residplot(plain, x="v", y="w").to_spec().to_json())["transforms"][
-        1
-    ]
+    no_clash_spec = _smooth_step(fm.residplot(plain, x="v", y="w"))
     assert "residual_columns" not in no_clash_spec
 
 
@@ -590,7 +598,7 @@ def test_a_grouping_field_named_like_a_computed_column_groups_by_the_callers_col
     assert grouped_cy != pooled_cy
     # The wire: groupby names the caller's own 'residual' column, and the
     # fit's own residual output still took a fresh name beside it.
-    smooth_spec = json.loads(chart.to_spec().to_json())["transforms"][1]
+    smooth_spec = _smooth_step(chart)
     assert smooth_spec["groupby"] == ["residual"]
     assert smooth_spec["residual_columns"]["residual"] == "residual_1"
 
@@ -723,7 +731,7 @@ def test_an_optional_column_this_call_does_not_compute_stays_the_datas_own(colum
     assert values == _sibling_values("tooltip", column, _STRING_CHANNELS["tooltip"], frame)
     # The wire: no fresh name was chosen for anything -- this call never
     # emits the optional column at all, so it was never a reserved name.
-    smooth_spec = json.loads(chart.to_spec().to_json())["transforms"][1]
+    smooth_spec = _smooth_step(chart)
     assert "residual_columns" not in smooth_spec
 
 

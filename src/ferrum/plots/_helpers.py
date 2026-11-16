@@ -840,7 +840,32 @@ def _checked_figsize(entry: str, figsize: Any) -> tuple[float, float] | None:
     return _voiced(entry, check)
 
 
-def _figure_entry(fn: _F) -> _F:
+def _called_inputs(params: dict) -> dict[str, ChannelBase | None]:
+    """Return the x/y a figure's call read, merged from its keywords and ``encode=`` (:func:`_merged_xy`).
+
+    Each value is the channel the figure drew from, or ``None`` when the call
+    bound none. The default declaration of :func:`_figure_entry` for a
+    figure whose chart channels are its call's ``x`` and ``y``.
+    """
+    x, y, _ = _merged_xy(params.get("x"), params.get("y"), params.get("encode"))
+    return _read_channels({"x": x, "y": y})
+
+
+def _read_channels(bindings: dict[str, Any]) -> dict[str, ChannelBase | None]:
+    """*bindings* with each string read as ``encode()`` reads it, a channel kept, anything else ``None``."""
+    read: dict[str, ChannelBase | None] = {}
+    for name, value in bindings.items():
+        if isinstance(value, str):
+            value = channel_for_value(name, value, declare=f"encode({name}=...)")
+        read[name] = value if isinstance(value, ChannelBase) else None
+    return read
+
+
+def _figure_entry(
+    fn: _F | None = None,
+    *,
+    inputs: Callable[[dict], dict[str, Any]] | None = None,
+) -> Any:
     """Make the figure function *fn* the public entry its chart speaks as.
 
     Every warning and refusal about a layer the figure draws (a line's
@@ -862,9 +887,22 @@ def _figure_entry(fn: _F) -> _F:
     call (the chart's own ``.encode(color=...)``, or a composition's it
     becomes an operand of) calls the figure again with that binding in its
     ``encode=``, so its statistics group by it as for the same ``encode=``
-    passed to the call.
+    passed to the call, and a positional binding on another column written
+    after the call calls it again with that column as its own ``x=``/``y=``.
+
+    *inputs* declares the positional bindings the figure's call read, by the
+    chart channel each one draws (``{"x": ..., "y": ...}``), from the call's
+    arguments as a ``{name: value}`` mapping. A figure with both an ``x`` and
+    a ``y`` parameter declares its merged keyword and ``encode=`` x/y by
+    default; one that reads them in another space (a horizontal catplot,
+    whose chart x is the category) declares its own.
     """
-    regroups = "encode" in inspect.signature(fn).parameters
+    if fn is None:
+        return functools.partial(_figure_entry, inputs=inputs)
+    parameters = inspect.signature(fn).parameters
+    regroups = "encode" in parameters
+    if inputs is None and "x" in parameters and "y" in parameters:
+        inputs = _called_inputs
 
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -877,7 +915,12 @@ def _figure_entry(fn: _F) -> _F:
             encode = {**(kwargs.get("encode") or {}), **extra}
             return wrapper(*args, **{**kwargs, "encode": encode})
 
-        return figure_recorded(chart, call)
+        def declared() -> dict[str, Any]:
+            bound = inspect.signature(fn).bind_partial(*args, **kwargs).arguments
+            params = {name: value for name, value in bound.items() if name != "encode_kwargs"}
+            return _read_channels(inputs({**params, **kwargs}))
+
+        return figure_recorded(chart, call, declared if inputs is not None else None)
 
     return wrapper  # type: ignore[return-value]
 

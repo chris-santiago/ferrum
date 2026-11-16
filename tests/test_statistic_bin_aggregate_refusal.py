@@ -2911,8 +2911,11 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
             column="bin_start",
         ),
     ),
-    # residplot's remedy carries dropna=False: its default drops nulls over
-    # x/y in the input frame, before the remedy's column exists.
+    # residplot's remedy still names dropna=False in its text, but the step that
+    # needs the remedy's column is the .transform(...) itself: the default
+    # dropna drops nulls at the head of the statistics run, after the caller's
+    # steps, so `without` is the call with that step left out
+    # (`test_residplot_remedy_renders_with_the_default_dropna` pins the rest).
     "per_row_bin_residplot_x": _RemedyRun(
         refused=lambda: fm.residplot(_XY_ROWS, x=X("v", bin=True), y="w"),
         names=_names_bin("v", " with dropna=False"),
@@ -2921,8 +2924,8 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         ),
         sibling=lambda: fm.residplot(_prebinned(_XY_ROWS, "v"), x="bin_start", y="w", dropna=False),
         without=_MissingColumn(
-            build=lambda: fm.residplot(_XY_ROWS, x="bin_start", y="w").transform(_per_row_bin("v")),
-            error=_COLUMN_NOT_FOUND,
+            build=lambda: fm.residplot(_XY_ROWS, x="bin_start", y="w"),
+            error=ValueError,
             column="bin_start",
         ),
     ),
@@ -2934,8 +2937,8 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         ),
         sibling=lambda: fm.residplot(_prebinned(_XY_ROWS, "w"), x="v", y="bin_start", dropna=False),
         without=_MissingColumn(
-            build=lambda: fm.residplot(_XY_ROWS, x="v", y="bin_start").transform(_per_row_bin("w")),
-            error=_COLUMN_NOT_FOUND,
+            build=lambda: fm.residplot(_XY_ROWS, x="v", y="bin_start"),
+            error=ValueError,
             column="bin_start",
         ),
     ),
@@ -3136,10 +3139,8 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         ).transform(_per_group_mean()),
         sibling=lambda: fm.residplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", dropna=False),
         without=_MissingColumn(
-            build=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w").transform(
-                _per_group_mean()
-            ),
-            error=_COLUMN_NOT_FOUND,
+            build=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w"),
+            error=ValueError,
             column="mean_v",
         ),
     ),
@@ -3151,10 +3152,8 @@ _REMEDY_RUNS: dict[str, _RemedyRun] = {
         ).transform(_per_group_mean()),
         sibling=lambda: fm.residplot(_PREAGGREGATED_ROWS, x="mean_v", y="mean_w", dropna=False),
         without=_MissingColumn(
-            build=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w").transform(
-                _per_group_mean()
-            ),
-            error=_COLUMN_NOT_FOUND,
+            build=lambda: fm.residplot(_GROUPED_XY_ROWS, x="mean_v", y="mean_w"),
+            error=ValueError,
             column="mean_v",
         ),
     ),
@@ -5207,3 +5206,34 @@ def test_a_figure_voiced_categorical_refusal_names_a_typeable_remedy(builder_id:
     with pytest.raises(ValueError) as excinfo:
         _TYPEABLE_REMEDY_BUILDERS[builder_id]()
     _assert_the_remedy_is_typeable_at_the_voice(str(excinfo.value))
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        "per_row_bin_residplot_x",
+        "per_row_bin_residplot_y",
+        "transform_aggregate_residplot_x",
+        "transform_aggregate_residplot_y",
+    ],
+)
+def test_residplot_remedy_renders_with_the_default_dropna(run_id: str) -> None:
+    """The remedy's ``.transform(...)`` output column is readable with the default
+    ``dropna``: the call without ``dropna=False`` draws what the call with it draws."""
+    run = _REMEDY_RUNS[run_id]
+    remedied = run.remedied()
+    chart_args = {
+        "per_row_bin_residplot_x": lambda: fm.residplot(_XY_ROWS, x="bin_start", y="w").transform(
+            _per_row_bin("v")
+        ),
+        "per_row_bin_residplot_y": lambda: fm.residplot(_XY_ROWS, x="v", y="bin_start").transform(
+            _per_row_bin("w")
+        ),
+        "transform_aggregate_residplot_x": lambda: fm.residplot(
+            _GROUPED_XY_ROWS, x="mean_v", y="mean_w"
+        ).transform(_per_group_mean()),
+        "transform_aggregate_residplot_y": lambda: fm.residplot(
+            _GROUPED_XY_ROWS, x="mean_v", y="mean_w"
+        ).transform(_per_group_mean()),
+    }
+    assert chart_args[run_id]().to_svg() == remedied.to_svg()
