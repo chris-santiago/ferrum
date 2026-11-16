@@ -5844,6 +5844,31 @@ fn refuse_format_temporality_mismatch_field_keys_on_the_resolved_field_type() {
     assert_eq!(refuse(&enc("missing", None), Some(".2f")), Ok(()));
 }
 
+/// A legend whose field the owner reads as categories answers a format as its
+/// label-text twin does: a date on a shape or a dash is a category, so a time
+/// format refuses naming the legend and `ordinal` passes, exactly as over text;
+/// the same date on an undeclared colour stays temporal.
+#[test]
+fn a_date_category_legend_answers_a_format_as_its_text_twin_does() {
+    use arrow::array::{StringArray, TimestampMillisecondArray};
+    let schema = |dtype: DataType| Arc::new(Schema::new(vec![Field::new("d", dtype, false)]));
+    let dates = RecordBatch::try_new(
+        schema(DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None)),
+        vec![Arc::new(TimestampMillisecondArray::from(vec![0_i64, 86_400_000]))],
+    )
+    .unwrap();
+    let text = RecordBatch::try_new(schema(DataType::Utf8), vec![Arc::new(StringArray::from(vec!["a", "b"]))]).unwrap();
+    let binding = EncodingSpec { field: "d".into(), ..Default::default() };
+    let answer = |batch: &RecordBatch, channel: &'static str, fmt: &str| {
+        refuse_format_temporality_mismatch_field(&binding, batch, Some(fmt), Some("time"), channel, crate::render::FormatSurface::Legend)
+    };
+    for channel in ["shape", "stroke_dash"] {
+        assert_eq!(answer(&dates, channel, "%Y"), answer(&text, channel, "%Y"), "{channel}: a time format");
+        assert!(answer(&dates, channel, "%Y").is_err(), "{channel}: refuses like its text twin");
+    }
+    assert_eq!(answer(&dates, "color", "%Y"), Ok(()), "an undeclared colour over a date stays temporal");
+}
+
 /// `#147` close (wave 6A T22): the two cells the second intent re-check
 /// found, each given one answer in BOTH axis modes (the shared and the
 /// independent-facet axis).
@@ -15649,7 +15674,7 @@ fn faceted_statistics_group_by_one_binned_edge_set() {
     let Some(ColorScale::Discretizing(buckets)) = &p.provisional_scales.color else { panic!("binned") };
     assert_eq!(buckets.bounds(), [1.0, 5.0, 9.0]);
     let out = &p.transform_outputs[FINAL_OUTPUT_KEY];
-    let panels = crate::render::arrow_cast::col_as_ordinal_category_str(out, "f").unwrap();
+    let panels = crate::render::arrow_cast::col_as_identity_key_str(out, "f").unwrap();
     let groups: Vec<(String, f64, f64)> = panels
         .into_iter()
         .zip(float_col(out, "v"))
