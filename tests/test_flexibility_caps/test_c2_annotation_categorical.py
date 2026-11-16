@@ -404,23 +404,14 @@ def test_annotate_arrow_iso_string_coords_do_not_raise() -> None:
     assert ann is not None
 
 
-def test_annotate_arrow_iso_string_coords_store_epoch_ms_in_primitive() -> None:
-    """ISO-8601 strings in annotate_arrow must resolve to epoch-ms floats in the primitive.
-
-    Covers the _coerce_coord ISO-string branch inside annotate_arrow.
-    """
-    from ferrum.annotation.coords import OrdinalCategoryCoord
-
+def test_annotate_arrow_iso_string_coords_store_epoch_ms_in_the_mark_frame() -> None:
+    """An unlabelled all-ISO arrow takes the mark-layer route: no primitive, and its frame holds
+    the epoch milliseconds of each end, not a category."""
     ann = annotate_arrow("2020-01-01", 1.0, "2020-06-01", 3.0)
-    prim = ann._annotation_primitive
-    if prim is not None:
-        assert not isinstance(prim.x1, OrdinalCategoryCoord), (
-            "ISO-8601 string '2020-01-01' in annotate_arrow must store a float "
-            "(epoch-ms), not OrdinalCategoryCoord."
-        )
-        assert isinstance(prim.x1, float), (
-            f"Expected float for ISO-8601 x1 in arrow primitive, got {type(prim.x1)}"
-        )
+    assert ann._annotation_primitive is None
+    frame = ann._data
+    assert frame["_x1"].to_list() == [1577836800000.0]
+    assert frame["_x2"].to_list() == [1590969600000.0]
 
 
 def test_annotate_arrow_non_iso_string_coords_store_ordinal_in_primitive() -> None:

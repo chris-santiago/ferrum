@@ -38,7 +38,18 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from ferrum.annotation.coords import temporal_coord_to_epoch_ms
+import datetime as dt
+
+import polars as pl
+
+import ferrum as fm
+import ferrum.annotation as ann
+from ferrum.annotation.coords import (
+    _coerce_coord,
+    _coerce_coord_to_numeric,
+    temporal_coord_to_epoch_ms,
+)
+from tests.test_null_group_warning import _render_capturing
 
 _EPOCH_MS_2020_03_01 = 1583020800000.0
 
@@ -139,7 +150,7 @@ def test_all_three_consumers_coerce_datetime64_to_the_same_epoch_ms():
 
     assert fm.BreakAxis(axis="x", gap=(value, np.datetime64("2021-01-01"))).gap[0] == expected
     assert _convert_temporal_domain_elements([value]) == [expected]
-    assert ann.text(value, 1.5, "hi").to_dict()["x"] == expected
+    assert ann.text(value, 1.5, "hi").to_dict()["x"] == {"instant": expected}
 
 
 def test_timescale_dict_domain_accepts_datetime64_end_to_end():
@@ -232,3 +243,87 @@ def test_boundary_constant_is_the_int64_microsecond_limit():
     from ferrum.annotation.coords import _DATETIME64_MAX_ABS_US
 
     assert _DATETIME64_MAX_ABS_US == _INT64_MAX_US
+
+
+# ---------------------------------------------------------------------------
+# An annotation date fares as its epoch number on a temporal axis, breaks and arrows included
+# ---------------------------------------------------------------------------
+
+_MONTH = pl.DataFrame(
+    {
+        "date": pl.date_range(dt.date(2020, 1, 1), dt.date(2020, 1, 31), "1d", eager=True),
+        "v": [float(i % 7) for i in range(31)],
+    }
+)
+
+
+def _ms(day: dt.date) -> float:
+    return float(temporal_coord_to_epoch_ms(day))
+
+
+def _broken_month() -> fm.Chart:
+    return fm.Chart(_MONTH).mark_line().encode(x="date", y="v") + fm.BreakAxis(
+        axis="x", gap=(np.datetime64("2020-01-10"), np.datetime64("2020-01-20"))
+    )
+
+
+_INSIDE, _PAST = dt.date(2020, 1, 15), dt.date(2020, 1, 25)
+_BREAK_BUILDERS = {
+    "vline_in_gap": lambda at: fm.annotate_vline(at, stroke="#ff0010"),
+    "text_in_gap": lambda at: ann.text(at, 2.0, "HELLO"),
+    "span_across_gap": lambda at: ann.span("x", at[0], at[1], fill="#ff0011"),
+    "text_past_gap": lambda at: ann.text(at, 2.0, "HELLO"),
+}
+_BREAK_AT = {
+    "vline_in_gap": _INSIDE,
+    "text_in_gap": _INSIDE,
+    "span_across_gap": (dt.date(2020, 1, 5), dt.date(2020, 1, 25)),
+    "text_past_gap": _PAST,
+}
+
+
+def _as_number(at):
+    return tuple(_ms(d) for d in at) if isinstance(at, tuple) else _ms(at)
+
+
+@pytest.mark.parametrize("name", sorted(_BREAK_BUILDERS))
+def test_a_date_annotation_on_a_broken_temporal_axis_fares_as_its_epoch_number(name):
+    build, at = _BREAK_BUILDERS[name], _BREAK_AT[name]
+    dated, dated_shown = _render_capturing((_broken_month() + build(at)).to_svg)
+    numbered, numbered_shown = _render_capturing((_broken_month() + build(_as_number(at))).to_svg)
+    assert dated == numbered
+    assert dated_shown == numbered_shown
+    plain = _broken_month().to_svg()
+    if name == "vline_in_gap":
+        assert dated == plain
+        assert dated_shown == [
+            "1 annotation element (line) on the x axis fell inside a BreakAxis gap and was suppressed"
+        ]
+    elif name == "text_in_gap":
+        assert dated_shown == [
+            "1 annotation element (text) on the x axis fell inside a BreakAxis gap and was suppressed"
+        ]
+    elif name == "span_across_gap":
+        assert dated.count('fill="#ff0011"') == 2
+    else:
+        assert dated != plain and dated_shown == []
+
+
+_ARROW_SPELLINGS = {
+    "date": (dt.date(2020, 1, 2), dt.date(2020, 1, 4)),
+    "iso": ("2020-01-02", "2020-01-04"),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(_ARROW_SPELLINGS))
+def test_an_unlabelled_date_arrow_lands_where_its_epoch_number_twin_does(spelling):
+    chart = fm.Chart(_MONTH).mark_line().encode(x="date", y="v")
+    start, end = _ARROW_SPELLINGS[spelling]
+    dated = (chart + fm.annotate_arrow(start, 1.5, end, 2.5)).to_svg()
+    twin = (
+        chart + fm.annotate_arrow(_ms(dt.date(2020, 1, 2)), 1.5, _ms(dt.date(2020, 1, 4)), 2.5)
+    ).to_svg()
+    assert dated == twin
+    shifted = (chart + fm.annotate_arrow(dt.date(2020, 1, 3), 1.5, end, 2.5)).to_svg()
+    assert shifted != dated
+    assert _coerce_coord_to_numeric(_coerce_coord("2020-01-02")) == 1577923200000.0

@@ -143,6 +143,10 @@
     "honored": true,
     "reason": "render/annotation.rs::build_one's Line arm -> StrokeStyle.dash, when present"
   },
+  "AnnotationSpec.Line.entry": {
+    "honored": true,
+    "reason": "render/annotation/mod.rs::check_categories -> value_refusal: names the helper that wrote the line's coordinates when one of them is refused on a categorical axis"
+  },
   "AnnotationSpec.Line.stroke": {
     "honored": true,
     "reason": "render/annotation.rs::build_one's Line arm -> resolve_color -> StrokeStyle.color"

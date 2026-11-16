@@ -2815,7 +2815,7 @@ pub enum RenderWarning {
         kinds: Vec<String>,
     },
     /// An annotation names category `label` on a categorical `axis` whose
-    /// `domain` (sorted) does not hold it; it is drawn at the plot centre.
+    /// `domain` (sorted) does not hold it; the annotation is not drawn.
     /// Pushed once per label and axis, in the caller's axis letter.
     AnnotationCategoryNotFound {
         axis: AlignAxis,
@@ -3391,7 +3391,7 @@ impl std::fmt::Display for RenderWarning {
                 write!(
                     f,
                     "annotation category '{label}' not found in {axis}-axis domain [{domain}]; \
-                     placing at plot center"
+                     the annotation is not drawn"
                 )
             }
             RenderWarning::AnnotationSpansBreakGap { axis, kinds } => {
@@ -4376,7 +4376,7 @@ mod tests {
                 domain: vec!["a".into(), "b".into()],
             }
             .to_string(),
-            "annotation category 'zz' not found in x-axis domain ['a', 'b']; placing at plot center"
+            "annotation category 'zz' not found in x-axis domain ['a', 'b']; the annotation is not drawn"
         );
         assert_eq!(
             RenderWarning::BreakAxisIneffective {

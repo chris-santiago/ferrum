@@ -23,11 +23,13 @@ import json
 import re
 from typing import Any, Callable, NamedTuple
 
+import numpy as np
 import polars as pl
 import pytest
 
 import ferrum as fm
 import ferrum.annotation as ann
+from ferrum.annotation.coords import OrdinalCategoryCoord
 from tests.test_null_group_warning import (
     _NO_ROWS_TO_DRAW,
     _all_keys_null_message,
@@ -356,10 +358,14 @@ def test_the_primitives_accept_plain_strings_as_categories():
 
 
 def test_an_iso_string_stays_a_temporal_value():
-    assert ann.text("2020-01-02", 2.0, "t").to_dict()["x"] == 1577923200000.0
-    assert (
-        ann.span("x", "2020-01-01", "2020-01-02", fill="#eee").to_dict()["start"] == 1577836800000.0
-    )
+    assert ann.text("2020-01-02", 2.0, "t").to_dict()["x"] == {
+        "instant": 1577923200000.0,
+        "text": "2020-01-02",
+    }
+    assert ann.span("x", "2020-01-01", "2020-01-02", fill="#eee").to_dict()["start"] == {
+        "instant": 1577836800000.0,
+        "text": "2020-01-01",
+    }
     chart = fm.Chart(_TEMPORAL).mark_line().encode(x="date", y="v")
     as_string = (chart + ann.text("2020-01-02", 2.0, "t")).to_svg()
     as_date = (chart + ann.text(dt.date(2020, 1, 2), 2.0, "t")).to_svg()
@@ -500,10 +506,41 @@ def _mixed_span_message(axis: str, end: str, label: str) -> str:
     )
 
 
-def _unknown_message(axis: str, label: str = "zz") -> str:
+def _unknown_message(axis: str, label: str = "zz", domain: list[str] | None = None) -> str:
+    """The warning for a category the axis does not hold: the annotation is not drawn."""
+    listed = sorted(_CATS) if domain is None else domain
     return (
         f"annotation category '{label}' not found in {axis}-axis domain "
-        f"{sorted(_CATS)}; placing at plot center"
+        f"{listed}; the annotation is not drawn"
+    )
+
+
+def _value_message(value: str, axis: str, label: str | None = None) -> str:
+    """The refusal of a number or date on a categorical axis. ``label`` is the category the value
+    spells, when the axis holds one; without it the remedy names a category label generically."""
+    clause = f"the category label '{label}'" if label is not None else "a category label"
+    return (
+        f"annotation value {value} on the {axis} axis: the {axis} scale is categorical, so it "
+        f"places categories, not numbers or dates; pass {clause}, fm.NormCoord or fm.PixelCoord"
+    )
+
+
+def _value_under_coord_message(value: str, axis: str, coord: str) -> str:
+    """The refusal of a number or date on a categorical axis under a projected coord: the remedy
+    names positions only, because a category cannot be placed there either."""
+    return (
+        f"annotation value {value} on the {axis} axis: the {axis} scale is categorical, so it "
+        f"places categories, not numbers or dates, and a category cannot be placed under {coord}; "
+        "pass fm.NormCoord or fm.PixelCoord"
+    )
+
+
+def _helper_message(entry: str, axis: str) -> str:
+    """The refusal of a helper whose own coordinates meet a categorical axis."""
+    return (
+        f"{entry}: the {axis} scale is categorical, so it places categories, not numbers or "
+        f"dates, and {entry} takes no category; draw it on a chart whose x and y scales are "
+        "continuous"
     )
 
 
@@ -605,19 +642,37 @@ def test_the_polar_and_geo_remedy_renders(coord, remedy):
 @pytest.mark.parametrize(
     "axis,start,end,category_end",
     [
-        ("x", "b", 2.5, "start"),
-        ("x", 2.5, "b", "end"),
-        ("x", "b", dt.date(2020, 1, 2), "start"),
         ("x", "b", fm.NormCoord(0.5), "start"),
-        ("y", "b", 2.5, "start"),
+        ("x", fm.PixelCoord(40.0), "b", "end"),
+        ("y", "b", fm.NormCoord(0.5), "start"),
     ],
-    ids=["category-then-value", "value-then-category", "date-end", "norm-end", "y-axis"],
+    ids=["category-then-norm", "pixel-then-category", "y-axis"],
 )
-def test_a_span_with_one_category_end_and_one_value_end_is_refused(axis, start, end, category_end):
+def test_a_span_with_one_category_end_and_one_position_end_is_refused(
+    axis, start, end, category_end
+):
     span = ann.span(axis, start, end, fill="#eee")
     _assert_refused_on_both_routes(
         _bars(axis, "default") + span, _mixed_span_message(axis, category_end, "b")
     )
+
+
+@pytest.mark.parametrize(
+    "axis,start,end,value",
+    [
+        ("x", "b", 2.5, "2.5"),
+        ("x", 2.5, "b", "2.5"),
+        ("x", "b", dt.date(2020, 1, 2), "2020-01-02"),
+        ("y", "b", 2.5, "2.5"),
+    ],
+    ids=["category-then-number", "number-then-category", "date-end", "y-axis"],
+)
+def test_a_span_with_one_category_end_and_one_number_end_is_refused_as_a_value(
+    axis, start, end, value
+):
+    """The value on the categorical axis is refused before the mixed-span check runs."""
+    span = ann.span(axis, start, end, fill="#eee")
+    _assert_refused_on_both_routes(_bars(axis, "default") + span, _value_message(value, axis))
 
 
 @pytest.mark.parametrize(
@@ -641,8 +696,41 @@ def test_a_mixed_span_under_polar_or_geo_is_refused_by_the_coord(coord):
     _assert_refused_on_both_routes(
         _POLAR_GEO[coord]() + ann.span("x", "b", 2.5, fill="#eee"), _coord_message("b", "x", coord)
     )
-    remedy = _POLAR_GEO[coord]() + ann.span("x", fm.NormCoord(0.5), 2.5, fill=_COLOUR["span"])
+    remedy = _POLAR_GEO[coord]() + ann.span(
+        "x", fm.NormCoord(0.25), fm.NormCoord(0.75), fill=_COLOUR["span"]
+    )
     assert _all(remedy.to_svg(), "rect", fill=_COLOUR["span"])
+
+
+def test_a_number_on_the_polar_band_axis_is_refused_as_a_value():
+    """The value check reads the scale, not the coord: the polar chart's x is still categorical,
+    and the remedy names positions only because a category cannot be placed there either."""
+    chart = _POLAR_GEO["CoordPolar"]()
+    message = _value_under_coord_message
+    _assert_refused_on_both_routes(
+        chart + ann.text(2.5, 2.0, "t"), message("2.5", "x", "CoordPolar")
+    )
+    _assert_refused_on_both_routes(
+        chart + ann.span("x", 1.0, 2.0, fill="#eee"), message("1", "x", "CoordPolar")
+    )
+
+
+def test_a_number_spelling_a_category_under_polar_names_only_the_position_remedies():
+    df = pl.DataFrame({"yr": [2019, 2020, 2021, 2022], "v": [2.0, 1.0, 4.0, 3.0]})
+    polar = fm.Chart(df).mark_bar().encode(x="yr:O", y="v").coord(fm.CoordPolar())
+    _assert_refused_on_both_routes(
+        polar + ann.text(2021, 2.0, "t"), _value_under_coord_message("2021", "x", "CoordPolar")
+    )
+    _assert_refused_on_both_routes(
+        _POLAR_GEO["CoordPolar"]() + ann.text(dt.date(2020, 1, 2), 2.0, "t"),
+        _value_under_coord_message("2020-01-02", "x", "CoordPolar"),
+    )
+
+
+@pytest.mark.parametrize("remedy", [fm.NormCoord(0.5), fm.PixelCoord(200.0)], ids=["norm", "pixel"])
+def test_the_position_remedy_of_a_number_under_polar_renders(remedy):
+    chart = _POLAR_GEO["CoordPolar"]() + ann.text(remedy, remedy, "HELLO", anchor="middle")
+    assert any(e.tag == "text" and e.text == "HELLO" for e in _elements(chart.to_svg()))
 
 
 def test_the_mixed_span_remedies_render_on_the_category_axis():
@@ -690,72 +778,639 @@ def test_the_continuous_axis_remedy_renders_a_span(chart, start, end):
 
 
 # ---------------------------------------------------------------------------
-# A category the band axis lacks: warned once in the caller's axis letter, drawn at the centre
+# A category the band axis lacks: warned once in the caller's axis letter, not drawn
 # ---------------------------------------------------------------------------
 
 
-def _plot_centre(svg: str, axis: str) -> float:
-    ticks = _ticks(svg, axis)
-    values = [ticks[c] for c in _CATS]
-    return (min(values) + max(values)) / 2.0
+def _scene_annotation_count(chart: Any) -> int:
+    """Annotation nodes over every panel of the chart's interactive scene."""
+    panels = json.loads(chart.interactive().scene_json)["panels"]
+    return sum(len(p["annotations"]) for p in panels)
 
 
-def test_an_unknown_category_warns_with_the_axis_letter_and_sits_at_the_centre():
-    chart = _bars("x", "sort") + ann.text(
-        "zz", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
-    )
-    svg, shown = _render_capturing(chart.to_svg)
-    assert shown == [_unknown_message("x")]
-    _near(_measured("text", svg, "x"), [_plot_centre(svg, "x")])
+def _assert_not_drawn(annotated: Any, plain: Any, *warnings: str) -> None:
+    """``annotated`` draws the bytes ``plain`` draws, on the static and the interactive route, and
+    warns exactly ``warnings`` on each: the unknown category left no annotation node behind."""
+    svg, shown = _render_capturing(annotated.to_svg)
+    assert shown == list(warnings)
+    assert svg == plain.to_svg()
+    count, shown = _render_capturing(lambda: _scene_annotation_count(annotated))
+    assert shown == list(warnings)
+    assert count == _scene_annotation_count(plain) == 0
+
+
+def test_an_unknown_category_warns_with_the_axis_letter_and_is_not_drawn():
+    plain = _bars("x", "sort")
+    text = ann.text("zz", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    _assert_not_drawn(plain + text, plain, _unknown_message("x"))
 
 
 def test_an_unknown_category_on_the_y_axis_names_y():
-    chart = _bars("y", "sort") + ann.text(2.0, "zz", "HELLO", color=_COLOUR["text"])
-    svg, shown = _render_capturing(chart.to_svg)
-    assert shown == [_unknown_message("y")]
-    _near(float(_one(svg, "text", fill=_COLOUR["text"]).attrs["y"]), _plot_centre(svg, "y"))
+    plain = _bars("y", "sort")
+    _assert_not_drawn(
+        plain + ann.text(2.0, "zz", "HELLO", color=_COLOUR["text"]), plain, _unknown_message("y")
+    )
 
 
 def test_an_unknown_callout_text_position_names_the_axis_not_the_field():
+    plain = _bars("x", "sort")
     callout = ann.callout(
         "b", 3.0, "note", text_x="zz", text_y=2.0, border_color=_COLOUR["callout"]
     )
-    svg, shown = _render_capturing((_bars("x", "sort") + callout).to_svg)
-    assert shown == [_unknown_message("x")]
-    note = [e for e in _elements(svg) if e.tag == "text" and e.text == "note"][0]
-    _near(float(note.attrs["x"]), _plot_centre(svg, "x"))
+    _assert_not_drawn(plain + callout, plain, _unknown_message("x"))
 
 
-def test_an_unknown_arrow_end_names_the_axis_and_sits_at_the_centre():
+def test_an_unknown_arrow_end_names_the_axis_and_draws_nothing_of_the_arrow():
+    plain = _bars("x", "sort")
     arrow = ann.arrow("b", 1.0, "zz", 3.0, stroke=_COLOUR["arrow"])
-    svg, shown = _render_capturing((_bars("x", "sort") + arrow).to_svg)
-    assert shown == [_unknown_message("x")]
-    line = _one(svg, "line", stroke=_COLOUR["arrow"])
-    _near(float(line.attrs["x1"]), _ticks(svg, "x")["b"])
-    _near(float(line.attrs["x2"]), _plot_centre(svg, "x"))
+    _assert_not_drawn(plain + arrow, plain, _unknown_message("x"))
 
 
 def test_an_unknown_span_end_names_the_axis_not_start_or_end():
+    plain = _bars("x", "sort")
     span = ann.span("x", "b", "zz", fill=_COLOUR["span"])
-    svg, shown = _render_capturing((_bars("x", "sort") + span).to_svg)
-    assert shown == [_unknown_message("x")]
-    # The known end is band b's centre and the unknown end the plot centre.
-    extent = _span_extent(svg, "x")
-    _near(sorted(extent), sorted([_ticks(svg, "x")["b"], _plot_centre(svg, "x")]))
+    _assert_not_drawn(plain + span, plain, _unknown_message("x"))
 
 
 def test_a_span_with_two_unknown_ends_warns_once_per_label():
+    plain = _bars("x", "sort")
     span = ann.span("x", "yy", "zz", fill=_COLOUR["span"])
-    svg, shown = _render_capturing((_bars("x", "sort") + span).to_svg)
-    assert shown == [_unknown_message("x", "yy"), _unknown_message("x", "zz")]
-    (rect,) = _all(svg, "rect", fill=_COLOUR["span"])
-    _near(float(rect.attrs["width"]), 0.0)
-    _near(float(rect.attrs["x"]), _plot_centre(svg, "x"))
+    _assert_not_drawn(plain + span, plain, _unknown_message("x", "yy"), _unknown_message("x", "zz"))
+
+
+def test_a_span_naming_one_unknown_label_twice_warns_once():
+    plain = _bars("x", "sort")
+    span = ann.span("x", "zz", "zz", fill=_COLOUR["span"])
+    _assert_not_drawn(plain + span, plain, _unknown_message("x"))
+
+
+# Each kind with one unknown end (or anchor, or text position), the rest of its coordinates known.
+_UNKNOWN_PRIMITIVES = {
+    "text": lambda: ann.text("zz", 2.0, "HELLO", color=_COLOUR["text"]),
+    "arrow": lambda: ann.arrow("b", 1.0, "zz", 3.0, stroke=_COLOUR["arrow"]),
+    "arrow_start": lambda: ann.arrow("zz", 1.0, "c", 3.0, stroke=_COLOUR["arrow"]),
+    "rect": lambda: ann.rect("b", 1.0, "zz", 3.0, fill=_COLOUR["rect"]),
+    "line": lambda: ann.line("b", 1.0, "zz", 3.0, stroke=_COLOUR["line"]),
+    "span": lambda: ann.span("x", "b", "zz", fill=_COLOUR["span"]),
+    "span_start": lambda: ann.span("x", "zz", "c", fill=_COLOUR["span"]),
+    "bracket": lambda: ann.bracket("b", 3.0, "zz", 3.0, label="r", stroke=_COLOUR["bracket"]),
+    "callout_anchor": lambda: ann.callout(
+        "zz", 3.0, "note", text_x="c", text_y=2.0, border_color=_COLOUR["callout"]
+    ),
+    "callout_text_x": lambda: ann.callout(
+        "b", 3.0, "note", text_x="zz", text_y=2.0, border_color=_COLOUR["callout"]
+    ),
+    "image": lambda: ann.image("zz", 3.0, _IMAGE_SRC, width=10, height=10),
+    "annotate_vline": lambda: fm.annotate_vline("zz", stroke=_COLOUR["line"]),
+    "annotate_vline_labelled": lambda: fm.annotate_vline("zz", label="LBL", stroke="#ff0020"),
+    "annotate_text": lambda: fm.annotate_text("zz", 2.0, "HELLO", color=_COLOUR["text"]),
+    "annotate_rect": lambda: fm.annotate_rect("b", "zz", 1.0, 3.0, fill=_COLOUR["rect"]),
+    "annotate_arrow": lambda: fm.annotate_arrow("b", 1.0, "zz", 3.0, stroke=_COLOUR["arrow"]),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_UNKNOWN_PRIMITIVES))
+def test_every_annotation_kind_with_an_unknown_category_is_not_drawn(kind):
+    plain = _bars("x", "sort")
+    _assert_not_drawn(plain + _UNKNOWN_PRIMITIVES[kind](), plain, _unknown_message("x"))
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: fm.annotate_hline("zz", stroke=_COLOUR["line"]),
+        lambda: ann.rect(1.0, "b", 3.0, "zz", fill=_COLOUR["rect"]),
+        lambda: ann.span("y", "b", "zz", fill=_COLOUR["span"]),
+        lambda: fm.annotate_arrow(1.0, "b", 3.0, "zz", stroke=_COLOUR["arrow"]),
+    ],
+    ids=["annotate_hline", "rect", "span", "annotate_arrow"],
+)
+def test_an_unknown_category_on_the_y_axis_is_not_drawn_for_every_shape(build):
+    plain = _bars("y", "sort")
+    _assert_not_drawn(plain + build(), plain, _unknown_message("y"))
+
+
+@pytest.mark.parametrize("door", sorted(_DOORS))
+def test_an_unknown_category_is_not_drawn_through_every_door(door):
+    chart = _DOORS[door](fm.X("c", sort="-y"), ann.text("zz", 2.0, "HELLO", color=_COLOUR["text"]))
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == [_unknown_message("x")]
+    assert [e for e in _elements(svg) if e.tag == "text" and e.text == "HELLO"] == []
+    count, shown = _render_capturing(lambda: _scene_annotation_count(chart))
+    assert shown == [_unknown_message("x")]
+    # A door may draw nodes of its own (a break's indicators); a known text adds exactly one.
+    known = _DOORS[door](fm.X("c", sort="-y"), _primitive("text", "x"))
+    assert count == _scene_annotation_count(known) - 1
+
+
+def test_an_unknown_category_leaves_the_known_ones_drawn():
+    """A skipped annotation takes only itself: a known one beside it still lands on its band."""
+    plain = _bars("x", "sort")
+    chart = plain + ann.text("zz", 2.0, "SKIP") + _primitive("text", "x")
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == [_unknown_message("x")]
+    assert [e for e in _elements(svg) if e.text == "SKIP"] == []
+    _near(_measured("text", svg, "x"), [_ticks(svg, "x")["b"]])
+    assert _scene_annotation_count(chart) == 1
 
 
 def test_a_known_category_raises_no_warning():
     _, shown = _render_capturing((_bars("x", "sort") + _primitive("text", "x")).to_svg)
     assert shown == []
+
+
+# ---------------------------------------------------------------------------
+# A number or a date on a categorical axis is refused, in the caller's axis letter
+# ---------------------------------------------------------------------------
+
+_NUMBER = 7.5
+
+
+def _number_on_category(kind: str) -> Any:
+    """``kind`` with one number on the category (x) axis and every other coordinate a known
+    category or a value on the continuous axis."""
+    n = _NUMBER
+    return {
+        "text": lambda: ann.text(n, 2.0, "t"),
+        "arrow": lambda: ann.arrow(n, 1.0, "c", 3.0),
+        "arrow_end": lambda: ann.arrow("b", 1.0, n, 3.0),
+        "rect": lambda: ann.rect("b", 1.0, n, 3.0, fill="#eee"),
+        "line": lambda: ann.line("b", 1.0, n, 3.0),
+        "span": lambda: ann.span("x", n, "c", fill="#eee"),
+        "bracket": lambda: ann.bracket(n, 3.0, "c", 3.0, label="r"),
+        "callout_anchor": lambda: ann.callout(n, 3.0, "note", text_x="c", text_y=2.0),
+        "callout_text_x": lambda: ann.callout("b", 3.0, "note", text_x=n, text_y=2.0),
+        "image": lambda: ann.image(n, 3.0, _IMAGE_SRC, width=10, height=10),
+        "annotate_vline": lambda: fm.annotate_vline(n),
+        "annotate_text": lambda: fm.annotate_text(n, 2.0, "t"),
+        "annotate_rect": lambda: fm.annotate_rect("b", n, 1.0, 3.0),
+        "annotate_arrow": lambda: fm.annotate_arrow(n, 1.0, "c", 3.0),
+    }[kind]()
+
+
+_NUMBER_KINDS = [
+    "text",
+    "arrow",
+    "arrow_end",
+    "rect",
+    "line",
+    "span",
+    "bracket",
+    "callout_anchor",
+    "callout_text_x",
+    "image",
+    "annotate_vline",
+    "annotate_text",
+    "annotate_rect",
+    "annotate_arrow",
+]
+
+
+@pytest.mark.parametrize("kind", _NUMBER_KINDS)
+def test_a_number_on_a_band_axis_is_refused_for_every_annotation_kind(kind):
+    _assert_refused_on_both_routes(
+        _bars("x", "sort") + _number_on_category(kind), _value_message("7.5", "x")
+    )
+
+
+@pytest.mark.parametrize(
+    "build,value",
+    [
+        (lambda: ann.text(2.0, 2.0, "t"), "2"),
+        (lambda: fm.annotate_vline(1), "1"),
+        (lambda: ann.span("x", 1.0, 2.0, fill="#eee"), "1"),
+    ],
+    ids=["text", "annotate_vline", "span"],
+)
+def test_a_number_on_a_band_axis_is_refused_with_the_generic_remedy(build, value):
+    _assert_refused_on_both_routes(_bars("x", "default") + build(), _value_message(value, "x"))
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: ann.text(2.0, 7.5, "t"),
+        lambda: fm.annotate_hline(7.5),
+        lambda: ann.span("y", 7.5, "c", fill="#eee"),
+        lambda: ann.rect(1.0, 7.5, 3.0, "b", fill="#eee"),
+    ],
+    ids=["text", "annotate_hline", "span", "rect"],
+)
+def test_a_number_on_a_vertical_category_axis_is_refused_naming_y(build):
+    _assert_refused_on_both_routes(_bars("y", "sort") + build(), _value_message("7.5", "y"))
+
+
+def test_a_number_on_a_category_axis_under_a_callers_flip_names_the_callers_letter():
+    """The caller's x is the category axis, drawn vertically; the refusal still says ``x``."""
+    flipped = fm.Chart(_DF).mark_bar().encode(x="c", y="v").coord(fm.CoordFlip())
+    _assert_refused_on_both_routes(
+        flipped + ann.text(_NUMBER, 2.0, "t"), _value_message("7.5", "x")
+    )
+    on_y = fm.Chart(_DF).mark_bar().encode(x="v", y="c").coord(fm.CoordFlip())
+    _assert_refused_on_both_routes(on_y + ann.text(2.0, _NUMBER, "t"), _value_message("7.5", "y"))
+
+
+def test_a_number_on_the_continuous_axis_beside_a_category_still_draws():
+    """Only the categorical axis refuses a number: ``y`` here is the value axis."""
+    svg, shown = _render_capturing(
+        (_bars("x", "sort") + ann.text("b", _NUMBER, "HELLO", color=_COLOUR["text"])).to_svg
+    )
+    assert shown == []
+    assert [e.text for e in _elements(svg) if e.attrs.get("fill") == _COLOUR["text"]] == ["HELLO"]
+
+
+@pytest.mark.parametrize("door", sorted(_DOORS))
+def test_a_number_on_a_band_axis_is_refused_through_every_door_on_both_routes(door):
+    chart = _DOORS[door](fm.X("c", sort="-y"), ann.text(_NUMBER, 2.0, "t"))
+    message = _value_message("7.5", "x")
+    with pytest.raises(ValueError) as static:
+        chart.to_svg()
+    assert str(static.value) == _STATIC_PREFIX.get(door, "") + message
+    with pytest.raises(ValueError) as interactive:
+        chart.interactive().to_html()
+    assert str(interactive.value) == _INTERACTIVE_PREFIX.get(door, "") + message
+
+
+# A refusal inside a composite leaf is prefixed by the leaf that failed; the prefix differs by
+# route for a LayerChart (the static route renders its overlay leaves, the interactive route the
+# merged panel).
+_STATIC_PREFIX = {
+    "layer_chart": "failed to render composite leaf leaf #1: ",
+    "hconcat_leaf": "failed to render composite leaf leaf #0: ",
+}
+_INTERACTIVE_PREFIX = {"hconcat_leaf": "failed to render composite leaf leaf #0: "}
+
+
+def test_a_number_beside_a_category_on_the_continuous_axis_refuses_the_category_first():
+    """Refusal order: the category on the continuous axis speaks before the number on the
+    categorical one."""
+    chart = _bars("x", "default") + ann.text(_NUMBER, "q", "t")
+    _assert_refused_on_both_routes(chart, _continuous_message("q", "y"))
+
+
+@pytest.mark.parametrize("coord", sorted(_POLAR_GEO))
+def test_a_number_before_a_category_under_polar_or_geo_keeps_the_coord_refusal_for_the_category(
+    coord,
+):
+    """Under geo the 2.5 lies on the continuous lon axis; under polar it is the number first in
+    the spec. Either way the category is read first and named."""
+    _assert_refused_on_both_routes(
+        _POLAR_GEO[coord]() + ann.span("x", 2.5, "b", fill="#eee"), _coord_message("b", "x", coord)
+    )
+
+
+def test_a_number_on_an_integer_ordinal_axis_names_the_label_that_spells_it():
+    df = pl.DataFrame({"yr": [2019, 2020, 2021, 2022], "v": [2.0, 1.0, 4.0, 3.0]})
+    plain = fm.Chart(df).mark_bar().encode(x="yr:O", y="v")
+    _assert_refused_on_both_routes(
+        plain + ann.text(2021, 2.0, "t"), _value_message("2021", "x", "2021")
+    )
+    # A number that spells no category gets the generic remedy.
+    _assert_refused_on_both_routes(plain + ann.text(2030, 2.0, "t"), _value_message("2030", "x"))
+
+
+def test_the_label_remedy_of_an_integer_ordinal_axis_lands_on_the_tick():
+    df = pl.DataFrame({"yr": [2019, 2020, 2021, 2022], "v": [2.0, 1.0, 4.0, 3.0]})
+    chart = fm.Chart(df).mark_bar().encode(x="yr:O", y="v") + ann.text(
+        "2021", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
+    )
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    tick = _ticks(svg, "x")["2021"]
+    _near(_measured("text", svg, "x"), [tick])
+    (node,) = [n for n in _scene_annotations(chart) if n["type"] == "text"]
+    _near(node["x"], tick)
+
+
+def test_a_number_on_a_float_ordinal_axis_names_the_label_that_spells_it():
+    df = pl.DataFrame({"c": [1.5, 2.5, 3.5, 4.5], "v": [2.0, 1.0, 4.0, 3.0]})
+    plain = fm.Chart(df).mark_bar().encode(x="c:O", y="v")
+    _assert_refused_on_both_routes(
+        plain + ann.text(2.5, 2.0, "t"), _value_message("2.5", "x", "2.5")
+    )
+
+
+@pytest.mark.parametrize(
+    "coord",
+    [fm.NormCoord(0.5), fm.PixelCoord(200.0)],
+    ids=["norm", "pixel"],
+)
+def test_the_position_remedy_renders_in_place_of_the_refused_number(coord):
+    chart = _bars("x", "sort") + ann.text(coord, 2.0, "HELLO", color=_COLOUR["text"])
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    assert [e.text for e in _elements(svg) if e.attrs.get("fill") == _COLOUR["text"]] == ["HELLO"]
+    assert _scene_annotation_count(chart) == 1
+
+
+@pytest.mark.parametrize("coord", [fm.NormCoord(0.25), fm.PixelCoord(120.0)], ids=["norm", "pixel"])
+def test_the_position_remedy_renders_in_place_of_a_refused_helper_number(coord):
+    chart = _bars("x", "sort") + fm.annotate_vline(coord, stroke=_COLOUR["line"])
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    assert _all(svg, "line", stroke=_COLOUR["line"])
+    assert _scene_annotation_count(chart) == 1
+
+
+# Each spelling of 2020-01-02 is a date: refused on a string band axis, with no label clause
+# because no category of that axis is a date.
+_DATE_SPELLINGS = {
+    "date": dt.date(2020, 1, 2),
+    "datetime": dt.datetime(2020, 1, 2),
+    "iso": "2020-01-02",
+    "datetime64": np.datetime64("2020-01-02"),
+}
+
+
+@pytest.mark.parametrize("spelling", sorted(_DATE_SPELLINGS))
+def test_a_date_on_a_string_band_axis_is_refused_without_a_label_clause(spelling):
+    chart = _bars("x", "sort") + ann.text(_DATE_SPELLINGS[spelling], 2.0, "t")
+    _assert_refused_on_both_routes(chart, _value_message("2020-01-02", "x"))
+
+
+def test_a_datetime_on_a_string_band_axis_is_refused_naming_its_full_text():
+    chart = _bars("x", "sort") + ann.text(dt.datetime(2020, 1, 2, 12), 2.0, "t")
+    _assert_refused_on_both_routes(chart, _value_message("2020-01-02T12:00:00", "x"))
+
+
+def test_a_date_on_a_string_band_axis_whose_category_spells_it_is_still_refused():
+    """The axis holds the string ``'2020-01-02'``, which is not a date category: the date is
+    refused without a label clause, and the explicit category spelling lands on the band."""
+    df = pl.DataFrame({"c": ["2020-01-01", "2020-01-02", "2020-01-03"], "v": [1.0, 2.0, 3.0]})
+    plain = fm.Chart(df).mark_bar().encode(x="c", y="v")
+    _assert_refused_on_both_routes(
+        plain + ann.text(dt.date(2020, 1, 2), 2.0, "t"), _value_message("2020-01-02", "x")
+    )
+    chart = plain + ann.text("2020-01-02", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    _near(_measured("text", svg, "x"), [_ticks(svg, "x")["2020-01-02"]])
+
+
+@pytest.mark.parametrize("coord", [fm.NormCoord(0.5), fm.PixelCoord(200.0)], ids=["norm", "pixel"])
+def test_the_position_remedy_renders_in_place_of_a_refused_date(coord):
+    refused = _bars("x", "sort") + ann.text(dt.date(2020, 1, 2), 2.0, "HELLO")
+    _assert_refused_on_both_routes(refused, _value_message("2020-01-02", "x"))
+    chart = _bars("x", "sort") + ann.text(coord, 2.0, "HELLO", color=_COLOUR["text"])
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    assert [e.text for e in _elements(svg) if e.attrs.get("fill") == _COLOUR["text"]] == ["HELLO"]
+
+
+# ---------------------------------------------------------------------------
+# A date on an axis whose categories are dates lands on its band
+# ---------------------------------------------------------------------------
+
+_DAY_ONE, _DAY_TWO, _DAY_THREE = dt.date(2020, 1, 1), dt.date(2020, 1, 2), dt.date(2020, 1, 3)
+_DAYS = pl.DataFrame(
+    {
+        "day": [_DAY_ONE] * 3 + [_DAY_TWO] * 3 + [_DAY_THREE] * 3,
+        "v": [1.0, 2.0, 3.0, 2.0, 3.0, 4.0, 3.0, 4.0, 5.0],
+    }
+)
+# The same frame with each day spelled as its category label: the string band axis the date axis
+# must draw identically.
+_DAY_LABELS = _DAYS.with_columns(pl.col("day").dt.to_string("%Y-%m-%d"))
+_DAY_TEXT = ("2020-01-01", "2020-01-02", "2020-01-03")
+_NOON = pl.DataFrame(
+    {
+        "day": [dt.datetime(2020, 1, 1, 12)] * 3 + [dt.datetime(2020, 1, 2)] * 3,
+        "v": [1.0, 2.0, 3.0, 2.0, 3.0, 4.0],
+    }
+)
+
+
+def _day_boxes(frame: pl.DataFrame = _DAYS) -> fm.Chart:
+    return fm.catplot(frame, x="day", y="v", kind="box")
+
+
+def _hello(svg: str) -> float:
+    (el,) = [e for e in _elements(svg) if e.tag == "text" and e.text == "HELLO"]
+    return float(el.attrs["x"])
+
+
+def _hello_text(x: Any) -> Any:
+    return ann.text(x, 2.0, "HELLO", anchor="middle")
+
+
+@pytest.mark.parametrize("spelling", sorted(_DATE_SPELLINGS))
+def test_a_date_lands_on_the_band_centre_of_its_date_category(spelling):
+    chart = _day_boxes() + _hello_text(_DATE_SPELLINGS[spelling])
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    ticks = _ticks(svg, "x")
+    assert list(ticks) == list(_DAY_TEXT)
+    _near(_hello(svg), ticks["2020-01-02"])
+    (node,) = [n for n in _scene_annotations(chart) if n["type"] == "text"]
+    _near(node["x"], ticks["2020-01-02"])
+
+
+def test_a_date_vline_lands_on_the_band_centre_of_the_date_axis():
+    chart = _day_boxes() + fm.annotate_vline(_DAY_TWO, stroke=_COLOUR["line"])
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    centre = _ticks(svg, "x")["2020-01-02"]
+    line = _one(svg, "line", stroke=_COLOUR["line"])
+    _near([float(line.attrs["x1"]), float(line.attrs["x2"])], [centre, centre])
+    (node,) = [n for n in _scene_annotations(chart) if n["type"] == "line"]
+    _near([node["x1"], node["x2"]], [centre, centre])
+
+
+def test_each_date_of_the_axis_lands_on_its_own_band():
+    """The three days land on three different ticks: a placement that ignored the date and
+    used one band for every date would fail."""
+    ticks = _ticks(_day_boxes().to_svg(), "x")
+    for day, label in (
+        (_DAY_ONE, "2020-01-01"),
+        (_DAY_TWO, "2020-01-02"),
+        (_DAY_THREE, "2020-01-03"),
+    ):
+        svg = (_day_boxes() + _hello_text(day)).to_svg()
+        _near(_hello(svg), ticks[label])
+    assert len(set(ticks.values())) == 3
+
+
+def test_a_date_span_shades_whole_bands_of_both_dates():
+    span = ann.span("x", _DAY_ONE, _DAY_TWO, fill=_COLOUR["span"])
+    svg, shown = _render_capturing((_day_boxes() + span).to_svg)
+    assert shown == []
+    ticks = _ticks(svg, "x")
+    lo, hi = _span_extent(svg, "x")
+    step = ticks["2020-01-02"] - ticks["2020-01-01"]
+    assert lo < ticks["2020-01-01"] - step / 4
+    assert hi > ticks["2020-01-02"] + step / 4
+    assert hi < ticks["2020-01-03"]
+    twin = _day_boxes(_DAY_LABELS) + ann.span(
+        "x",
+        OrdinalCategoryCoord("2020-01-01"),
+        OrdinalCategoryCoord("2020-01-02"),
+        fill=_COLOUR["span"],
+    )
+    _near(_span_extent(twin.to_svg(), "x"), (lo, hi))
+    nodes = [n for n in _scene_annotations(_day_boxes() + span) if n["type"] == "rect"]
+    _near((min(n["x"] for n in nodes), max(n["x"] + n["w"] for n in nodes)), (lo, hi))
+
+
+def test_a_date_annotation_places_as_the_equal_category_text_does():
+    """The date chart against its text-label twin: the same ticks, and a date lands where the
+    explicit category text does."""
+    date_svg = (_day_boxes() + _hello_text(_DAY_TWO)).to_svg()
+    twin_svg = (_day_boxes(_DAY_LABELS) + _hello_text(OrdinalCategoryCoord("2020-01-02"))).to_svg()
+    assert _ticks(date_svg, "x") == _ticks(twin_svg, "x")
+    _near(_hello(date_svg), _hello(twin_svg))
+
+
+def test_a_non_midnight_date_category_axis_holds_the_full_text_label():
+    chart = _day_boxes(_NOON) + _hello_text(dt.datetime(2020, 1, 1, 12))
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    ticks = _ticks(svg, "x")
+    assert list(ticks) == ["2020-01-01T12:00:00", "2020-01-02"]
+    _near(_hello(svg), ticks["2020-01-01T12:00:00"])
+    iso = (_day_boxes(_NOON) + _hello_text("2020-01-01T12:00:00")).to_svg()
+    _near(_hello(iso), ticks["2020-01-01T12:00:00"])
+
+
+def test_a_midnight_date_on_a_non_midnight_date_axis_lands_on_its_own_band():
+    svg = (_day_boxes(_NOON) + _hello_text(_DAY_TWO)).to_svg()
+    _near(_hello(svg), _ticks(svg, "x")["2020-01-02"])
+
+
+def test_the_date_whose_instant_is_not_a_category_is_not_drawn():
+    """``2020-01-01`` at midnight is not the ``2020-01-01T12:00:00`` category."""
+    plain = _day_boxes(_NOON)
+    absent = ["2020-01-01T12:00:00", "2020-01-02"]
+    _assert_not_drawn(
+        plain + _hello_text(_DAY_ONE), plain, _unknown_message("x", "2020-01-01", absent)
+    )
+
+
+@pytest.mark.parametrize(
+    "build,label",
+    [
+        (lambda: _hello_text(dt.date(2020, 1, 5)), "2020-01-05"),
+        (lambda: fm.annotate_vline(dt.date(2020, 1, 5)), "2020-01-05"),
+        (lambda: fm.annotate_text("2020-01-05", 2.0, "HELLO"), "2020-01-05"),
+        (lambda: _hello_text(np.datetime64("2020-01-05")), "2020-01-05"),
+        (lambda: ann.span("x", _DAY_ONE, dt.date(2020, 1, 5), fill=_COLOUR["span"]), "2020-01-05"),
+    ],
+    ids=["text", "annotate_vline", "annotate_text", "datetime64", "span-end"],
+)
+def test_a_date_absent_from_the_date_axis_is_not_drawn_and_warns_with_the_date_labels(build, label):
+    plain = _day_boxes()
+    _assert_not_drawn(plain + build(), plain, _unknown_message("x", label, list(_DAY_TEXT)))
+
+
+def test_a_span_of_two_absent_dates_warns_once_per_label():
+    plain = _day_boxes()
+    span = ann.span("x", dt.date(2020, 1, 5), dt.date(2020, 1, 6), fill=_COLOUR["span"])
+    _assert_not_drawn(
+        plain + span,
+        plain,
+        _unknown_message("x", "2020-01-05", list(_DAY_TEXT)),
+        _unknown_message("x", "2020-01-06", list(_DAY_TEXT)),
+    )
+
+
+def test_a_number_on_a_date_axis_is_refused_without_a_label_clause():
+    _assert_refused_on_both_routes(_day_boxes() + ann.text(3.0, 2.0, "t"), _value_message("3", "x"))
+    _assert_refused_on_both_routes(
+        _day_boxes() + fm.annotate_vline(1577923200000.0), _value_message("1577923200000", "x")
+    )
+
+
+def test_a_category_label_on_a_date_axis_lands_on_its_band():
+    """The text label of a date category is a category: it lands on the band."""
+    chart = _day_boxes() + _hello_text(OrdinalCategoryCoord("2020-01-02"))
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    _near(_hello(svg), _ticks(svg, "x")["2020-01-02"])
+
+
+def test_a_date_on_a_date_axis_under_a_callers_flip_lands_on_the_callers_axis():
+    """The caller's x holds the dates; drawn vertically, the band sits on the page's y."""
+    flipped = _day_boxes().coord(fm.CoordFlip())
+    chart = flipped + ann.text(_DAY_TWO, 2.0, "HELLO", anchor="middle")
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    (el,) = [e for e in _elements(svg) if e.tag == "text" and e.text == "HELLO"]
+    _near(float(el.attrs["y"]), _ticks(svg, "y")["2020-01-02"])
+    _assert_refused_on_both_routes(flipped + ann.text(3.0, 2.0, "t"), _value_message("3", "x"))
+    absent = flipped + ann.text(dt.date(2020, 1, 5), 2.0, "t")
+    _assert_not_drawn(absent, flipped, _unknown_message("x", "2020-01-05", list(_DAY_TEXT)))
+
+
+def test_a_date_lands_on_the_date_axis_through_the_layered_doors():
+    plus = _day_boxes() + _hello_text(_DAY_TWO)
+    via_layer = fm.Chart(_DAYS).encode(x="day:O", y="v").layer(fm.Layer(mark="bar")) + _hello_text(
+        _DAY_TWO
+    )
+    for chart in (plus, via_layer):
+        svg, shown = _render_capturing(chart.to_svg)
+        assert shown == []
+        _near(_hello(svg), _ticks(svg, "x")["2020-01-02"])
+
+
+# ---------------------------------------------------------------------------
+# A date, a datetime, a datetime64 and an ISO string cross to the renderer as an instant
+# ---------------------------------------------------------------------------
+
+_JAN_TWO_MS = 1577923200000.0
+
+
+@pytest.mark.parametrize("spelling", sorted(_DATE_SPELLINGS))
+def test_every_temporal_spelling_crosses_as_an_instant(spelling):
+    """A date, datetime and datetime64 cross as the bare instant; an ISO string also carries the
+    text as written."""
+    value = _DATE_SPELLINGS[spelling]
+    wire = {"instant": _JAN_TWO_MS} | ({"text": value} if spelling == "iso" else {})
+    assert ann.text(value, 2.0, "t").to_dict()["x"] == wire
+    span = ann.span("x", value, value, fill="#eee").to_dict()
+    assert (span["start"], span["end"]) == (wire,) * 2
+    sent = (_temporal_chart() + fm.annotate_vline(value))._resolve_chart_config()["annotations"]
+    assert [a["x1"] for a in sent] == [wire]
+    sent = (_temporal_chart() + ann.text(value, 2.0, "t"))._resolve_chart_config()["annotations"]
+    assert [a["x"] for a in sent] == [wire]
+
+
+def test_a_number_a_category_and_a_position_keep_their_own_wire_forms():
+    """An epoch-millisecond number is not an instant: only a date spelling crosses as one."""
+    assert ann.text(_JAN_TWO_MS, 2.0, "t").to_dict()["x"] == _JAN_TWO_MS
+    assert ann.text("b", 2.0, "t").to_dict()["x"] == {"category": "b"}
+    assert ann.text(fm.NormCoord(0.5), 2.0, "t").to_dict()["x"] == {"norm": 0.5}
+    assert ann.text(fm.PixelCoord(40.0), 2.0, "t").to_dict()["x"] == {"px": 40.0}
+
+
+def test_a_numpy_datetime64_crosses_as_the_instant_of_the_equal_datetime():
+    for unit in ("D", "s", "ms", "us"):
+        value = np.datetime64("2020-01-02T00:00:00", unit)
+        assert ann.text(value, 2.0, "t").to_dict()["x"] == {"instant": _JAN_TWO_MS}
+    noon = np.datetime64("2020-01-02T12:00:00.250")
+    twin = dt.datetime(2020, 1, 2, 12, 0, 0, 250000)
+    assert ann.text(noon, 2.0, "t").to_dict()["x"] == ann.text(twin, 2.0, "t").to_dict()["x"]
+
+
+def test_a_numpy_datetime64_is_placed_as_the_equal_datetime_on_a_temporal_axis():
+    chart = _temporal_chart()
+    for build in (
+        lambda v: ann.text(v, 2.0, "t"),
+        lambda v: fm.annotate_vline(v),
+        lambda v: ann.span("x", v, v, fill=_COLOUR["span"]),
+    ):
+        as_datetime = (chart + build(dt.datetime(2020, 1, 2))).to_svg()
+        as_numpy = (chart + build(np.datetime64("2020-01-02"))).to_svg()
+        assert as_numpy == as_datetime
+
+
+def test_every_temporal_spelling_is_placed_alike_on_a_temporal_axis():
+    chart = _temporal_chart()
+    placed = {
+        name: (chart + ann.text(value, 2.0, "HELLO", color=_COLOUR["text"])).to_svg()
+        for name, value in _DATE_SPELLINGS.items()
+    }
+    assert len(set(placed.values())) == 1
+    millis = (chart + ann.text(_JAN_TWO_MS, 2.0, "HELLO", color=_COLOUR["text"])).to_svg()
+    assert millis == placed["date"]
 
 
 # ---------------------------------------------------------------------------
@@ -1012,14 +1667,10 @@ def test_a_category_on_a_label_mapped_axis_lands_on_its_band():
 
 def test_the_display_label_is_an_unknown_category():
     """``'Bee'`` is not one of the axis's categories (``a`` to ``d``): the unknown-category
-    warning names it on the static and the interactive routes."""
-    chart = _doors_bars(_mapped(_BEE, sort="-y")) + ann.text(
-        "Bee", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
-    )
-    _, shown = _render_capturing(chart.to_svg)
-    assert shown == [_unknown_message("x", "Bee")]
-    _, shown = _render_capturing(lambda: _first_annotated_panel(chart))
-    assert shown == [_unknown_message("x", "Bee")]
+    warning names it on the static and the interactive routes, and nothing is drawn."""
+    plain = _doors_bars(_mapped(_BEE, sort="-y"))
+    chart = plain + ann.text("Bee", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    _assert_not_drawn(chart, plain, _unknown_message("x", "Bee"))
 
 
 def test_a_mixed_span_on_a_label_mapped_axis_echoes_the_data_value():
@@ -1093,9 +1744,9 @@ def test_a_category_on_a_label_mapped_y_axis_lands_on_its_band():
 
 
 def test_the_display_label_is_an_unknown_category_on_the_y_axis():
-    chart = _mapped_y(_BEE) + _text_y("Bee")
-    _, shown = _render_capturing(chart.to_svg)
-    assert shown == [_unknown_message("y", "Bee")]
+    _assert_not_drawn(
+        _mapped_y(_BEE) + _text_y("Bee"), _mapped_y(_BEE), _unknown_message("y", "Bee")
+    )
 
 
 def test_a_swapping_label_map_on_the_y_axis_places_the_data_value():
@@ -1244,18 +1895,9 @@ def test_a_category_lands_on_its_tick_for_every_category_dtype(dtype):
 def test_a_boolean_category_is_matched_by_its_axis_label_only():
     """The axis labels a boolean ``true``/``false``; ``True`` is not one of them."""
     df, field, _ = _dtype_frames()["boolean"]
-    chart = fm.Chart(df).mark_bar().encode(x=field, y="v") + ann.text(
-        "True", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
-    )
-    svg, shown = _render_capturing(chart.to_svg)
-    assert shown == [
-        "annotation category 'True' not found in x-axis domain ['false', 'true']; "
-        "placing at plot center"
-    ]
-    twin = fm.Chart(df).mark_bar().encode(x=field, y="v") + ann.text(
-        fm.NormCoord(0.5), 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
-    )
-    _near(_measured("text", svg, "x"), _measured("text", twin.to_svg(), "x"))
+    plain = fm.Chart(df).mark_bar().encode(x=field, y="v")
+    chart = plain + ann.text("True", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    _assert_not_drawn(chart, plain, _unknown_message("x", "True", ["false", "true"]))
 
 
 _NO_ROWS = _NO_ROWS_TO_DRAW
@@ -1276,16 +1918,212 @@ _ALL_NULL = _all_keys_null_message("mark_bar", "c")
     ],
     ids=["zero-row", "all-null"],
 )
-def test_a_category_on_an_empty_category_axis_warns_and_sits_at_the_centre(frame, leading):
-    def annotated(coord: Any) -> fm.Chart:
-        return fm.Chart(frame).mark_bar().encode(x="c", y="v") + ann.text(
-            coord, 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
-        )
+def test_a_category_on_an_empty_category_axis_warns_and_is_not_drawn(frame, leading):
+    plain = fm.Chart(frame).mark_bar().encode(x="c", y="v")
+    chart = plain + ann.text("b", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == [*leading, _unknown_message("x", "b", [])]
+    assert svg == _render_capturing(plain.to_svg)[0]
+    count, shown = _render_capturing(lambda: _scene_annotation_count(chart))
+    assert shown == [*leading, _unknown_message("x", "b", [])]
+    assert count == 0
 
-    svg, shown = _render_capturing(annotated("b").to_svg)
-    assert shown == [
-        *leading,
-        "annotation category 'b' not found in x-axis domain []; placing at plot center",
-    ]
-    centre_svg = _render_capturing(annotated(fm.NormCoord(0.5)).to_svg)[0]
-    _near(_measured("text", svg, "x"), _measured("text", centre_svg, "x"))
+
+# ---------------------------------------------------------------------------
+# A date on a date-category axis is its category for every check, not only for placement
+# ---------------------------------------------------------------------------
+
+
+def _polar_days() -> fm.Chart:
+    return fm.Chart(_DAYS).mark_bar().encode(x="day:O", y="v").coord(fm.CoordPolar())
+
+
+@pytest.mark.parametrize(
+    "day,label",
+    [(dt.date(2020, 1, 2), "2020-01-02"), (dt.date(2020, 1, 9), "2020-01-09")],
+    ids=["present", "absent"],
+)
+def test_a_date_on_a_date_axis_under_polar_is_refused_as_its_category(day, label):
+    _assert_refused_on_both_routes(
+        _polar_days() + _hello_text(day), _coord_message(label, "x", "CoordPolar")
+    )
+
+
+def test_a_date_on_a_date_axis_under_polar_has_a_position_remedy_that_renders():
+    chart = _polar_days() + ann.text(fm.NormCoord(0.5), fm.NormCoord(0.5), "HELLO")
+    assert any(e.tag == "text" and e.text == "HELLO" for e in _elements(chart.to_svg()))
+
+
+@pytest.mark.parametrize(
+    "start,end,category_end",
+    [(_DAY_TWO, fm.NormCoord(1.0), "start"), (fm.PixelCoord(5.0), _DAY_TWO, "end")],
+    ids=["date-first", "pixel-first"],
+)
+def test_a_date_span_with_one_position_end_is_refused_as_a_mixed_span(start, end, category_end):
+    chart = _day_boxes() + ann.span("x", start, end, fill=_COLOUR["span"])
+    _assert_refused_on_both_routes(chart, _mixed_span_message("x", category_end, "2020-01-02"))
+
+
+def test_a_date_span_with_an_unknown_category_end_is_not_drawn_and_warns():
+    plain = _day_boxes()
+    span = ann.span("x", _DAY_TWO, "zz", fill=_COLOUR["span"])
+    _assert_not_drawn(plain + span, plain, _unknown_message("x", "zz", list(_DAY_TEXT)))
+
+
+def test_a_category_and_a_date_span_shades_the_bands_two_dates_shade():
+    dates = ann.span("x", _DAY_ONE, _DAY_TWO, fill=_COLOUR["span"])
+    mixed = ann.span("x", OrdinalCategoryCoord("2020-01-01"), _DAY_TWO, fill=_COLOUR["span"])
+    svg, shown = _render_capturing((_day_boxes() + mixed).to_svg)
+    assert shown == []
+    _near(_span_extent(svg, "x"), _span_extent((_day_boxes() + dates).to_svg(), "x"))
+    scene = [n for n in _scene_annotations(_day_boxes() + mixed) if n["type"] == "rect"]
+    twin = [n for n in _scene_annotations(_day_boxes() + dates) if n["type"] == "rect"]
+    _near(
+        (min(n["x"] for n in scene), max(n["x"] + n["w"] for n in scene)),
+        (min(n["x"] for n in twin), max(n["x"] + n["w"] for n in twin)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# A helper's own coordinates on a categorical axis are refused in the helper's voice
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "chart,axis",
+    [
+        (lambda: _bars("x", "default"), "x"),
+        (lambda: _bars("y", "default"), "y"),
+        (lambda: fm.Chart(_DF).mark_bar().encode(x="c", y="v").coord(fm.CoordFlip()), "x"),
+        (lambda: _POLAR_GEO["CoordPolar"](), "x"),
+    ],
+    ids=["x", "y", "flip", "polar"],
+)
+def test_annotate_abline_on_a_categorical_axis_is_refused_in_its_own_voice(chart, axis):
+    _assert_refused_on_both_routes(
+        chart() + fm.annotate_abline(1.0, 0.0), _helper_message("annotate_abline", axis)
+    )
+
+
+def test_only_annotate_abline_stamps_its_line_with_its_entry():
+    assert (
+        fm.annotate_abline(1.0, 0.0)._annotation_primitive.to_dict()["entry"] == "annotate_abline"
+    )
+    assert "entry" not in ann.line(0.0, 0.0, 1.0, 1.0).to_dict()
+    assert "entry" not in fm.annotate_vline(1.0)._annotation_primitive.to_dict()
+    assert "entry" not in fm.annotate_hline(1.0)._annotation_primitive.to_dict()
+
+
+def test_a_line_the_caller_wrote_keeps_the_value_voice_on_a_band_axis():
+    _assert_refused_on_both_routes(
+        _bars("x", "default") + ann.line("b", 1.0, _NUMBER, 3.0), _value_message("7.5", "x")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Boundaries of the value refusal and the skip
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pl.DataFrame({"c": pl.Series([], dtype=pl.Utf8), "v": pl.Series([], dtype=pl.Float64)}),
+        pl.DataFrame({"c": pl.Series([None, None], dtype=pl.Utf8), "v": [1.0, 2.0]}),
+    ],
+    ids=["zero-row", "all-null"],
+)
+def test_a_number_on_an_empty_category_axis_is_refused(frame):
+    chart = fm.Chart(frame).mark_bar().encode(x="c", y="v") + ann.text(2.0, 2.0, "t")
+    _assert_refused_on_both_routes(chart, _value_message("2", "x"))
+
+
+@pytest.mark.parametrize(
+    "frame,number,label",
+    [
+        (
+            pl.DataFrame({"c": pl.Series([1.5, 2.5, 3.5], dtype=pl.Float32), "v": [1.0, 2.0, 3.0]}),
+            2.5,
+            "2.5",
+        ),
+        (pl.DataFrame({"c": pl.Series([1, 2, 3], dtype=pl.Int8), "v": [1.0, 2.0, 3.0]}), 2, "2"),
+    ],
+    ids=["float32", "int8"],
+)
+def test_a_number_on_a_narrow_ordinal_axis_names_the_label_that_spells_it(frame, number, label):
+    chart = fm.Chart(frame).mark_bar().encode(x="c:O", y="v") + ann.text(number, 2.0, "t")
+    _assert_refused_on_both_routes(chart, _value_message(label, "x", label))
+
+
+# ---------------------------------------------------------------------------
+# An ISO string equal to a label of a string axis names that category
+# ---------------------------------------------------------------------------
+
+
+def _iso_text_days() -> fm.Chart:
+    return _day_boxes(_DAY_LABELS)
+
+
+def test_an_iso_string_that_is_a_label_of_a_string_axis_lands_on_its_band():
+    df = pl.DataFrame({"d": list(_DAY_TEXT), "v": [1.0, 2.0, 3.0]})
+    plain = fm.Chart(df).mark_bar().encode(x="d", y="v")
+    chart = plain + ann.text("2020-01-02", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    tick = _ticks(svg, "x")["2020-01-02"]
+    _near(_measured("text", svg, "x"), [tick])
+    (node,) = [n for n in _scene_annotations(chart) if n["type"] == "text"]
+    _near(node["x"], tick)
+    twin = plain + ann.text(
+        OrdinalCategoryCoord("2020-01-02"), 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
+    )
+    assert svg == twin.to_svg()
+    # The same chart with the label shifted off the tick: the text moved with the label.
+    other = plain + ann.text("2020-01-03", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    assert other.to_svg() != svg
+    # The vline and the span on the ISO-text twin of the date axis.
+    base = _iso_text_days()
+    ticks = _ticks(base.to_svg(), "x")
+    vline = _render_capturing((base + fm.annotate_vline("2020-01-02", stroke="#ff0010")).to_svg)
+    assert vline[1] == []
+    line = _one(vline[0], "line", stroke="#ff0010")
+    _near(float(line.attrs["x1"]), ticks["2020-01-02"])
+    span = ann.span("x", "2020-01-01", "2020-01-02", fill=_COLOUR["span"])
+    twin_span = ann.span(
+        "x",
+        OrdinalCategoryCoord("2020-01-01"),
+        OrdinalCategoryCoord("2020-01-02"),
+        fill=_COLOUR["span"],
+    )
+    svg, shown = _render_capturing((base + span).to_svg)
+    assert shown == []
+    _near(_span_extent(svg, "x"), _span_extent((base + twin_span).to_svg(), "x"))
+    lo, hi = _span_extent(svg, "x")
+    assert lo < ticks["2020-01-01"] < ticks["2020-01-02"] < hi < ticks["2020-01-03"]
+
+
+def test_an_iso_string_that_is_not_a_label_of_a_string_axis_is_refused_and_its_remedy_lands():
+    base = _iso_text_days()
+    _assert_refused_on_both_routes(
+        base + ann.text("2020-01-09", 2.0, "t"), _value_message("2020-01-09", "x")
+    )
+    remedy = base + ann.text("2020-01-02", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
+    svg, shown = _render_capturing(remedy.to_svg)
+    assert shown == []
+    _near(_measured("text", svg, "x"), [_ticks(svg, "x")["2020-01-02"]])
+
+
+def test_an_iso_string_on_a_string_band_axis_is_refused_quoting_its_text():
+    chart = _bars("x", "default") + ann.text("2020-01-02T00:00:00", 2.0, "t")
+    _assert_refused_on_both_routes(chart, _value_message("2020-01-02T00:00:00", "x"))
+
+
+def test_an_iso_string_that_is_a_label_is_refused_under_polar_as_its_category():
+    polar = fm.Chart(_DAY_LABELS).mark_bar().encode(x="day", y="v").coord(fm.CoordPolar())
+    _assert_refused_on_both_routes(
+        polar + ann.text("2020-01-02", 2.0, "t"), _coord_message("2020-01-02", "x", "CoordPolar")
+    )
+    span = ann.span("x", "2020-01-02", fm.NormCoord(0.9), fill="#eee")
+    _assert_refused_on_both_routes(
+        _iso_text_days() + span, _mixed_span_message("x", "start", "2020-01-02")
+    )

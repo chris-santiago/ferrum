@@ -235,6 +235,7 @@ fn build_line_annotation() {
         stroke: Some("#000000".to_string()),
         stroke_width: 2.0,
         dash: Some(vec![4.0, 2.0]),
+        entry: None,
     }];
     let ann = build_annotations(&specs, &ctx).unwrap();
     // Non-Text specs always land in above_marks.
@@ -570,6 +571,7 @@ fn non_text_specs_always_above_marks() {
             stroke: Some("#000000".to_string()),
             stroke_width: 1.0,
             dash: None,
+            entry: None,
         },
         AnnotationSpec::Arrow {
             x: CoordValue::Norm { norm: 0.0 },
@@ -964,6 +966,7 @@ fn kind_name_covers_every_shape() {
                 stroke: Some("#000".into()),
                 stroke_width: 1.5,
                 dash: None,
+                entry: None,
             },
             "line",
         ),
@@ -1098,6 +1101,7 @@ fn data_coords_on_axis_rect_line_bracket_share_shape() {
             stroke: Some("#000".into()),
             stroke_width: 1.5,
             dash: None,
+            entry: None,
         },
         AnnotationSpec::Bracket {
             x1: CoordValue::Data(1.0),
@@ -2174,6 +2178,50 @@ fn a_mixed_coordinate_rect_drops_whole_when_its_data_bound_is_in_the_gap() {
     }
 }
 
+/// An instant fares exactly as its epoch number does on a broken continuous
+/// axis: suppressed inside a gap, cut across one, placed past one.
+#[test]
+fn an_instant_fares_as_its_number_through_a_break() {
+    let panel = broken_panel(&[[300.0, 400.0]]);
+    let x = panel.remap(AlignAxis::X);
+    let text_at = |x: CoordValue| AnnotationSpec::Text {
+        x,
+        y: CoordValue::Norm { norm: 0.5 },
+        text: "t".to_string(),
+        font_size: 12.0,
+        color: Some("#333333".to_string()),
+        anchor: "middle".to_string(),
+        baseline: "middle".to_string(),
+        angle: 0.0,
+        dx: 0.0,
+        dy: 0.0,
+        z: "above_marks".to_string(),
+    };
+    let span_of = |start: CoordValue, end: CoordValue| AnnotationSpec::Span {
+        axis: "x".to_string(),
+        start,
+        end,
+        fill: Some("#cccccc".to_string()),
+        opacity: 0.2,
+        label_position: "center".to_string(),
+        label: None,
+    };
+    let inst = |ms: f64| CoordValue::Instant { instant: ms, text: None };
+    let cases = [
+        (text_at(inst(350.0)), text_at(CoordValue::Data(350.0)), 0, 1),
+        (span_of(inst(200.0), inst(600.0)), span_of(CoordValue::Data(200.0), CoordValue::Data(600.0)), 2, 0),
+        (text_at(inst(700.0)), text_at(CoordValue::Data(700.0)), 1, 0),
+    ];
+    for (instant_spec, number_spec, drawn, warned) in cases {
+        let (a, wa) = panel.build(&[instant_spec], std::slice::from_ref(&x));
+        let (b, wb) = panel.build(&[number_spec], std::slice::from_ref(&x));
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        assert_eq!(format!("{wa:?}"), format!("{wb:?}"));
+        assert_eq!(a.len(), drawn, "{a:?}");
+        assert_eq!(wa.len(), warned, "{wa:?}");
+    }
+}
+
 // ── Category coordinates ────────────────────────────────────────────────────
 
 mod categories {
@@ -2385,9 +2433,8 @@ mod categories {
     fn a_mixed_span_on_a_category_axis_is_refused_naming_its_category_end() {
         let x = band(&["a", "b", "c"], [50.0, 450.0], 0.0);
         for (start, end, named, other) in [
-            (category("b"), CoordValue::Data(2.5), "start", "end"),
-            (CoordValue::Data(2.5), category("b"), "end", "start"),
             (category("b"), CoordValue::Norm { norm: 0.5 }, "start", "end"),
+            (CoordValue::Pixel { px: 40.0 }, category("b"), "end", "start"),
         ] {
             let (built, _) = run(&[span("x", start, end)], &x, &linear(), None);
             assert_eq!(
@@ -2399,7 +2446,7 @@ mod categories {
             );
         }
         let (y_case, _) = run(
-            &[span("y", category("b"), CoordValue::Data(2.5))],
+            &[span("y", category("b"), CoordValue::Norm { norm: 0.5 })],
             &linear(),
             &band(&["a", "b"], [20.0, 320.0], 0.0),
             None,
@@ -2424,19 +2471,19 @@ mod categories {
     }
 
     #[test]
-    fn an_unknown_category_warns_once_with_the_axis_letter_and_sits_at_the_plot_centre() {
+    fn an_unknown_category_warns_once_with_the_axis_letter_and_is_not_drawn() {
         let x = band(&["b", "a", "c", "d"], [50.0, 450.0], 0.0);
         let specs = [
             text(category("zz"), CoordValue::Data(1.0)),
             text(category("zz"), CoordValue::Data(2.0)),
         ];
         let (built, warnings) = run(&specs, &x, &linear(), None);
-        let (px, _) = text_position(&built.unwrap());
-        assert!((px - 250.0).abs() < 1e-9, "plot centre is 250, got {px}");
+        let built = built.unwrap();
+        assert!(built.above_marks.is_empty() && built.below_marks.is_empty(), "{built:?}");
         let shown: Vec<String> = warnings.iter().map(ToString::to_string).collect();
         assert_eq!(
             shown,
-            ["annotation category 'zz' not found in x-axis domain ['a', 'b', 'c', 'd']; placing at plot center"]
+            ["annotation category 'zz' not found in x-axis domain ['a', 'b', 'c', 'd']; the annotation is not drawn"]
         );
     }
 
@@ -2463,14 +2510,20 @@ mod categories {
     }
 
     #[test]
-    fn a_span_with_an_unknown_end_resolves_both_ends_as_points() {
-        // Band `a` centre is 100 on [50, 450]; the unknown end sits at the plot
-        // centre (250), so the span runs centre to centre, not whole bands.
+    fn a_span_with_an_unknown_end_is_not_drawn_and_a_known_neighbour_still_draws() {
         let x = band(&["a", "b", "c", "d"], [50.0, 450.0], 0.0);
-        let (built, _) = run(&[span("x", category("a"), category("zz"))], &x, &linear(), None);
-        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
-        let (lo, hi) = (rx.min(rx + rw), rx.max(rx + rw));
-        assert!((lo - 100.0).abs() < 1e-9 && (hi - 250.0).abs() < 1e-9, "{lo} {hi}");
+        let specs = [
+            span("x", category("a"), category("zz")),
+            span("x", category("b"), category("b")),
+            span("x", category("yy"), category("zz")),
+        ];
+        let (built, warnings) = run(&specs, &x, &linear(), None);
+        let built = built.unwrap();
+        assert_eq!(built.above_marks.len(), 1, "only the known span draws: {built:?}");
+        let (rx, _, rw, _) = rect_extent_of(&built);
+        assert!((rx - 150.0).abs() < 1e-9 && (rw - 100.0).abs() < 1e-9, "{rx} {rw}");
+        let shown: Vec<String> = warnings.iter().map(ToString::to_string).collect();
+        assert_eq!(shown.len(), 2, "one warning per label, 'zz' once: {shown:?}");
     }
 
     #[test]
@@ -2481,14 +2534,324 @@ mod categories {
     }
 
     #[test]
-    fn numeric_coordinates_on_a_band_axis_keep_their_placement() {
+    fn a_norm_coordinate_on_a_band_axis_and_a_number_on_a_continuous_axis_keep_their_placement() {
         let x = band(&["a", "b"], [50.0, 450.0], 0.0);
-        let (built, warnings) = run(&[text(CoordValue::Data(0.5), CoordValue::Data(50.0))], &x, &linear(), None);
+        let (built, warnings) = run(&[text(CoordValue::Norm { norm: 0.5 }, CoordValue::Data(50.0))], &x, &linear(), None);
         let (px, py) = text_position(&built.unwrap());
-        // A number on a band axis centres on the range; the linear y maps 50 of [0, 100].
+        // Norm 0.5 on the band axis is the plot centre; the linear y maps 50 of [0, 100].
         assert!((px - 250.0).abs() < 1e-9, "x {px}");
         assert!((py - 300.0).abs() < 1e-9, "y {py}");
         assert!(warnings.is_empty());
+    }
+
+    fn value_message(value: &str, axis: &str, label: Option<&str>) -> String {
+        let clause = label.map_or("a category label".to_string(), |l| format!("the category label '{l}'"));
+        format!(
+            "annotation value {value} on the {axis} axis: the {axis} scale is categorical, so it places \
+             categories, not numbers or dates; pass {clause}, fm.NormCoord or fm.PixelCoord"
+        )
+    }
+
+    fn instant(ms: f64) -> CoordValue {
+        CoordValue::Instant { instant: ms, text: None }
+    }
+
+    const JAN_1: f64 = 1_577_836_800_000.0;
+    const JAN_2: f64 = 1_577_923_200_000.0;
+    const NOON: f64 = 1_577_880_000_000.0;
+
+    fn day_axis(labels: &[&str]) -> ScaleKind {
+        match band(labels, [50.0, 450.0], 0.0) {
+            ScaleKind::Ordinal(ordinal) => ScaleKind::Ordinal(ordinal.with_of_dates(true)),
+            other => other,
+        }
+    }
+
+    #[test]
+    fn a_number_on_a_band_axis_is_refused_naming_the_label_it_spells() {
+        let x = band(&["a", "b", "c", "d"], [50.0, 450.0], 0.0);
+        let years = band(&["2020", "2021"], [50.0, 450.0], 0.0);
+        for (axis, value, label, expected) in [
+            (&x, 2.0, None, "2"),
+            (&x, 2.5, None, "2.5"),
+            (&years, 2021.0, Some("2021"), "2021"),
+        ] {
+            let (built, _) = run(&[text(CoordValue::Data(value), CoordValue::Data(1.0))], axis, &linear(), None);
+            assert_eq!(built.unwrap_err().to_string(), value_message(expected, "x", label));
+        }
+        let (built, _) = run(&[text(CoordValue::Data(1.0), CoordValue::Data(2.0))], &linear(), &x, None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2", "y", None));
+    }
+
+    #[test]
+    fn a_number_on_a_band_axis_is_refused_for_every_kind_and_end() {
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        for spec in [
+            span("x", category("a"), CoordValue::Data(1.0)),
+            span("x", CoordValue::Data(1.0), CoordValue::Data(2.0)),
+            self::spec(r#"{"type":"rect","x1":{"category":"a"},"y1":1.0,"x2":9.0,"y2":2.0}"#),
+            self::spec(r#"{"type":"line","x1":3.0,"y1":1.0,"x2":{"category":"a"},"y2":2.0}"#),
+        ] {
+            let (built, _) = run(std::slice::from_ref(&spec), &x, &linear(), None);
+            assert!(
+                matches!(built, Err(AnnotationRefusal::ValueOnCategoricalAxis { axis: AlignAxis::X, .. })),
+                "{spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_flipped_number_refusal_names_the_callers_axis_letter() {
+        let y = band(&["a", "b"], [20.0, 320.0], 0.0);
+        let (built, _) = run_flipped(&[text(CoordValue::Data(1.0), CoordValue::Data(1.0))], &linear(), &y);
+        assert_eq!(built.unwrap_err().to_string(), value_message("1", "x", None));
+    }
+
+    #[test]
+    fn the_instant_wire_form_parses_and_a_bare_number_stays_a_number() {
+        let v: CoordValue = serde_json::from_str(r#"{"instant": 1577836800000}"#).unwrap();
+        assert!(matches!(v, CoordValue::Instant { instant, text: None } if instant == JAN_1));
+        let t: CoordValue = serde_json::from_str(r#"{"instant": 1577923200000, "text": "2020-01-02"}"#).unwrap();
+        assert!(matches!(&t, CoordValue::Instant { text: Some(text), .. } if text == "2020-01-02"));
+        let n: CoordValue = serde_json::from_str("1577836800000.0").unwrap();
+        assert!(matches!(n, CoordValue::Data(_)));
+    }
+
+    #[test]
+    fn an_instant_on_a_continuous_axis_places_as_the_number() {
+        let (built, _) = run(&[text(instant(30.0), instant(60.0))], &linear(), &linear(), None);
+        let (twin, _) = run(&[text(CoordValue::Data(30.0), CoordValue::Data(60.0))], &linear(), &linear(), None);
+        assert_eq!(text_position(&built.unwrap()), text_position(&twin.unwrap()));
+    }
+
+    #[test]
+    fn an_instant_on_a_date_axis_lands_on_its_band_and_spans_whole_bands() {
+        let x = day_axis(&["2020-01-01", "2020-01-02", "2020-01-03"]);
+        let (built, warnings) = run(&[text(instant(JAN_2), CoordValue::Data(1.0))], &x, &linear(), None);
+        let (px, _) = text_position(&built.unwrap());
+        let band_w = 400.0 / 3.0;
+        assert!((px - (50.0 + 1.5 * band_w)).abs() < 1e-6, "second of three bands, got {px}");
+        assert!(warnings.is_empty());
+        let (built, _) = run(&[span("x", instant(JAN_1), instant(JAN_2))], &x, &linear(), None);
+        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
+        assert!((rx - 50.0).abs() < 1e-6 && (rw - 2.0 * band_w).abs() < 1e-6, "{rx} {rw}");
+    }
+
+    #[test]
+    fn an_instant_absent_from_a_date_axis_is_not_drawn_and_warns_with_the_date_labels() {
+        let x = day_axis(&["2020-01-01", "2020-01-02"]);
+        let (built, warnings) = run(&[text(instant(NOON), CoordValue::Data(1.0))], &x, &linear(), None);
+        assert!(built.unwrap().above_marks.is_empty());
+        let shown: Vec<String> = warnings.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            shown,
+            ["annotation category '2020-01-01T12:00:00' not found in x-axis domain ['2020-01-01', '2020-01-02']; \
+              the annotation is not drawn"]
+        );
+        let noon = day_axis(&["2020-01-01T12:00:00"]);
+        let (built, _) = run(&[text(instant(NOON), CoordValue::Data(1.0))], &noon, &linear(), None);
+        assert_eq!(built.unwrap().above_marks.len(), 1);
+    }
+
+    #[test]
+    fn a_number_on_a_date_axis_and_an_instant_on_a_plain_band_axis_are_refused_without_a_label() {
+        let dates = day_axis(&["2020-01-01", "2020-01-02"]);
+        let (built, _) = run(&[text(CoordValue::Data(3.0), CoordValue::Data(1.0))], &dates, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("3", "x", None));
+        let plain = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let (built, _) = run(&[text(instant(JAN_2), CoordValue::Data(1.0))], &plain, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02", "x", None));
+        let (built, _) = run(&[text(instant(NOON), CoordValue::Data(1.0))], &plain, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-01T12:00:00", "x", None));
+    }
+
+    #[test]
+    fn an_unknown_category_is_skipped_on_the_break_path_too() {
+        let panel = broken_panel(&[[300.0, 400.0]]);
+        let x = band(&["a", "b"], [50.0, 550.0], 0.0);
+        let y = panel.remap(AlignAxis::Y);
+        let ctx = ScaleContext {
+            plot_area: panel.plot_area,
+            x_scale: &x,
+            y_scale: &panel.y_scale,
+            breaks: std::slice::from_ref(&y),
+            theme: &ThemeInputs::default(),
+        };
+        let mut warnings = Vec::new();
+        let specs = [text(category("zz"), CoordValue::Data(100.0)), text(category("a"), CoordValue::Data(100.0))];
+        let nodes = build_annotations_through_breaks(&specs, &ctx, None, false, &mut warnings).unwrap();
+        assert_eq!(nodes.above_marks.len(), 1, "{nodes:?}");
+        assert_eq!(warnings.len(), 1);
+        let refused = build_annotations_through_breaks(
+            &[text(CoordValue::Data(1.0), CoordValue::Data(100.0))],
+            &ctx,
+            None,
+            false,
+            &mut warnings,
+        );
+        assert!(matches!(refused, Err(AnnotationRefusal::ValueOnCategoricalAxis { .. })));
+    }
+
+    fn polar() -> CoordKind {
+        coord_kind(r#"{"kind": "polar"}"#)
+    }
+
+    #[test]
+    fn an_instant_on_a_date_axis_is_its_category_for_the_coord_and_mixed_span_checks() {
+        let x = day_axis(&["2020-01-01", "2020-01-02", "2020-01-03"]);
+        // Under a projected coord: present and absent dates are refused as categories.
+        for (ms, label) in [(JAN_2, "2020-01-02"), (JAN_2 + 7.0 * 86_400_000.0, "2020-01-09")] {
+            let (built, _) = run(&[text(instant(ms), CoordValue::Data(1.0))], &x, &linear(), Some(&polar()));
+            assert_eq!(
+                built.unwrap_err().to_string(),
+                format!(
+                    "annotation category '{label}' on the x axis: a category cannot be placed under \
+                     CoordPolar; pass fm.NormCoord or fm.PixelCoord"
+                )
+            );
+        }
+        // Mixed span: an instant end beside a position end is a category end.
+        let (built, _) = run(&[span("x", instant(JAN_2), CoordValue::Norm { norm: 1.0 })], &x, &linear(), None);
+        assert_eq!(
+            built.unwrap_err().to_string(),
+            "annotation span on the x axis: start '2020-01-02' is a category and end is not; pass \
+             categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends"
+        );
+        let (built, _) = run(&[span("x", CoordValue::Pixel { px: 5.0 }, instant(JAN_2))], &x, &linear(), None);
+        assert_eq!(
+            built.unwrap_err().to_string(),
+            "annotation span on the x axis: end '2020-01-02' is a category and start is not; pass \
+             categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends"
+        );
+        // An instant beside an unknown category: skipped and warned, not refused.
+        let (built, warnings) = run(&[span("x", instant(JAN_2), category("zz"))], &x, &linear(), None);
+        assert!(built.unwrap().above_marks.is_empty());
+        let shown: Vec<String> = warnings.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            shown,
+            ["annotation category 'zz' not found in x-axis domain ['2020-01-01', '2020-01-02', '2020-01-03']; \
+              the annotation is not drawn"]
+        );
+        // A category beside an instant: whole bands of both.
+        let (built, warnings) = run(&[span("x", category("2020-01-01"), instant(JAN_2))], &x, &linear(), None);
+        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
+        assert!(warnings.is_empty());
+        assert!((rx - 50.0).abs() < 1e-6 && (rw - 2.0 * 400.0 / 3.0).abs() < 1e-6, "{rx} {rw}");
+    }
+
+    #[test]
+    fn a_value_under_a_projected_coord_names_only_the_position_remedies() {
+        let years = band(&["2020", "2021"], [50.0, 450.0], 0.0);
+        let (built, _) = run(&[text(CoordValue::Data(2021.0), CoordValue::Data(1.0))], &years, &linear(), Some(&polar()));
+        let err = built.unwrap_err();
+        assert!(matches!(err, AnnotationRefusal::ValueUnderCoord { axis: AlignAxis::X, coord: "CoordPolar", .. }));
+        assert_eq!(
+            err.to_string(),
+            "annotation value 2021 on the x axis: the x scale is categorical, so it places categories, \
+             not numbers or dates, and a category cannot be placed under CoordPolar; pass fm.NormCoord \
+             or fm.PixelCoord"
+        );
+        let (built, _) = run(&[text(CoordValue::Data(2021.0), CoordValue::Data(1.0))], &years, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2021", "x", Some("2021")));
+        let plain = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let (built, _) = run(&[text(instant(JAN_2), CoordValue::Data(1.0))], &plain, &linear(), Some(&polar()));
+        assert_eq!(
+            built.unwrap_err().to_string(),
+            "annotation value 2020-01-02 on the x axis: the x scale is categorical, so it places \
+             categories, not numbers or dates, and a category cannot be placed under CoordPolar; pass \
+             fm.NormCoord or fm.PixelCoord"
+        );
+        // A category written after a number is still named first.
+        let (built, _) = run(&[span("x", CoordValue::Data(2.5), category("b"))], &plain, &linear(), Some(&polar()));
+        assert!(matches!(built, Err(AnnotationRefusal::CategoryUnderCoord { .. })));
+    }
+
+    #[test]
+    fn a_line_its_helper_wrote_is_refused_in_the_helpers_voice() {
+        let x = band(&["a", "b"], [50.0, 450.0], 0.0);
+        let line = |entry: Option<&str>| AnnotationSpec::Line {
+            x1: CoordValue::Data(-1_000_000.0),
+            y1: CoordValue::Data(0.0),
+            x2: CoordValue::Data(1_000_000.0),
+            y2: CoordValue::Data(1.0),
+            stroke: None,
+            stroke_width: 1.5,
+            dash: None,
+            entry: entry.map(str::to_string),
+        };
+        let (built, _) = run(&[line(Some("annotate_abline"))], &x, &linear(), None);
+        assert_eq!(
+            built.unwrap_err().to_string(),
+            "annotate_abline: the x scale is categorical, so it places categories, not numbers or dates, \
+             and annotate_abline takes no category; draw it on a chart whose x and y scales are continuous"
+        );
+        // Under a projected coord the helper's voice still wins.
+        let (built, _) = run(&[line(Some("annotate_abline"))], &x, &linear(), Some(&polar()));
+        assert!(matches!(built, Err(AnnotationRefusal::HelperOnCategoricalAxis { .. })));
+        // The caller's letter under a flip.
+        let y = band(&["a", "b"], [20.0, 320.0], 0.0);
+        let (built, _) = run_flipped(&[line(Some("annotate_abline"))], &linear(), &y);
+        assert!(matches!(built, Err(AnnotationRefusal::HelperOnCategoricalAxis { axis: AlignAxis::X, .. })));
+        // Without an entry the value voice stays.
+        let (built, _) = run(&[line(None)], &x, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("-1000000", "x", None));
+    }
+
+    fn text_instant(ms: f64, text: &str) -> CoordValue {
+        CoordValue::Instant { instant: ms, text: Some(text.to_string()) }
+    }
+
+    #[test]
+    fn a_text_instant_names_the_string_category_it_spells() {
+        let x = band(&["2020-01-01", "2020-01-02", "2020-01-03"], [50.0, 450.0], 0.0);
+        let band_w = 400.0 / 3.0;
+        // The written text lands on its band, as the category does.
+        let (built, warnings) = run(&[text(text_instant(JAN_2, "2020-01-02"), CoordValue::Data(1.0))], &x, &linear(), None);
+        let (px, _) = text_position(&built.unwrap());
+        let (twin, _) = run(&[text(category("2020-01-02"), CoordValue::Data(1.0))], &x, &linear(), None);
+        assert_eq!(px, text_position(&twin.unwrap()).0);
+        assert!((px - (50.0 + 1.5 * band_w)).abs() < 1e-6, "{px}");
+        assert!(warnings.is_empty());
+        // A whole-band span between two written texts.
+        let (built, _) = run(&[span("x", text_instant(JAN_1, "2020-01-01"), text_instant(JAN_2, "2020-01-02"))], &x, &linear(), None);
+        let (rx, _, rw, _) = rect_extent_of(&built.unwrap());
+        assert!((rx - 50.0).abs() < 1e-6 && (rw - 2.0 * band_w).abs() < 1e-6, "{rx} {rw}");
+        // Text that is not a label is refused quoting the text as written.
+        let (built, _) = run(&[text(text_instant(JAN_2, "2020-01-02T00:00:00"), CoordValue::Data(1.0))], &x, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02T00:00:00", "x", None));
+        // The same instant without text is a date object: refused as a date.
+        let (built, _) = run(&[text(instant(JAN_2), CoordValue::Data(1.0))], &x, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02", "x", None));
+        // Under a projected coord the text is the category refused.
+        let (built, _) = run(&[text(text_instant(JAN_2, "2020-01-02"), CoordValue::Data(1.0))], &x, &linear(), Some(&polar()));
+        assert!(matches!(built, Err(AnnotationRefusal::CategoryUnderCoord { ref label, .. }) if label == "2020-01-02"));
+        // Beside a position end it is a category end of a mixed span.
+        let (built, _) = run(&[span("x", text_instant(JAN_2, "2020-01-02"), CoordValue::Norm { norm: 0.9 })], &x, &linear(), None);
+        assert_eq!(
+            built.unwrap_err().to_string(),
+            "annotation span on the x axis: start '2020-01-02' is a category and end is not; pass \
+             categories at both ends, or fm.NormCoord or fm.PixelCoord at both ends"
+        );
+    }
+
+    #[test]
+    fn on_a_date_axis_the_instant_wins_over_its_text_and_continuous_axes_ignore_it() {
+        let dates = day_axis(&["2020-01-01", "2020-01-02"]);
+        let (a, _) = run(&[text(text_instant(JAN_2, "whatever"), CoordValue::Data(1.0))], &dates, &linear(), None);
+        let (b, _) = run(&[text(instant(JAN_2), CoordValue::Data(1.0))], &dates, &linear(), None);
+        assert_eq!(text_position(&a.unwrap()), text_position(&b.unwrap()));
+        let (a, _) = run(&[text(text_instant(30.0, "x"), CoordValue::Data(1.0))], &linear(), &linear(), None);
+        let (b, _) = run(&[text(instant(30.0), CoordValue::Data(1.0))], &linear(), &linear(), None);
+        assert_eq!(text_position(&a.unwrap()), text_position(&b.unwrap()));
+    }
+
+    #[test]
+    fn a_flipped_instant_on_a_date_axis_lands_on_the_drawn_vertical_band() {
+        let y = day_axis(&["2020-01-01", "2020-01-02"]);
+        let (built, _) = run_flipped(&[text(instant(JAN_2), CoordValue::Data(1.0))], &linear(), &y);
+        let (_, py) = text_position(&built.unwrap());
+        // The y band axis here spans [50, 450] with two bands: the second centres at 350.
+        assert!((py - 350.0).abs() < 1e-9, "got {py}");
     }
 
     #[test]
@@ -2663,6 +3026,7 @@ mod categories {
             stroke: Some("#000000".to_string()),
             stroke_width: 1.0,
             dash: None,
+            entry: None,
         }
     }
 
@@ -2776,7 +3140,7 @@ mod categories {
         let band_y = band(&["a", "b"], [20.0, 320.0], 0.0);
         let (built, _) = run_flipped(&[text(data(1.0), category("b"))], &linear(), &band_y);
         assert!(built.unwrap_err().to_string().starts_with("annotation category 'b' on the y axis:"));
-        let (built, _) = run_flipped(&[span("x", category("b"), data(2.5))], &linear(), &band_y);
+        let (built, _) = run_flipped(&[span("x", category("b"), CoordValue::Norm { norm: 0.5 })], &linear(), &band_y);
         assert_eq!(
             built.unwrap_err().to_string(),
             "annotation span on the x axis: start 'b' is a category and end is not; pass \
@@ -2809,12 +3173,11 @@ mod categories {
         // The caller's x is categorical: it is drawn on the vertical axis.
         let y = band(&["b", "a"], [20.0, 320.0], 0.0);
         let (built, warnings) = run_flipped(&[text(category("zz"), data(1.0))], &linear(), &y);
-        let (_, py) = text_position(&built.unwrap());
-        assert!((py - 170.0).abs() < 1e-9, "plot centre, got {py}");
+        assert!(built.unwrap().above_marks.is_empty());
         let shown: Vec<String> = warnings.iter().map(ToString::to_string).collect();
         assert_eq!(
             shown,
-            ["annotation category 'zz' not found in x-axis domain ['a', 'b']; placing at plot center"]
+            ["annotation category 'zz' not found in x-axis domain ['a', 'b']; the annotation is not drawn"]
         );
     }
 }

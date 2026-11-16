@@ -893,7 +893,7 @@ pub(crate) fn finite_min_max_f64(col: &dyn Array) -> Option<(f64, f64)> {
 /// and is shared between `distinct_values_in_order` (domain building) and
 /// `col_as_ordinal_category_str` (per-row lookup), so the two can never drift.
 #[inline]
-fn float_as_ordinal_str(v: f64) -> String {
+pub(crate) fn float_as_ordinal_str(v: f64) -> String {
     if v.fract() == 0.0 && v.is_finite() {
         format!("{}", v as i64)
     } else {

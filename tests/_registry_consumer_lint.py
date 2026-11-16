@@ -960,6 +960,7 @@ KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
         "_refuse_statistic_input",  # _refuse_statistic_input(entry, "x"/"y", ch, reason=...) -- the channel SLOT, never a transform's output column read
         "_set_composite_mark",  # internal composite-mark metadata setter
         "_written_field",  # _written_field("x"/"y", value) -- the CHANNEL SLOT positional naming how to parse a caller's shorthand string, never a transform's output column read
+        "_validate_coord",  # _validate_coord(entry, "x"/"y", axis, value) -- the annotation coordinate's FIELD and AXIS names the refusal speaks as, never a transform's output column read
         "_unique_col_name",  # _unique_col_name(df.columns, "count") -- reads the SOURCE frame's own columns, never a transform's output batch
         "append",  # list.append("count") building a column-name list
         "coerce_range_pair",  # coerce_range_pair("transform_density", "extent", value) -- the public DOOR and PARAMETER names the refusal speaks as, never a transform's output column read

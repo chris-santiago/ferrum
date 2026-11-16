@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import wraps
-from typing import Callable, Optional, TypeVar
+import math
+from typing import Any, Callable, Optional, TypeVar
 
 import polars as pl
 
@@ -18,11 +19,12 @@ from ferrum.annotation.coords import (
     _coerce_coord,
     _coerce_coord_to_numeric,
 )
-from ferrum._entry import voiced_as
+from ferrum._entry import _voiced, voiced_as
+from ferrum.annotation.primitives import _validate_coords
 from ferrum.chart import Chart
 from ferrum.marks.base import THEME_FONT_PAINT, _normalize_stroke_dash
 from ferrum._metric_labels import AUCLabel, APLabel, BrierLabel, OutlierLabel  # noqa: F401
-from ferrum._validate import validate_choice
+from ferrum._validate import as_finite_real, is_real_number, validate_choice
 
 # Type accepted by positional annotation parameters.  This is the same as
 # CoordValue: numeric, temporal, ISO-8601 string, ordinal category string,
@@ -156,6 +158,29 @@ def _attach_primitive_with_label(
     return chart
 
 
+def _validate_abline(slope: Any, intercept: Any, ends: tuple[float, float]) -> None:
+    """Refuse a slope and intercept that give no finite line over *ends*.
+
+    ``annotate_abline`` takes no coordinate: it draws ``y = slope * x + intercept`` between two
+    far-apart x values, so the numbers to refuse are the slope and intercept, and any pair whose
+    computed ends overflow.
+    """
+
+    def check(voice: str) -> None:
+        if not (is_real_number(slope) and is_real_number(intercept)):
+            return  # not numbers at all: the line's own arithmetic refuses them as it always did
+        finite = as_finite_real(slope) is not None and as_finite_real(intercept) is not None
+        if finite:
+            finite = all(math.isfinite(float(slope) * x + float(intercept)) for x in ends)
+        if not finite:
+            raise ValueError(
+                f"{voice}: slope={slope} and intercept={intercept} give no finite line; "
+                "pass a finite slope and intercept"
+            )
+
+    _voiced("annotate_abline", check)
+
+
 @_as_helper
 def annotate_hline(
     y: _AnnotationCoord,
@@ -209,6 +234,7 @@ def annotate_hline(
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
 
+    _validate_coords("annotate_hline", y=y)
     y_coord = _coerce_coord(y)
     y_num = _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_y": [y_num]})
@@ -292,6 +318,7 @@ def annotate_vline(
     from ferrum.annotation.coords import norm
     from ferrum.annotation.primitives import AnnotationLine
 
+    _validate_coords("annotate_vline", x=x)
     x_coord = _coerce_coord(x)
     x_num = _coerce_coord_to_numeric(x_coord)
     df = pl.DataFrame({"_x": [x_num]})
@@ -371,6 +398,7 @@ def annotate_rect(
     """
     from ferrum.annotation.primitives import AnnotationRect
 
+    _validate_coords("annotate_rect", x1=x1, x2=x2, y1=y1, y2=y2)
     x1_coord, x2_coord = _coerce_coord(x1), _coerce_coord(x2)
     y1_coord, y2_coord = _coerce_coord(y1), _coerce_coord(y2)
     x1_num, x2_num = _coerce_coord_to_numeric(x1_coord), _coerce_coord_to_numeric(x2_coord)
@@ -525,6 +553,7 @@ def annotate_text(
 
     mark_align, prim_anchor = _resolve_text_alignment(anchor=anchor, align=align)
 
+    _validate_coords("annotate_text", x=x, y=y)
     x_coord, y_coord = _coerce_coord(x), _coerce_coord(y)
     x_num, y_num = _coerce_coord_to_numeric(x_coord), _coerce_coord_to_numeric(y_coord)
     df = pl.DataFrame({"_x": [x_num], "_y": [y_num], "_text": [text]})
@@ -608,6 +637,7 @@ def annotate_abline(
     from ferrum.annotation.primitives import AnnotationLine
 
     x_lo, x_hi = -1e6, 1e6
+    _validate_abline(slope, intercept, (x_lo, x_hi))
     df = pl.DataFrame(
         {
             "__abline_x": [x_lo, x_hi],
@@ -630,6 +660,7 @@ def annotate_abline(
         stroke=style.stroke,
         stroke_width=stroke_width,
         dash=style.dash,
+        entry="annotate_abline",
     )
     return _attach_annotation_primitive(chart, prim)
 
@@ -699,6 +730,7 @@ def annotate_arrow(
 
     # The all-numeric unlabelled route builds no primitive, so the colour is
     # checked here: every route of one call accepts and refuses the same strings.
+    _validate_coords("annotate_arrow", x1=x1, y1=y1, x2=x2, y2=y2)
     _validate_paint("annotate_arrow", "stroke", stroke)
     x1_coord, y1_coord = _coerce_coord(x1), _coerce_coord(y1)
     x2_coord, y2_coord = _coerce_coord(x2), _coerce_coord(y2)

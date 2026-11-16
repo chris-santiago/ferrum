@@ -27,7 +27,13 @@ from typing import Any
 # caller importing ``ferrum.annotation.primitives._coord`` keep working.
 from ferrum.annotation.coords import CoordValue, _coord  # noqa: F401
 from ferrum._entry import _voiced
-from ferrum._validate import is_none_color_sentinel, validate_choice, validate_str
+from ferrum._validate import (
+    as_finite_real,
+    is_none_color_sentinel,
+    is_real_number,
+    validate_choice,
+    validate_str,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +105,37 @@ def _validate_paint(entry: str, field: str, value: Any) -> None:
     _voiced(entry, lambda voice: _validate_literal_color(voice, field, value))
 
 
+def _validate_coord(entry: str, field: str, axis: str, value: Any) -> None:
+    """Refuse *value* as the coordinate *field* of the public call *entry* when it is a number
+    with no position (NaN, an infinity, or an integer too large for a float).
+
+    Every other coordinate (a finite number, a date, a category label, ``NormCoord``,
+    ``PixelCoord``) passes: only a number can be non-finite. *axis* is the axis the coordinate
+    names. The refusal is an ``EntryRefusal`` voiced as *entry*, so an ``annotate_*`` helper
+    re-voices it as itself.
+    """
+
+    def check(voice: str) -> None:
+        if is_real_number(value) and as_finite_real(value) is None:
+            raise ValueError(
+                f"{voice}: {field}={value} is not a finite number, so it has no position; "
+                f"pass a value the {axis} axis holds, fm.NormCoord or fm.PixelCoord"
+            )
+
+    _voiced(entry, check)
+
+
+def _validate_coords(entry: str, **fields: Any) -> None:
+    """:func:`_validate_coord` over each ``field=value``, in the order given.
+
+    A field's axis is the letter that names it: the first letter of ``x`` and ``y2``, the last
+    word of ``text_y``.
+    """
+    for field, value in fields.items():
+        axis = field[0] if field[0] in "xy" else field.split("_")[-1][0]
+        _validate_coord(entry, field, axis, value)
+
+
 # ---------------------------------------------------------------------------
 # Dataclass types
 # ---------------------------------------------------------------------------
@@ -124,6 +161,7 @@ class AnnotationText:
         validate_choice("AnnotationText.anchor", "anchor", self.anchor, _VALID_TEXT_ANCHORS)
         validate_choice("AnnotationText.baseline", "baseline", self.baseline, _VALID_TEXT_BASELINES)
         validate_choice("AnnotationText.z", "z", self.z, _VALID_ANNOTATION_Z)
+        _validate_coords("annotation.text", x=self.x, y=self.y)
         _validate_paint("annotation.text", "color", self.color)
 
     def to_dict(self) -> dict[str, Any]:
@@ -159,6 +197,7 @@ class AnnotationArrow:
     head_size: float
 
     def __post_init__(self) -> None:
+        _validate_coords("annotation.arrow", x=self.x, y=self.y, x2=self.x2, y2=self.y2)
         _validate_paint("annotation.arrow", "stroke", self.stroke)
 
     def to_dict(self) -> dict[str, Any]:
@@ -191,6 +230,7 @@ class AnnotationRect:
     corner_radius: float
 
     def __post_init__(self) -> None:
+        _validate_coords("annotation.rect", x1=self.x1, y1=self.y1, x2=self.x2, y2=self.y2)
         _validate_paint("annotation.rect", "fill", self.fill)
         _validate_paint("annotation.rect", "stroke", self.stroke)
 
@@ -223,8 +263,12 @@ class AnnotationLine:
     stroke: str | None
     stroke_width: float
     dash: list[float] | None
+    #: The public helper that wrote this line's coordinates itself (not the caller), so a
+    #: refusal at render time names that call. Unset for every line the caller positions.
+    entry: str | None = None
 
     def __post_init__(self) -> None:
+        _validate_coords("annotation.line", x1=self.x1, y1=self.y1, x2=self.x2, y2=self.y2)
         _validate_paint("annotation.line", "stroke", self.stroke)
 
     def to_dict(self) -> dict[str, Any]:
@@ -241,6 +285,8 @@ class AnnotationLine:
             d["stroke"] = self.stroke
         if self.dash is not None:
             d["dash"] = self.dash
+        if self.entry is not None:
+            d["entry"] = self.entry
         return d
 
 
@@ -264,6 +310,8 @@ class AnnotationSpan:
             self.label_position,
             ("top", "middle", "bottom"),
         )
+        _validate_coord("annotation.span", "start", self.axis, self.start)
+        _validate_coord("annotation.span", "end", self.axis, self.end)
         _validate_paint("annotation.span", "fill", self.fill)
 
     def to_dict(self) -> dict[str, Any]:
@@ -300,6 +348,7 @@ class AnnotationBracket:
         validate_choice(
             "AnnotationBracket.direction", "direction", self.direction, _VALID_BRACKET_DIRECTIONS
         )
+        _validate_coords("annotation.bracket", x1=self.x1, y1=self.y1, x2=self.x2, y2=self.y2)
         _validate_paint("annotation.bracket", "stroke", self.stroke)
 
     def to_dict(self) -> dict[str, Any]:
@@ -338,6 +387,11 @@ class AnnotationCallout:
         validate_choice(
             "AnnotationCallout.arrow", "arrow", self.arrow, ("curved", "straight", "none")
         )
+        _validate_coords("annotation.callout", x=self.x, y=self.y)
+        if self.text_x is not None:
+            _validate_coord("annotation.callout", "text_x", "x", self.text_x)
+        if self.text_y is not None:
+            _validate_coord("annotation.callout", "text_y", "y", self.text_y)
         _validate_paint("annotation.callout", "background", self.background)
         _validate_paint("annotation.callout", "border_color", self.border_color)
 
@@ -373,6 +427,9 @@ class AnnotationImage:
     width: float
     height: float
     anchor: str
+
+    def __post_init__(self) -> None:
+        _validate_coords("annotation.image", x=self.x, y=self.y)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for renderer transport."""

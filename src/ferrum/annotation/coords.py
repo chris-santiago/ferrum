@@ -10,17 +10,22 @@ Coordinates in annotation primitives can be expressed in these ways:
 
 - ``float`` / ``int`` — data-space coordinates (the default)
 - ``datetime.date`` / ``datetime.datetime`` — temporal data-space coordinate,
-  converted to epoch-milliseconds (UTC) to match ferrum's internal temporal
-  representation.  Naive ``datetime`` objects are treated as UTC.
+  stored as an :class:`InstantCoord` holding epoch-milliseconds (UTC) to match
+  ferrum's internal temporal representation, and sent to the renderer as
+  ``{"instant": <epoch ms>}``. Naive ``datetime`` objects are treated as UTC.
   ``pandas.Timestamp`` rides this branch (it is a ``datetime.datetime``
   subclass).
 - ``numpy.datetime64`` — the same, via an exact microsecond conversion that
   refuses an out-of-range value rather than letting a fixed-width cast wrap.
-- ISO-8601 date or datetime string — parsed and converted to epoch-milliseconds.
+- ISO-8601 date or datetime string — parsed and carried as an instant that keeps the
+  text as written, so a string category axis holding that exact label places it on the band.
 - Non-ISO-8601 string — treated as a category label, stored as
   ``OrdinalCategoryCoord`` and placed by the renderer through the axis's own
   scale (the band centre; a span covers whole bands). A category on an axis
   that holds none (numeric, temporal, polar, geo) is refused.
+- ``InstantCoord`` — a date or datetime coordinate as epoch-milliseconds; the
+  renderer places it as a number on a continuous axis and by its date label on
+  an axis whose categories are dates
 - ``PixelCoord`` — absolute pixel offset from the plot origin
 - ``NormCoord`` — normalized [0, 1] fraction of the plot area
 - ``OrdinalCategoryCoord`` — a category label the renderer places on its band
@@ -36,8 +41,21 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias, Union
 
+from ferrum._entry import _voiced
+from ferrum._validate import as_finite_real, is_real_number
+
 if TYPE_CHECKING:  # numpy is imported lazily at runtime (see _is_datetime64)
     import numpy as np
+
+
+def _refuse_non_finite(entry: str, value: Any, remedy: str) -> None:
+    """Refuse a coordinate wrapper's *value* when it is a number with no position."""
+
+    def check(voice: str) -> None:
+        if is_real_number(value) and as_finite_real(value) is None:
+            raise ValueError(f"{voice}: value={value} is not a finite number; pass {remedy}")
+
+    _voiced(entry, check)
 
 
 @dataclass(frozen=True)
@@ -47,10 +65,15 @@ class PixelCoord:
     Parameters
     ----------
     value : float
-        Pixel offset from the plot's top-left corner.
+        Pixel offset from the plot's top-left corner. A NaN or infinity is refused.
     """
 
     value: float
+
+    def __post_init__(self) -> None:
+        _refuse_non_finite(
+            "fm.PixelCoord", self.value, "a pixel offset from the plot origin, such as 40"
+        )
 
 
 @dataclass(frozen=True)
@@ -62,10 +85,14 @@ class NormCoord:
     value : float
         0.0 is the left/top edge, 1.0 is the right/bottom edge. The y axis
         follows SVG's downward-increasing convention (top = 0.0, bottom =
-        1.0); the x axis is unaffected (left = 0.0, right = 1.0).
+        1.0); the x axis is unaffected (left = 0.0, right = 1.0). A NaN or infinity is
+        refused.
     """
 
     value: float
+
+    def __post_init__(self) -> None:
+        _refuse_non_finite("fm.NormCoord", self.value, "a fraction of the plot area, such as 0.5")
 
 
 @dataclass(frozen=True)
@@ -88,10 +115,35 @@ class OrdinalCategoryCoord:
     value: str
 
 
+@dataclass(frozen=True)
+class InstantCoord:
+    """A date or datetime coordinate, held as epoch-milliseconds (UTC).
+
+    A distinct type from a plain number because the renderer reads a number and
+    a date differently on a categorical axis: a number is refused there, while a
+    date lands on the band whose date label is its own when the axis's
+    categories are dates.  On a continuous axis both place identically.
+
+    Parameters
+    ----------
+    ms : float
+        Milliseconds since the Unix epoch (1970-01-01T00:00:00 UTC).
+    text : str, optional
+        The ISO-8601 string the caller wrote, when the instant came from one. A string
+        category axis whose label is exactly this text places the coordinate on that
+        category; every other axis reads ``ms`` alone. ``None`` for a ``date``,
+        ``datetime`` or ``numpy.datetime64``.
+    """
+
+    ms: float
+    text: str | None = None
+
+
 # CoordValue accepts numbers, temporal Python types, ISO strings, coordinate
-# wrappers, or ordinal category labels.  Temporal ISO strings are converted to
-# epoch-ms at serialization time; ordinal category labels cross to the renderer
-# as ``{"category": label}`` and are placed there through the axis's own scale.
+# wrappers, or ordinal category labels.  Temporal values become an
+# ``InstantCoord`` and cross to the renderer as ``{"instant": epoch ms}``;
+# ordinal category labels cross as ``{"category": label}``; both are placed there
+# through the axis's own scale.
 CoordValue: TypeAlias = Union[
     float,
     int,
@@ -102,6 +154,7 @@ CoordValue: TypeAlias = Union[
     PixelCoord,
     NormCoord,
     OrdinalCategoryCoord,
+    InstantCoord,
 ]
 
 # Unix epoch as a date — used by temporal_coord_to_epoch_ms.
@@ -523,7 +576,7 @@ def norm(value: float) -> NormCoord:
 # either a stored ``CoordValue`` (for primitive dataclass fields) or a
 # renderer-serializable form (for ``to_dict()``).  They were previously split
 # across ``annotations.py`` (``_coerce_coord``/``_coerce_coord_to_numeric``)
-# and ``annotation/primitives.py`` (``_coord``/``_sanitize_coord``), which
+# and ``annotation/primitives.py`` (``_coord``), which
 # duplicated the raw-input classification.  The classification now lives once
 # in :func:`_classify_raw_coord`; both the coerce path and the serialize path
 # consume it.
@@ -536,11 +589,12 @@ def _classify_raw_coord(v: CoordValue) -> CoordValue:
     This is the shared classification both ``_coerce_coord`` (which stores the
     result in a primitive) and ``_coord`` (which serializes it) build on:
 
-    - ``PixelCoord`` / ``NormCoord`` / ``OrdinalCategoryCoord`` pass through
-      unchanged — the caller already expressed precise intent.
+    - ``PixelCoord`` / ``NormCoord`` / ``OrdinalCategoryCoord`` /
+      ``InstantCoord`` pass through unchanged — the caller already expressed
+      precise intent.
     - ``datetime.date`` / ``datetime.datetime`` / ``numpy.datetime64`` →
-      epoch-milliseconds float.
-    - String that IS an ISO-8601 date/datetime → epoch-milliseconds float.
+      ``InstantCoord`` of the epoch milliseconds.
+    - String that IS an ISO-8601 date/datetime → ``InstantCoord`` keeping the text.
     - String that is NOT ISO-8601 → ``OrdinalCategoryCoord`` (placed by the
       renderer through the axis's own scale).
     - Numeric (float, int) → float (data-space value).
@@ -548,17 +602,17 @@ def _classify_raw_coord(v: CoordValue) -> CoordValue:
     The returned value is always a type that :func:`_coord` knows how to
     serialize.
     """
-    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
+    if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord, InstantCoord)):
         return v
     # datetime must be checked before date (datetime is a subclass of date).
     if isinstance(v, (_dt.datetime, _dt.date)):
-        return temporal_coord_to_epoch_ms(v)
+        return InstantCoord(temporal_coord_to_epoch_ms(v))
     if isinstance(v, str):
         if _is_iso8601_string(v):
-            return temporal_coord_to_epoch_ms(v)
+            return InstantCoord(temporal_coord_to_epoch_ms(v), v)
         return OrdinalCategoryCoord(v)
     if _is_datetime64(v):
-        return temporal_coord_to_epoch_ms(v)
+        return InstantCoord(temporal_coord_to_epoch_ms(v))
     return float(v)
 
 
@@ -579,27 +633,25 @@ def _coerce_coord_to_numeric(v: CoordValue) -> float:
     and is not used for rendering when the primitive is present).
 
     ``OrdinalCategoryCoord`` is mapped to 0.0 similarly — its true pixel
-    position is resolved at render time through the axis's own scale.
+    position is resolved at render time through the axis's own scale. An
+    ``InstantCoord`` is its epoch-millisecond value.
     """
+    if isinstance(v, InstantCoord):
+        return v.ms
     if isinstance(v, (PixelCoord, NormCoord, OrdinalCategoryCoord)):
         return 0.0
     return float(v)  # already a float after _coerce_coord
-
-
-def _sanitize_coord(v: Any) -> Any:
-    """Replace NaN/Inf with 0.0 so JSON serialization doesn't crash."""
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return 0.0
-    return v
 
 
 def _coord(v: CoordValue) -> Any:
     """Normalize a CoordValue to a renderer-serializable form.
 
     Temporal values (``date``, ``datetime``, ``numpy.datetime64``, ISO
-    strings) are converted to epoch-milliseconds (UTC) so they align with the
-    Rust renderer's temporal scale — the same units that ``_coerce.py``
-    produces for temporal data columns.  Numeric values and coordinate
+    strings, ``InstantCoord``) are converted to epoch-milliseconds (UTC), the
+    same units ``_coerce.py`` produces for temporal data columns, and sent as
+    ``{"instant": <epoch ms>}`` so the renderer tells a date from a number: it
+    places an instant as a number on a continuous axis and by its date label on
+    an axis whose categories are dates.  Numeric values and the other coordinate
     wrappers pass through unchanged.
     ``OrdinalCategoryCoord`` is serialized as ``{"category": value}`` and
     crosses to the renderer as is, which places it through the axis's own scale.
@@ -607,14 +659,18 @@ def _coord(v: CoordValue) -> Any:
     date or datetime string is temporal, any other string is a category.
     """
     if isinstance(v, PixelCoord):
-        return {"px": _sanitize_coord(v.value)}
+        return {"px": v.value}
     if isinstance(v, NormCoord):
-        return {"norm": _sanitize_coord(v.value)}
+        return {"norm": v.value}
     if isinstance(v, OrdinalCategoryCoord):
         return {"category": v.value}
+    if isinstance(v, InstantCoord):
+        if v.text is not None:
+            return {"instant": v.ms, "text": v.text}
+        return {"instant": v.ms}
     # datetime must be checked before date (datetime is a subclass of date).
     if isinstance(v, (_dt.datetime, _dt.date)):
-        return temporal_coord_to_epoch_ms(v)
+        return {"instant": temporal_coord_to_epoch_ms(v)}
     if isinstance(v, str):
         # A primitive built from a plain string (``fm.annotation.text("b", ...)``) reaches
         # here unclassified: the same rule the ``annotate_*`` helpers apply decides whether
@@ -624,5 +680,5 @@ def _coord(v: CoordValue) -> Any:
         # Primitives constructed directly (not through _coerce_coord) can
         # still carry a raw datetime64; it used to reach json.dumps as-is and
         # die with "Object of type datetime64 is not JSON serializable".
-        return temporal_coord_to_epoch_ms(v)
-    return _sanitize_coord(v)  # plain numeric — data-space
+        return {"instant": temporal_coord_to_epoch_ms(v)}
+    return v  # plain numeric — data-space

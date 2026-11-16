@@ -729,29 +729,31 @@ def test_chart_config_no_annotations_when_none_added():
 # ============================================================================
 
 
-def test_annotate_hline_with_nan_y():  # BUG: NaN in annotation y causes ValueError from Rust JSON deserialization
-    """annotate_hline(y=NaN) must not crash the interactive pipeline."""
-    chart = _base_chart() + fr.annotate_hline(y=float("nan"))
-    # This might produce NaN in the annotation node, but must not crash.
-    scene_json, _ = _render_scene(chart)
-    scene = json.loads(scene_json)
-    assert "panels" in scene
+def test_annotate_hline_with_nan_y():
+    """annotate_hline(y=NaN) is refused where it is written."""
+    with pytest.raises(ValueError) as refused:
+        _base_chart() + fr.annotate_hline(y=float("nan"))
+    assert str(refused.value) == (
+        "annotate_hline: y=nan is not a finite number, so it has no position; pass a value the y axis holds, fm.NormCoord or fm.PixelCoord"
+    )
 
 
-def test_annotate_hline_with_inf_y():  # BUG: Infinity in annotation y causes ValueError from Rust JSON deserialization
-    """annotate_hline(y=inf) must not crash the interactive pipeline."""
-    chart = _base_chart() + fr.annotate_hline(y=float("inf"))
-    scene_json, _ = _render_scene(chart)
-    scene = json.loads(scene_json)
-    assert "panels" in scene
+def test_annotate_hline_with_inf_y():
+    """annotate_hline(y=inf) is refused where it is written."""
+    with pytest.raises(ValueError) as refused:
+        _base_chart() + fr.annotate_hline(y=float("inf"))
+    assert str(refused.value) == (
+        "annotate_hline: y=inf is not a finite number, so it has no position; pass a value the y axis holds, fm.NormCoord or fm.PixelCoord"
+    )
 
 
-def test_annotate_rect_with_nan_coords():  # BUG: NaN in annotation rect coords causes ValueError from Rust JSON deserialization
-    """annotate_rect with NaN coordinates must not crash."""
-    chart = _base_chart() + fr.annotate_rect(x1=float("nan"), x2=3.0, y1=2.0, y2=6.0, fill="yellow")
-    scene_json, _ = _render_scene(chart)
-    scene = json.loads(scene_json)
-    assert "panels" in scene
+def test_annotate_rect_with_nan_coords():
+    """annotate_rect with a NaN corner is refused where it is written."""
+    with pytest.raises(ValueError) as refused:
+        _base_chart() + fr.annotate_rect(x1=float("nan"), x2=3.0, y1=2.0, y2=6.0, fill="yellow")
+    assert str(refused.value) == (
+        "annotate_rect: x1=nan is not a finite number, so it has no position; pass a value the x axis holds, fm.NormCoord or fm.PixelCoord"
+    )
 
 
 # ============================================================================
@@ -855,18 +857,22 @@ def test_three_annotation_charts_compose():  # BUG: Only last annotation uses pr
 # ============================================================================
 
 
-def test_annotate_hline_nan_crashes_svg():  # BUG: NaN in annotation y causes ValueError: Python json.dumps(NaN) produces invalid JSON for Rust serde_json
-    """annotate_hline(y=NaN) must not crash the SVG render path."""
-    chart = _base_chart() + fr.annotate_hline(y=float("nan"))
-    svg = chart.to_svg()
-    assert isinstance(svg, str)
+def test_annotate_hline_nan_crashes_svg():
+    """annotate_hline(y=NaN) is refused where it is written, before any render."""
+    with pytest.raises(ValueError) as refused:
+        _base_chart() + fr.annotate_hline(y=float("nan"))
+    assert str(refused.value) == (
+        "annotate_hline: y=nan is not a finite number, so it has no position; pass a value the y axis holds, fm.NormCoord or fm.PixelCoord"
+    )
 
 
-def test_annotate_hline_inf_crashes_svg():  # BUG: Infinity in annotation y causes ValueError: Python json.dumps(Infinity) produces invalid JSON for Rust serde_json
-    """annotate_hline(y=inf) must not crash the SVG render path."""
-    chart = _base_chart() + fr.annotate_hline(y=float("inf"))
-    svg = chart.to_svg()
-    assert isinstance(svg, str)
+def test_annotate_hline_inf_crashes_svg():
+    """annotate_hline(y=inf) is refused where it is written, before any render."""
+    with pytest.raises(ValueError) as refused:
+        _base_chart() + fr.annotate_hline(y=float("inf"))
+    assert str(refused.value) == (
+        "annotate_hline: y=inf is not a finite number, so it has no position; pass a value the y axis holds, fm.NormCoord or fm.PixelCoord"
+    )
 
 
 # ============================================================================
@@ -874,17 +880,19 @@ def test_annotate_hline_inf_crashes_svg():  # BUG: Infinity in annotation y caus
 # ============================================================================
 
 
-def test_annotate_vline_nan_crashes_interactive():  # BUG: NaN in vline x causes ValueError: Python json.dumps(NaN) produces invalid JSON
-    """annotate_vline(x=NaN) must not crash the interactive pipeline."""
-    chart = _base_chart() + fr.annotate_vline(x=float("nan"))
-    scene_json, _ = _render_scene(chart)
-    scene = json.loads(scene_json)
-    assert "panels" in scene
+def test_annotate_vline_nan_crashes_interactive():
+    """annotate_vline(x=NaN) is refused where it is written, before any render."""
+    with pytest.raises(ValueError) as refused:
+        _base_chart() + fr.annotate_vline(x=float("nan"))
+    assert str(refused.value) == (
+        "annotate_vline: x=nan is not a finite number, so it has no position; pass a value the x axis holds, fm.NormCoord or fm.PixelCoord"
+    )
 
 
-def test_annotate_vline_inf_crashes_interactive():  # BUG: Infinity in vline x causes ValueError: Python json.dumps(Infinity) produces invalid JSON
-    """annotate_vline(x=inf) must not crash the interactive pipeline."""
-    chart = _base_chart() + fr.annotate_vline(x=float("inf"))
-    scene_json, _ = _render_scene(chart)
-    scene = json.loads(scene_json)
-    assert "panels" in scene
+def test_annotate_vline_inf_crashes_interactive():
+    """annotate_vline(x=inf) is refused where it is written, before any render."""
+    with pytest.raises(ValueError) as refused:
+        _base_chart() + fr.annotate_vline(x=float("inf"))
+    assert str(refused.value) == (
+        "annotate_vline: x=inf is not a finite number, so it has no position; pass a value the x axis holds, fm.NormCoord or fm.PixelCoord"
+    )

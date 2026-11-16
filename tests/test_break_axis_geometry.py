@@ -1711,7 +1711,7 @@ def test_ordinal_axis_break_leaves_annotations_and_bars_unmoved():
     """
     df = pl.DataFrame({"c": ["A", "B", "C", "D", "E"], "v": [72.0, 68.0, 75.0, 90.0, 81.0]})
     base = fm.Chart(df).mark_bar().encode(x="c:N", y="v:Q")
-    labelled = base + fm.annotate_vline(x=0.8, label="L") + fm.annotate_vline(x=0.45, label="M")
+    labelled = base + fm.annotate_vline(x="D", label="L") + fm.annotate_vline(x="B", label="M")
 
     plain_svg = labelled.to_svg()
     with warnings.catch_warnings(record=True) as caught:

@@ -455,6 +455,7 @@ def test_coerce_and_serialize_agree_across_inputs():
     import datetime as dt
 
     from ferrum.annotation.coords import (
+        InstantCoord,
         OrdinalCategoryCoord,
         _coerce_coord,
         _coord,
@@ -462,15 +463,18 @@ def test_coerce_and_serialize_agree_across_inputs():
     )
     from ferrum.annotation.coords import px, norm
 
-    # datetime → epoch-ms float, identical from both directions.
+    # datetime → InstantCoord of the epoch ms → {"instant": ms}, identical from both directions.
     d = dt.date(2020, 6, 1)
-    assert _coerce_coord(d) == temporal_coord_to_epoch_ms(d)
-    assert _coord(_coerce_coord(d)) == temporal_coord_to_epoch_ms(d)
+    assert _coerce_coord(d) == InstantCoord(temporal_coord_to_epoch_ms(d))
+    assert _coord(_coerce_coord(d)) == {"instant": temporal_coord_to_epoch_ms(d)}
+    assert _coord(d) == {"instant": temporal_coord_to_epoch_ms(d)}
 
-    # ISO-8601 string → epoch-ms float.
+    # ISO-8601 string → the same instant.
     iso = "2020-06-01"
-    assert _coerce_coord(iso) == temporal_coord_to_epoch_ms(iso)
-    assert _coord(_coerce_coord(iso)) == temporal_coord_to_epoch_ms(iso)
+    ms = temporal_coord_to_epoch_ms(iso)
+    assert _coerce_coord(iso) == InstantCoord(ms, iso)
+    assert _coord(_coerce_coord(iso)) == {"instant": ms, "text": iso}
+    assert _coord(iso) == {"instant": ms, "text": iso}
 
     # Non-ISO string → OrdinalCategoryCoord → {"category": ...}.
     coerced = _coerce_coord("cat_a")

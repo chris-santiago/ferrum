@@ -51,11 +51,11 @@ from tests.test_annotation_categories import (
     _mixed_span_message,
     _near,
     _one,
-    _plot_centre,
     _scene_annotations,
     _span_extent,
     _ticks,
     _unknown_message,
+    _value_message,
 )
 from tests.test_null_group_warning import _NO_ROWS_TO_DRAW, _render_capturing
 
@@ -522,15 +522,15 @@ def test_a_pixel_offset_and_an_anchor_stay_in_drawn_space():
 # ---------------------------------------------------------------------------
 
 
-def test_an_unknown_category_on_the_callers_x_warns_naming_x_and_sits_at_the_band_centre():
+def test_an_unknown_category_on_the_callers_x_warns_naming_x_and_is_not_drawn():
     """The caller's x is the category axis (drawn vertically), on both output kinds."""
-    chart = _category_twin().flipped() + ann.text(
-        "zz", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
-    )
+    plain = _category_twin().flipped()
+    chart = plain + ann.text("zz", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
     svg, shown = _render_capturing(chart.to_svg)
     assert shown == [_unknown_message("x")]
+    assert svg == plain.to_svg()
     assert _render_capturing(chart.interactive)[1] == [_unknown_message("x")]
-    _near(float(_one(svg, "text", fill=_COLOUR["text"]).attrs["y"]), _plot_centre(svg, "y"))
+    assert [n for n in _scene_annotations(chart) if n["type"] == "text"] == []
 
 
 def test_an_unknown_span_end_names_the_callers_axis_letter():
@@ -564,13 +564,23 @@ def test_a_span_over_categories_on_the_callers_y_is_refused_naming_y():
 
 @pytest.mark.parametrize(
     "start,end,category_end",
-    [("b", 2.5, "start"), (2.5, "b", "end")],
-    ids=["category-then-value", "value-then-category"],
+    [("b", fm.NormCoord(0.5), "start"), (fm.PixelCoord(40.0), "b", "end")],
+    ids=["category-then-position", "position-then-category"],
 )
 def test_a_mixed_span_on_the_callers_category_axis_is_refused_naming_x(start, end, category_end):
     """The caller's x is the category axis, so the refusal is the mixed-span text naming x."""
     chart = _category_twin().flipped() + ann.span("x", start, end, fill="#eee")
     _assert_refused_on_both_routes(chart, _mixed_span_message("x", category_end, "b"))
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    [("b", 2.5), (2.5, "b")],
+    ids=["category-then-number", "number-then-category"],
+)
+def test_a_span_number_end_on_the_callers_category_axis_is_refused_as_a_value_naming_x(start, end):
+    chart = _category_twin().flipped() + ann.span("x", start, end, fill="#eee")
+    _assert_refused_on_both_routes(chart, _value_message("2.5", "x"))
 
 
 def test_a_category_on_the_callers_numeric_axes_is_refused_naming_the_callers_letter():
@@ -737,7 +747,7 @@ def _catplot_h() -> fm.Chart:
 
 _FIGURE_FLIP = {
     "text_category_on_y": lambda: _catplot_h() + ann.text(2.0, "b", "HELLO", anchor="middle"),
-    "text_number": lambda: _catplot_h() + ann.text(2.0, 3.0, "HELLO", anchor="middle"),
+    "text_second_category": lambda: _catplot_h() + ann.text(2.0, "c", "HELLO", anchor="middle"),
     "span_y_categories": lambda: _catplot_h() + ann.span("y", "b", "c", fill=_COLOUR["span"]),
     "span_x_numbers": lambda: _catplot_h() + ann.span("x", 1.0, 2.0, fill=_COLOUR["span"]),
     "rect": lambda: _catplot_h() + ann.rect(1.0, "a", 3.0, "b", fill=_COLOUR["rect"]),
@@ -780,7 +790,7 @@ _FIGURE_FLIP_DIGESTS: dict[str, str] = {
     "span_x_numbers": "4283f6b201c2538d961c7b26f1fe405b19d329c08ae41a2fa6d4230581601d9b",
     "span_y_categories": "ab20bf8567da928552fab4ab3f558d63598bdd894387649ebda37c6439b75900",
     "text_category_on_y": "94807e77cb1c2e0678af5367cbcc8c5c4f83ac3d94e8972d64ba0a9d1dd0946a",
-    "text_number": "4a2f9c589ee6933e78fe03fd2207dee2de910a992e790346bb66cfe8eab5f204",
+    "text_second_category": "e4cef91342ccfec92dddb59d5ed45c5ea202b30f2ba9ff4830fe319408a6fbc2",
     "vline_number": "dc169ea201550db0b8a0733171d0913754abef7581590f972db18beba3d5bf15",
 }
 _NO_FLIP_DIGESTS: dict[str, str] = {
@@ -1037,3 +1047,7 @@ def test_a_text_inside_a_break_gap_warns_with_the_callers_channel_letter_on_both
     assert _render_capturing(flipped.to_svg)[1] == expected
     assert _render_capturing(flipped.interactive)[1] == expected
     assert _render_capturing(twin.to_svg)[1] == twin_expected
+
+
+def test_a_number_on_a_figure_applied_flips_category_axis_is_refused_naming_y():
+    _assert_refused_on_both_routes(_catplot_h() + ann.text(2.0, 3.0, "t"), _value_message("3", "y"))

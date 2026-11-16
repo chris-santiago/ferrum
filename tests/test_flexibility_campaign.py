@@ -996,7 +996,7 @@ def test_d7_vline_date_epoch_ms_correct() -> None:
     prim = vline._annotation_primitive
     assert prim is not None, "annotation_primitive must be set"
     # x1 is the data-space coordinate (y1 and y2 are NormCoord wrappers).
-    assert prim.x1 == expected_ms, (
+    assert prim.x1.ms == expected_ms, (
         f"vline x1 must equal epoch-ms for date(2020,6,1); expected {expected_ms}, got {prim.x1}"
     )
 
@@ -1011,9 +1011,11 @@ def test_d7_vline_iso_string_matches_date(temporal_df: pl.DataFrame) -> None:
 
     prim_date = vline_date._annotation_primitive
     prim_str = vline_str._annotation_primitive
-    assert prim_date.x1 == expected_ms, f"date vline x1={prim_date.x1}, expected {expected_ms}"
-    assert prim_str.x1 == expected_ms, f"string vline x1={prim_str.x1}, expected {expected_ms}"
-    assert prim_date.x1 == prim_str.x1, "ISO string and date(…) must produce identical epoch-ms"
+    assert prim_date.x1.ms == expected_ms, f"date vline x1={prim_date.x1}, expected {expected_ms}"
+    assert prim_str.x1.ms == expected_ms, f"string vline x1={prim_str.x1}, expected {expected_ms}"
+    assert prim_date.x1.ms == prim_str.x1.ms, (
+        "ISO string and date(…) must produce identical epoch-ms"
+    )
 
 
 def test_d7_rect_with_date_boundaries(temporal_df: pl.DataFrame) -> None:
@@ -1032,8 +1034,8 @@ def test_d7_rect_with_date_boundaries(temporal_df: pl.DataFrame) -> None:
 
     # Verify the primitive corners store epoch-ms values.
     prim = rect._annotation_primitive
-    assert prim.x1 == _date_epoch_ms(date(2020, 3, 1)), "rect x1 must be epoch-ms"
-    assert prim.x2 == _date_epoch_ms(date(2020, 9, 1)), "rect x2 must be epoch-ms"
+    assert prim.x1.ms == _date_epoch_ms(date(2020, 3, 1)), "rect x1 must be epoch-ms"
+    assert prim.x2.ms == _date_epoch_ms(date(2020, 9, 1)), "rect x2 must be epoch-ms"
 
 
 def test_d7_text_with_datetime_renders(temporal_df: pl.DataFrame) -> None:
@@ -1045,7 +1047,7 @@ def test_d7_text_with_datetime_renders(temporal_df: pl.DataFrame) -> None:
 
     prim = label._annotation_primitive
     expected_ms = temporal_coord_to_epoch_ms(dt(2020, 1, 1, 12, 0))
-    assert prim.x == expected_ms, (
+    assert prim.x.ms == expected_ms, (
         f"text annotation x must equal epoch-ms of datetime(2020,1,1,12,0); "
         f"expected {expected_ms}, got {prim.x}"
     )

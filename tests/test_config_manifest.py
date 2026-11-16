@@ -495,6 +495,12 @@ _EXPECTED_PYTHON_ABSENT: dict[str, str] = {
         "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
         "Configure/configure() family this leg covers"
     ),
+    "AnnotationSpec.Line.entry": (
+        "AnnotationSpec.Line's own item-level field, reached via "
+        "ferrum.annotation.primitives.AnnotationLine.to_dict(), not the "
+        "Configure/configure() family this leg covers; set only by annotate_abline "
+        "(a stamp naming the helper that wrote the line's coordinates), never by a caller"
+    ),
     "AnnotationSpec.Span.type": (
         "AnnotationSpec.Span's own item-level field, reached via "
         "ferrum.annotation.primitives.AnnotationSpan.to_dict(), not the "
