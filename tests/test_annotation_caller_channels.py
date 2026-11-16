@@ -684,13 +684,15 @@ def test_the_interactive_route_agrees_with_the_static_twin_through_every_door(do
 # A break axis clips the annotation with the marks
 # ---------------------------------------------------------------------------
 
-_BREAK = fm.BreakAxis(axis="x", gap=(4.5, 5.5))
+# The break on the drawn horizontal axis: the caller's y under a flip, the x of the unflipped twin.
+_BREAK_FLIPPED = fm.BreakAxis(axis="y", gap=(4.5, 5.5))
+_BREAK_NATIVE = fm.BreakAxis(axis="x", gap=(4.5, 5.5))
 
 
 def test_a_text_past_a_break_lands_on_the_mark_drawn_for_that_row():
-    """The break is on the drawn horizontal axis, which carries the caller's y. A text at the
+    """The break names the caller's y, drawn horizontally. A text at the
     caller's ``(5.0, 8.0)`` sits on the point drawn for that row, past the gap."""
-    chart = _numeric_twin().flipped() + _BREAK
+    chart = _numeric_twin().flipped() + _BREAK_FLIPPED
     svg = (chart + ann.text(5.0, 8.0, "HELLO", anchor="middle")).to_svg()
     x, y = _text_at(svg)
     assert any(abs(x - cx) < 0.01 and abs(y - cy) < 0.01 for cx, cy in _circles(svg))
@@ -699,19 +701,24 @@ def test_a_text_past_a_break_lands_on_the_mark_drawn_for_that_row():
 
 @pytest.mark.parametrize("kind", ["text", "arrow", "line", "rect", "span_y", "bracket"])
 def test_an_annotation_over_a_break_is_the_twins_picture(kind):
-    """The unflipped twin carries the same break on the same drawn axis; the annotation clips
+    """The unflipped twin carries the break on the same drawn axis (its x); the annotation clips
     with the marks there. The warnings (none, or the suppressed bracket) are the twin's, in
     full, on both routes."""
     points = _Points(2.0, 3.0, 4.0, 7.0)
     twin = _numeric_twin()
-    flipped = twin.flipped() + _BREAK + _BUILDERS[kind](False, points)
-    native = twin.native() + _BREAK + _BUILDERS[kind](True, points)
+    flipped = twin.flipped() + _BREAK_FLIPPED + _BUILDERS[kind](False, points)
+    native = twin.native() + _BREAK_NATIVE + _BUILDERS[kind](True, points)
     flipped_svg, flipped_shown = _render_capturing(flipped.to_svg)
     native_svg, native_shown = _render_capturing(native.to_svg)
     assert flipped_svg == native_svg
-    assert flipped_shown == native_shown
-    expected = [_break_message("bracket", "spans a BreakAxis gap")] if kind == "bracket" else []
+    expected = (
+        [_break_message("bracket", "spans a BreakAxis gap", "y")] if kind == "bracket" else []
+    )
+    twin_expected = (
+        [_break_message("bracket", "spans a BreakAxis gap", "x")] if kind == "bracket" else []
+    )
     assert flipped_shown == expected
+    assert native_shown == twin_expected
     _, flipped_shown_interactive = _render_capturing(flipped.interactive)
     assert flipped_shown_interactive == expected
     assert _scene_annotations(flipped) == _scene_annotations(native)
@@ -1003,24 +1010,24 @@ def test_the_interactive_text_node_sits_where_the_static_text_does_through_every
 
 
 # ---------------------------------------------------------------------------
-# Break-axis warnings name the BreakAxis's own axis letter
+# Break-axis warnings name the caller's channel
 # ---------------------------------------------------------------------------
 
 
-def _break_message(kind: str, what: str) -> str:
-    """The warning for an annotation a break removes. It names the axis the caller's
-    ``BreakAxis(axis=...)`` names (the drawn axis), the same letter ``BreakAxis`` itself keeps
-    under a flip, not the caller's channel that the annotation's coordinate runs on."""
-    return f"1 annotation element ({kind}) on the x axis {what} and was suppressed"
+def _break_message(kind: str, what: str, axis: str) -> str:
+    """The warning for an annotation a break removes. It names the caller's channel the
+    ``BreakAxis(axis=...)`` names: ``y`` under a flip (drawn horizontally), ``x`` on the twin."""
+    return f"1 annotation element ({kind}) on the {axis} axis {what} and was suppressed"
 
 
-def test_a_text_inside_a_break_gap_warns_with_the_break_axis_letter_on_both_routes():
-    """The caller's y 5.0 lies in the gap (4.5, 5.5) of ``BreakAxis(axis="x")``, the drawn
-    horizontal axis that carries the caller's y. The warning says "x" (the break's axis); the
-    unflipped twin says the same."""
-    expected = [_break_message("text", "fell inside a BreakAxis gap")]
-    flipped = _numeric_twin().flipped() + _BREAK + ann.text(2.0, 5.0, "HELLO")
-    twin = _numeric_twin().native() + _BREAK + ann.text(5.0, 2.0, "HELLO")
+def test_a_text_inside_a_break_gap_warns_with_the_callers_channel_letter_on_both_routes():
+    """The caller's y 5.0 lies in the gap (4.5, 5.5) of ``BreakAxis(axis="y")``, the caller's
+    channel drawn horizontally. The warning says "y"; the unflipped twin, whose break names its
+    x, says "x"."""
+    expected = [_break_message("text", "fell inside a BreakAxis gap", "y")]
+    twin_expected = [_break_message("text", "fell inside a BreakAxis gap", "x")]
+    flipped = _numeric_twin().flipped() + _BREAK_FLIPPED + ann.text(2.0, 5.0, "HELLO")
+    twin = _numeric_twin().native() + _BREAK_NATIVE + ann.text(5.0, 2.0, "HELLO")
     assert _render_capturing(flipped.to_svg)[1] == expected
     assert _render_capturing(flipped.interactive)[1] == expected
-    assert _render_capturing(twin.to_svg)[1] == expected
+    assert _render_capturing(twin.to_svg)[1] == twin_expected

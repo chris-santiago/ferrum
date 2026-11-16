@@ -1,12 +1,11 @@
 """Characterization tests: BreakAxis + CoordFlip axis token semantics (#231).
 
-BreakAxis.axis is a PHYSICAL-axis token: on a flipped chart, axis="y"
-breaks the PHYSICAL y axis (which carries the flipped encoding). This test
-pins that behavior and asserts chrome ownership consistency: the broken axis's
-ticks/labels remap, the cross axis's don't.
-
-Acceptance criterion: Break × CoordFlip characterization test pins
-physical-token semantics (spec §4, acceptance criterion 5).
+BreakAxis.axis names the CALLER's channel: on a flipped chart, axis="y" breaks
+the column the caller bound to y, wherever the flip draws it (horizontally).
+This test pins that behavior and asserts chrome ownership consistency: the
+broken axis's ticks/labels remap, the cross axis's don't. ``tests/
+test_break_axis_caller_channel.py`` pins the same reading against the
+transposed chart, on every door.
 """
 
 from __future__ import annotations
@@ -18,6 +17,13 @@ import polars as pl
 import ferrum as fm
 from _svg_extents import axis_tick_dash_label_pairs, tick_along
 from _svg_rects import fill_rects
+from test_null_group_warning import _render_capturing
+
+
+_ORDINAL = (
+    "BreakAxis on the {axis} axis had no effect: the axis is ordinal, so its gaps have no "
+    "numeric data range to remove"
+)
 
 
 def _rects(svg: str, fill: str = "#2563eb") -> list[tuple[float, float, float, float]]:
@@ -30,22 +36,14 @@ def _rects(svg: str, fill: str = "#2563eb") -> list[tuple[float, float, float, f
     return fill_rects(svg, fill)
 
 
-def test_break_y_axis_on_flipped_chart_breaks_physical_y():
-    """BreakAxis(axis="y") on a flipped chart breaks the PHYSICAL y axis.
+def test_break_x_axis_on_flipped_chart_warns_on_the_callers_categorical_x():
+    """BreakAxis(axis="x") on a flipped chart names the caller's x channel.
 
-    When a chart is flipped with CoordFlip(), the physical x and y axes swap.
-    A BreakAxis(axis="y") is a PHYSICAL-axis token: it breaks the physical y
-    axis regardless of what encoding it carries.
-
-    On a chart with x="category:N", y="value:Q":
-    - Without flip: BreakAxis(axis="y") breaks physical y, which carries value:Q
-    - With flip: BreakAxis(axis="y") breaks physical y, which now carries category:N
-                 (from the original x encoding)
-
-    Since breaks only work on quantitative axes, a break on the ordinal physical y
-    axis (the flipped x, carrying categories) produces a warning with no effect.
-    This test pins that the axis parameter is interpreted as a PHYSICAL token,
-    proven by the warning that the axis is ordinal.
+    On a chart with x="category:N", y="value:Q" the caller's x is the ordinal
+    category channel (drawn vertically after the flip). Breaks only work on
+    quantitative axes, so a break on it warns, naming ``x`` (the caller's
+    letter), with no effect. This pins that the axis parameter is the caller's
+    channel, not the drawn side.
     """
     df = pl.DataFrame(
         {
@@ -56,10 +54,9 @@ def test_break_y_axis_on_flipped_chart_breaks_physical_y():
 
     base_chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
 
-    # Flipped chart with a break on the PHYSICAL y axis.
-    # Physical y now carries the category:N encoding (from original x).
+    # Flipped chart with a break on the caller's x channel (category:N).
     # Breaks don't apply to ordinal axes, so this should warn.
-    flipped_with_break = base_chart.coord(fm.CoordFlip()) + fm.BreakAxis(axis="y", gap=(2.5, 3.5))
+    flipped_with_break = base_chart.coord(fm.CoordFlip()) + fm.BreakAxis(axis="x", gap=(2.5, 3.5))
 
     # Capture the warning that the break has no effect on the ordinal axis.
     with warnings.catch_warnings(record=True) as caught:
@@ -68,10 +65,7 @@ def test_break_y_axis_on_flipped_chart_breaks_physical_y():
 
     # Verify a warning was issued about the ordinal axis.
     messages = [str(w.message) for w in caught]
-    assert any("ordinal" in m.lower() or "no effect" in m.lower() for m in messages), (
-        f"Expected a warning that BreakAxis on the ordinal (flipped) y axis has no effect; "
-        f"got {messages}"
-    )
+    assert messages == [_ORDINAL.format(axis="x")], messages
 
     # The SVG should still render without error, just without the break effect.
     assert "<svg" in svg_flipped
@@ -79,18 +73,15 @@ def test_break_y_axis_on_flipped_chart_breaks_physical_y():
     assert rects, "flipped chart must still render bars"
 
 
-def test_break_x_axis_on_flipped_chart_clips_the_value_bar_crossing_the_gap():
-    """BreakAxis(axis="x") on a flipped chart clips marks against the PHYSICAL x axis.
+def test_break_y_axis_on_flipped_chart_clips_the_value_bar_crossing_the_gap():
+    """BreakAxis(axis="y") on a flipped chart clips marks on the caller's y (value) channel.
 
     Mirrors ``test_break_axis_geometry.py``'s vertical clipping pin, rotated: on
-    a flipped chart the bars are horizontal and vary along x (the value
-    encoding). A bar whose value crosses the gap must render as two clipped
-    pieces sharing the same row (y), not as one continuous (unclipped) rect --
-    the assertion the predecessor test never made (spec review cycle 1, finding
-    #1: the old test's only assertions -- an SVG came back, and some rect had
-    y > 0 -- hold identically under the rejected logical-token reading, where
-    axis="x" would name the still-ordinal category channel and the break would
-    be refused as ineffective).
+    a flipped chart the bars are horizontal and vary along the value encoding.
+    A bar whose value crosses the gap must render as two clipped pieces sharing
+    the same row (y), not as one continuous (unclipped) rect. An SVG coming
+    back, or some rect having y > 0, would also hold if the break were refused
+    as ineffective, so the pieces are what is asserted.
     """
     df = pl.DataFrame(
         {
@@ -101,11 +92,11 @@ def test_break_x_axis_on_flipped_chart_clips_the_value_bar_crossing_the_gap():
 
     base_chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
 
-    # Flip the chart, then break the PHYSICAL x axis (value dimension).
+    # Flip the chart, then break the caller's y channel (value, drawn horizontally).
     # The value=500 bar crosses the gap (150, 400) and must split into two
     # clipped horizontal pieces sharing the same row.
     flipped_with_break = base_chart.coord(fm.CoordFlip()) + fm.BreakAxis(
-        axis="x", gap=(150.0, 400.0)
+        axis="y", gap=(150.0, 400.0)
     )
     svg_flipped = flipped_with_break.to_svg()
 
@@ -123,17 +114,15 @@ def test_break_x_axis_on_flipped_chart_clips_the_value_bar_crossing_the_gap():
     assert left[0] + left[2] < right[0], "the pieces are separated by the break"
 
 
-def test_break_y_axis_effective_on_a_transposed_flip_while_x_warns_ordinal():
-    """The spec's headline positive case (spec review cycle 1, finding #4).
+def test_break_x_axis_effective_on_a_transposed_flip_while_y_warns_ordinal():
+    """The positive case: the quantitative channel is the caller's x.
 
-    Every other test in this file fixes x="category:N", y="value:Q", so
-    flipping always makes physical y ORDINAL: axis="y" is only ever shown to
-    warn/no-op, never to break effectively. This is the missing positive
-    mirror: with the quantitative/ordinal encodings swapped before the flip
-    (x="value:Q", y="category:N"), flipping puts the quantitative value
-    encoding on physical y -- so BreakAxis(axis="y") lands there EFFECTIVELY,
-    with no warning, while BreakAxis(axis="x") on the SAME flipped chart warns
-    that the physical x axis (now ordinal) had no effect.
+    Every other test here fixes x="category:N", y="value:Q". This is the
+    mirror: with the encodings swapped before the flip (x="value:Q",
+    y="category:N"), the caller's x is the quantitative value channel, so
+    BreakAxis(axis="x") lands there effectively, with no warning, while
+    BreakAxis(axis="y") on the SAME flipped chart warns that the caller's y
+    (the ordinal category) had no effect.
     """
     df = pl.DataFrame(
         {
@@ -148,16 +137,14 @@ def test_break_y_axis_effective_on_a_transposed_flip_while_x_warns_ordinal():
 
     svg_plain = flipped.to_svg()
 
-    with warnings.catch_warnings(record=True) as caught_y:
-        warnings.simplefilter("always")
-        svg_break_y = (flipped + fm.BreakAxis(axis="y", gap=gap)).to_svg()
-    assert not caught_y, (
-        f"axis='y' must break the physical y (value) axis effectively with no "
-        f"warning; got {[str(w.message) for w in caught_y]}"
+    svg_break_x, messages_x = _render_capturing((flipped + fm.BreakAxis(axis="x", gap=gap)).to_svg)
+    assert messages_x == [], (
+        f"axis='x' must break the caller's x (value) channel effectively with no "
+        f"warning; got {messages_x}"
     )
-    assert svg_break_y != svg_plain, "an effective break must change the render"
+    assert svg_break_x != svg_plain, "an effective break must change the render"
 
-    y_ticks = axis_tick_dash_label_pairs(svg_break_y, axis="y")
+    y_ticks = axis_tick_dash_label_pairs(svg_break_x, axis="y")
     hidden = [t for t in y_ticks if tick_along(t.dash, axis="y") < -1000]
     visible = [t for t in y_ticks if tick_along(t.dash, axis="y") > 0]
     # The native horizontal bar anchors its value axis at zero, so the visible
@@ -168,32 +155,24 @@ def test_break_y_axis_effective_on_a_transposed_flip_while_x_warns_ordinal():
     )
     assert any(label[2] == "0" for t in visible for label in t.labels), visible
 
-    with warnings.catch_warnings(record=True) as caught_x:
-        warnings.simplefilter("always")
-        svg_break_x = (flipped + fm.BreakAxis(axis="x", gap=gap)).to_svg()
-    messages = [str(w.message) for w in caught_x]
-    assert any("ordinal" in m for m in messages), (
-        f"axis='x' on this flipped chart (physical x = ordinal category) must "
-        f"warn that the break had no effect; got {messages}"
+    svg_break_y, messages_y = _render_capturing((flipped + fm.BreakAxis(axis="y", gap=gap)).to_svg)
+    assert messages_y == [_ORDINAL.format(axis="y")], (
+        f"axis='y' on this flipped chart (caller's y = ordinal category) must "
+        f"warn that the break had no effect; got {messages_y}"
     )
-    assert svg_break_x == svg_plain, (
+    assert svg_break_y == svg_plain, (
         "the ordinal no-op must render byte-identical to the plain chart"
     )
 
 
-def test_break_y_axis_is_a_no_op_while_break_x_axis_clips_on_the_same_flipped_chart():
-    """The physical-token reading predicts an ASYMMETRIC result on one fixture.
+def test_break_x_axis_is_a_no_op_while_break_y_axis_clips_on_the_same_flipped_chart():
+    """The caller's-channel reading predicts an ASYMMETRIC result on one fixture.
 
-    On the x="category:N", y="value:Q" fixture flipped, axis="y" (physical y,
-    carrying the ordinal category encoding) must be a byte-identical no-op
-    while axis="x" (physical x, carrying the quantitative value encoding) must
-    clip. The rejected logical-token reading predicts the OPPOSITE asymmetry
-    (axis="y" would name the still-quantitative value channel; axis="x" would
-    name the still-ordinal category channel), so pinning WHICH SIDE is
-    effective -- not merely that the two renders differ -- is what
-    discriminates the two readings (spec review cycle 1, finding #3: the
-    predecessor test's bare ``svg_break_y != svg_break_x`` held under both
-    readings, since each reading makes exactly one of the two axes effective).
+    On the x="category:N", y="value:Q" fixture flipped, axis="x" (the caller's
+    ordinal category) must be a byte-identical no-op while axis="y" (the
+    caller's quantitative value) must clip. The drawn-side reading predicts
+    the OPPOSITE asymmetry, so pinning WHICH SIDE is effective, not merely
+    that the two renders differ, is what discriminates the two readings.
     """
     df = pl.DataFrame(
         {
@@ -207,35 +186,37 @@ def test_break_y_axis_is_a_no_op_while_break_x_axis_clips_on_the_same_flipped_ch
     gap = (150.0, 400.0)
 
     svg_plain = flipped.to_svg()
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        svg_break_y = (flipped + fm.BreakAxis(axis="y", gap=gap)).to_svg()
-    svg_break_x = (flipped + fm.BreakAxis(axis="x", gap=gap)).to_svg()
+    svg_break_x, messages_x = _render_capturing((flipped + fm.BreakAxis(axis="x", gap=gap)).to_svg)
+    svg_break_y, messages_y = _render_capturing((flipped + fm.BreakAxis(axis="y", gap=gap)).to_svg)
 
-    assert svg_break_y == svg_plain, (
-        "axis='y' on the flipped (ordinal-physical-y) chart must be a byte-identical no-op"
+    assert messages_x == [_ORDINAL.format(axis="x")]
+    assert messages_y == []
+
+    assert svg_break_x == svg_plain, (
+        "axis='x' (the caller's ordinal category) on the flipped chart must be a "
+        "byte-identical no-op"
     )
-    assert len(_rects(svg_break_x)) == 6, (
-        f"axis='x' on the same flipped chart must clip the value-crossing "
-        f"bar; got {_rects(svg_break_x)}"
+    assert len(_rects(svg_break_y)) == 6, (
+        f"axis='y' on the same flipped chart must clip the value-crossing "
+        f"bar; got {_rects(svg_break_y)}"
     )
 
 
-def test_chrome_ownership_break_x_affects_value_axis_on_flipped():
-    """On a flipped chart, BreakAxis(axis="x") breaks the physical x (value axis).
+def test_chrome_ownership_break_y_affects_value_axis_on_flipped():
+    """On a flipped chart, BreakAxis(axis="y") breaks the caller's y (value axis).
 
     Chrome ownership consistency: the BROKEN axis's ticks/labels remap
     (move/hide per the break), while the cross axis's ticks/labels stay in
     their original positions.
 
     On a non-flipped chart with x="category:N", y="value:Q":
-    - BreakAxis(axis="y", gap) breaks the physical y (value axis)
+    - BreakAxis(axis="y", gap) breaks the value axis, drawn vertically
 
     On a flipped version of the same chart:
-    - BreakAxis(axis="x", gap) breaks the physical x (value axis)
+    - BreakAxis(axis="y", gap) breaks the value axis, drawn horizontally
 
     These two should produce similar results since they break the same
-    encoding dimension (value), just on different physical axes due to flip.
+    encoding dimension (value), just on different drawn sides due to flip.
     """
     df = pl.DataFrame(
         {
@@ -246,17 +227,17 @@ def test_chrome_ownership_break_x_affects_value_axis_on_flipped():
 
     base_chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
 
-    # Non-flipped baseline: break on physical y (value axis).
+    # Non-flipped baseline: break on y (value axis).
     svg_unflipped_break_y = (base_chart + fm.BreakAxis(axis="y", gap=(60.0, 150.0))).to_svg()
 
-    # Flipped chart: break on physical x (value axis, which was physical y before flip).
-    svg_flipped_break_x = (
-        base_chart.coord(fm.CoordFlip()) + fm.BreakAxis(axis="x", gap=(60.0, 150.0))
+    # Flipped chart: break on the caller's y (value axis, drawn on the x side).
+    svg_flipped_break_y = (
+        base_chart.coord(fm.CoordFlip()) + fm.BreakAxis(axis="y", gap=(60.0, 150.0))
     ).to_svg()
 
     # Both should have ticks remapped on the broken axis.
     unflipped_y_ticks = axis_tick_dash_label_pairs(svg_unflipped_break_y, axis="y")
-    flipped_x_ticks = axis_tick_dash_label_pairs(svg_flipped_break_x, axis="x")
+    flipped_x_ticks = axis_tick_dash_label_pairs(svg_flipped_break_y, axis="x")
 
     # The broken axis should have some ticks hidden (due to the gap).
     # We expect at least 1 tick to be hidden (y < -1000) on the unflipped y-axis.
@@ -268,15 +249,16 @@ def test_chrome_ownership_break_x_affects_value_axis_on_flipped():
     # Similarly, the flipped chart's x-axis should have some ticks hidden.
     flipped_hidden_x = [t for t in flipped_x_ticks if tick_along(t.dash, axis="x") < -1000]
     assert flipped_hidden_x, (
-        "BreakAxis(axis='x', gap=(60, 150)) on a flipped chart (physical x = value) "
+        "BreakAxis(axis='y', gap=(60, 150)) on a flipped chart (caller's y = value) "
         "should hide some ticks"
     )
 
 
-def test_chrome_ownership_consistency_break_x_on_flipped():
-    """On a flipped chart with BreakAxis(axis="x"), the x-axis chrome remaps.
+def test_chrome_ownership_consistency_break_y_on_flipped():
+    """On a flipped chart with BreakAxis(axis="y"), the drawn x-axis chrome remaps.
 
-    With BreakAxis(axis="x") on a flipped chart, the PHYSICAL x axis is broken.
+    With BreakAxis(axis="y") on a flipped chart, the caller's y (drawn on the
+    x side) is broken.
     So x-axis ticks/labels should remap (some hidden, others compressed), while
     y-axis ticks/labels should stay untouched.
     """
@@ -292,9 +274,9 @@ def test_chrome_ownership_consistency_break_x_on_flipped():
     # Unbroken flipped chart: baseline for comparison.
     svg_unbroken = base_chart.coord(fm.CoordFlip()).to_svg()
 
-    # Flipped chart with break on physical x (value dimension).
+    # Flipped chart with a break on the caller's y (value dimension).
     svg_broken = (
-        base_chart.coord(fm.CoordFlip()) + fm.BreakAxis(axis="x", gap=(80.0, 180.0))
+        base_chart.coord(fm.CoordFlip()) + fm.BreakAxis(axis="y", gap=(80.0, 180.0))
     ).to_svg()
 
     # Extract x-axis ticks and labels from both SVGs.
@@ -302,7 +284,7 @@ def test_chrome_ownership_consistency_break_x_on_flipped():
     unbroken_x_ticks = axis_tick_dash_label_pairs(svg_unbroken, axis="x")
     broken_x_ticks = axis_tick_dash_label_pairs(svg_broken, axis="x")
 
-    # With a break on the physical x axis, some ticks/labels should be hidden
+    # With a break on the caller's y (drawn on x), some ticks/labels should be hidden
     # while others are compressed. The set should differ.
     unbroken_visible_x = [
         (tick_along(t.dash, axis="x"), t.labels)
@@ -315,47 +297,46 @@ def test_chrome_ownership_consistency_break_x_on_flipped():
         if tick_along(t.dash, axis="x") > 0
     ]
 
-    # The break on physical x should affect x-axis ticks.
+    # The break should affect the drawn x-axis ticks.
     # At least some x-ticks should be hidden or have different positions.
     assert len(broken_visible_x) != len(unbroken_visible_x) or any(
         tick_along(t.dash, axis="x") != tick_along(u.dash, axis="x")
         for t, u in zip(broken_x_ticks, unbroken_x_ticks)
         if tick_along(t.dash, axis="x") > 0 and tick_along(u.dash, axis="x") > 0
-    ), "the x-axis (which is broken on physical x) should differ in tick positions or visibility"
+    ), "the x-axis (which carries the broken channel) should differ in tick positions or visibility"
 
 
 def test_indicator_on_broken_axis_on_flipped_chart():
-    """Break indicator is drawn on the PHYSICAL broken axis.
+    """Break indicator is drawn on the broken axis of a flipped chart.
 
     Mirrors ``test_break_axis_geometry.py``'s break-style parity check: with a
     bar crossing the gap, ``break_style="slash"`` must render strictly MORE
     ``<line>`` elements than ``break_style="gap"`` (which draws no indicator at
-    all) on the SAME flipped chart, axis="x" break -- proving an indicator is
-    actually drawn on the physical x axis, not merely that some SVG came back
-    (the vacuous predecessor's only assertions, spec review cycle 1, finding
-    #2: ``"<svg" in svg`` and ``len(svg) > 100`` both hold on an SVG with no
-    break indicator at all).
+    all) on the SAME flipped chart, axis="y" break -- proving an indicator is
+    actually drawn on the broken axis, not merely that some SVG came back
+    (``"<svg" in svg`` and ``len(svg) > 100`` both hold on an SVG with no break
+    indicator at all).
     """
     df = pl.DataFrame({"category": ["A", "B"], "value": [72.0, 900.0]})
     base_chart = fm.Chart(df).mark_bar().encode(x="category:N", y="value:Q")
     flipped = base_chart.coord(fm.CoordFlip())
     gap = (150.0, 850.0)
 
-    svg_no_indicator = (flipped + fm.BreakAxis(axis="x", gap=gap, break_style="gap")).to_svg()
-    svg_slash = (flipped + fm.BreakAxis(axis="x", gap=gap, break_style="slash")).to_svg()
+    svg_no_indicator = (flipped + fm.BreakAxis(axis="y", gap=gap, break_style="gap")).to_svg()
+    svg_slash = (flipped + fm.BreakAxis(axis="y", gap=gap, break_style="slash")).to_svg()
 
     assert len(_rects(svg_slash)) == 3, "one short bar + the crossing bar's two clipped pieces"
     assert svg_slash.count("<line") > svg_no_indicator.count("<line"), (
         "break_style='slash' must draw indicator lines the 'gap' style omits, "
-        "on the flipped chart's physical x axis"
+        "on the flipped chart's value axis"
     )
 
 
-def test_flipped_chart_without_break_same_as_break_on_ordinal_physical_y():
-    """A flipped chart with BreakAxis on the ordinal physical y axis is unchanged.
+def test_flipped_chart_without_break_same_as_break_on_ordinal_callers_x():
+    """A flipped chart with BreakAxis on the caller's ordinal x is unchanged.
 
-    Sanity check: applying a break to the ordinal physical y axis (the flipped
-    x carrying categories) has no effect and produces a warning, so the SVG
+    Sanity check: applying a break to the caller's ordinal x (the
+    categories, drawn vertically) has no effect and produces a warning, so the SVG
     should be identical to the unbroken case.
     """
     df = pl.DataFrame(
@@ -370,23 +351,25 @@ def test_flipped_chart_without_break_same_as_break_on_ordinal_physical_y():
 
     svg_no_break = flipped.to_svg()
 
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        svg_with_break = (flipped + fm.BreakAxis(axis="y", gap=(2.0, 3.5))).to_svg()
+    svg_with_break, messages = _render_capturing(
+        (flipped + fm.BreakAxis(axis="x", gap=(2.0, 3.5))).to_svg
+    )
+
+    assert messages == [_ORDINAL.format(axis="x")]
 
     # Since the break has no effect on an ordinal axis, the SVGs should be identical.
     assert svg_no_break == svg_with_break, (
-        "BreakAxis(axis='y') on a flipped chart with ordinal physical y "
+        "BreakAxis(axis='x') on a flipped chart with an ordinal caller's x "
         "should have no effect and produce identical SVG"
     )
 
 
 def test_cross_axis_chrome_unchanged_when_breaking_on_flipped():
-    """The cross axis's chrome is not affected when breaking the other physical axis on flipped.
+    """The cross axis's chrome is not affected when breaking the other channel on flipped.
 
-    When BreakAxis(axis="x") is applied to a flipped chart:
-    - x-axis (physical, carrying values) is broken → x ticks remap
-    - y-axis (physical, carrying categories, ordinal) is NOT broken → y ticks stay unchanged
+    When BreakAxis(axis="y") is applied to a flipped chart:
+    - the value channel (drawn on x) is broken → x ticks remap
+    - the category channel (drawn on y, ordinal) is NOT broken → y ticks stay unchanged
 
     This test verifies that y-axis ticks are in the same positions in both
     the unbroken and broken charts.
@@ -402,7 +385,7 @@ def test_cross_axis_chrome_unchanged_when_breaking_on_flipped():
     flipped = base_chart.coord(fm.CoordFlip())
 
     svg_unbroken = flipped.to_svg()
-    svg_broken = (flipped + fm.BreakAxis(axis="x", gap=(60.0, 150.0))).to_svg()
+    svg_broken = (flipped + fm.BreakAxis(axis="y", gap=(60.0, 150.0))).to_svg()
 
     # Extract y-axis ticks (the cross/unbroken axis) from both.
     unbroken_y_ticks = axis_tick_dash_label_pairs(svg_unbroken, axis="y")
