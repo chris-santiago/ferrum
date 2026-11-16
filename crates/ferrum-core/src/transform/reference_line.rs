@@ -47,15 +47,15 @@ use crate::transform::core::TransformSpec;
 
 /// Static-line transform — emits two endpoint rows for a reference line.
 ///
-/// The output schema names are configurable so the layer that consumes this
-/// transform (via ``data_source``) can encode the same column names as the
-/// primary mark. The two rows represent the start and end of the line; the
-/// downstream ``mark_line`` connects them.
+/// The output schema names are configurable so the layer that carries this
+/// transform (``Chart.transform(fm.ReferenceLine(...))``, added to another
+/// chart with ``+``) can encode the same column names as the primary mark.
+/// The two rows represent the start and end of the line; ``mark_line``
+/// connects them.
 ///
-/// Used internally by ``calibration_chart`` to draw the y=x reliability
-/// diagonal as a proper Phase 8a layer (named transform → ``data_source``)
-/// instead of relying on the diagonal layer iterating every row of the
-/// primary calibration data.
+/// ``calibration_chart`` uses it to draw the y=x reliability diagonal as a
+/// layer of its own instead of iterating every row of the primary calibration
+/// data.
 ///
 /// Parameters
 /// ----------
@@ -68,13 +68,15 @@ use crate::transform::core::TransformSpec;
 /// y : (float, float)
 ///     ``(start, end)`` y-coordinate of the reference line.
 /// name : str, optional
-///     Named output label so a sibling layer can target this transform's
-///     output via ``Layer.data_source``.
+///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_smooth().encode(x="x", y="y") + fm.ReferenceLine(y=0)
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [1.2, 1.9, 3.1, 3.9]})
+/// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y") + fm.Chart(df).transform(fm.ReferenceLine("x", "y", x=(0, 4), y=(0, 4))).mark_line().encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "ReferenceLine")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyReferenceLine(pub(crate) TransformSpec);

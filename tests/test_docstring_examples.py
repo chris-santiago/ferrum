@@ -43,6 +43,7 @@ import ferrum
 
 MUST_PASS = [
     "ferrum._coerce",
+    "ferrum._core",
     "ferrum._layer",
     "ferrum._render",
     "ferrum._shorthand",
@@ -75,12 +76,11 @@ MUST_PASS = [
 # Ceiling on failing examples per module. Every failure counted here is an
 # illustrative snippet that uses a name its docstring never defines, which
 # ``test_illustrative_failures_are_only_undefined_names`` enforces.
-# ``ferrum._core`` is the compiled extension: its runtime docstrings come
-# from the Rust doc comments, not from ``_core.pyi``.
+# ``ferrum._core`` is not here: the compiled extension's runtime docstrings
+# come from the Rust doc comments, and every example in them must pass.
 ILLUSTRATIVE_FAILURES = {
     "ferrum": 11,
     "ferrum._configure_mixin": 1,
-    "ferrum._core": 15,
     "ferrum._metric_labels": 8,
     "ferrum.annotations": 4,
     "ferrum.chart": 9,
@@ -276,11 +276,28 @@ STATISTIC_TRANSFORMS = (
     "Summary",
     "Violin",
 )
-RUNNING_CLASSES = REGRESSION_FAMILY + STATISTIC_TRANSFORMS
+# The remaining transform and ordering classes whose examples draw a chart.
+DRAWING_CLASSES = (
+    "Contour",
+    "Hex",
+    "Linkage",
+    "Raster",
+    "ReferenceLine",
+    "Reorder",
+    "Swarm",
+    "Unpivot",
+)
+# Chart-drawing classes outside the transform families: the scale a chart uses.
+SCALE_CLASSES = ("ContinuousScheme",)
+RUNNING_CLASSES = REGRESSION_FAMILY + STATISTIC_TRANSFORMS + DRAWING_CLASSES + SCALE_CLASSES
+# Classes whose examples build a value, not a chart, and render it through a function.
+VALUE_CLASSES = ("ChartSpec", "EncodingSpec")
+CORE_FUNCTIONS = ("compute_layout", "render_svg", "render_png", "process_batch")
 
 # Per class, the alternative sets of tokens one rendered chart example must carry:
 # the class itself, or the mark that builds it. A class whose examples go only
-# through the mark says so in its docstring (the lead-in below).
+# through the mark says so in its docstring (the lead-in below). Linkage and
+# ReferenceLine have no mark that builds them, so their one door is the class.
 STATISTIC_DOORS = {
     "AggregateOp": [("fm.AggregateOp(", "fm.Aggregate(")],
     "Aggregate": [("fm.Aggregate(",)],
@@ -296,6 +313,17 @@ STATISTIC_DOORS = {
     "Summary": [("fm.Summary(",)],
     "Violin": [("fm.Violin(",), (".mark_violin(",)],
 }
+DRAWING_DOORS = {
+    "Contour": [("fm.Contour(",), (".mark_contour(",)],
+    "Hex": [("fm.Hex(",), (".mark_hex(",)],
+    "Linkage": [("fm.Linkage(",)],
+    "Raster": [("fm.Raster(",), (".mark_raster(",)],
+    "ReferenceLine": [("fm.ReferenceLine(",)],
+    "Reorder": [("fm.Reorder(",)],
+    "Swarm": [("fm.Swarm(",), (".mark_swarm(",)],
+    "Unpivot": [("fm.Unpivot(",)],
+}
+DOORS = {**STATISTIC_DOORS, **DRAWING_DOORS}
 MARK_LEAD_IN = "mark builds the same transform:"
 
 
@@ -316,7 +344,25 @@ def _example_sources(class_name: str) -> list[str]:
     ]
 
 
-_CHART_EXAMPLE = re.compile(r"(\w+) = fm\.")
+# A binding of an extension class or function (a scheme, a spec, a transform, a
+# rendered string, a layout) is a value an example builds on the way to a chart;
+# every other ``name = fm.<call>`` builds a chart.
+_CORE_CALLABLES = "|".join(
+    sorted(
+        name
+        for name, obj in vars(importlib.import_module("ferrum._core")).items()
+        if callable(obj) and not name.startswith("_")
+    )
+)
+_CHART_EXAMPLE = re.compile(rf"(\w+) = fm\.(?!(?:{_CORE_CALLABLES})\()")
+_CORE_CLASS_NAMES = "|".join(
+    sorted(
+        name
+        for name, obj in vars(importlib.import_module("ferrum._core")).items()
+        if isinstance(obj, type)
+    )
+)
+_CORE_VALUE_BINDING = re.compile(rf"(\w+) = fm\.(?:{_CORE_CLASS_NAMES})\(")
 
 
 def _is_chart_example(source: str) -> bool:
@@ -338,8 +384,8 @@ def _unrendered_charts(sources: list[str]) -> list[str]:
 
 @pytest.mark.parametrize("class_name", RUNNING_CLASSES)
 def test_class_examples_run_and_render(class_name):
-    """Each regression-family and statistic-transform class docstring carries
-    examples that all run as written (no ``NameError``, no refusal), and every chart one builds is
+    """Each chart-drawing ``_core`` class docstring carries examples that all
+    run as written (no ``NameError``, no refusal), and every chart one builds is
     rendered by the example that follows it."""
     result = _run_doctests(_core_class_doctests(class_name))
     assert result.attempted > 0, f"{class_name} has no docstring examples"
@@ -350,13 +396,18 @@ def test_class_examples_run_and_render(class_name):
 
 
 def _absent_doors(source: str) -> list[str]:
-    """Return the doors that do not exist an example reaches for: a heatmap
-    mark, a ``fn_=`` keyword on ``Summary``, and a ``transform=`` keyword
-    anywhere inside an ``encode(...)`` call (continuation lines included)."""
+    """Return the doors that do not exist an example reaches for: a
+    ``mark_*`` method ``Chart`` does not have, a ``fn_=`` keyword on
+    ``Summary``, and a ``transform=`` keyword anywhere inside an ``encode(...)``
+    call (continuation lines included)."""
     found = []
     for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Attribute) and node.attr == "mark_heatmap":
-            found.append("mark_heatmap")
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr.startswith("mark_")
+            and not hasattr(ferrum.Chart, node.attr)
+        ):
+            found.append(node.attr)
         if not isinstance(node, ast.Call):
             continue
         callee = node.func
@@ -373,6 +424,8 @@ def test_absent_door_check_detects_each_door_and_spares_a_real_keyword():
     """The check fires on every nonexistent door, wherever the keyword sits,
     and leaves ``AggregateOp``'s real ``fn_=`` keyword alone."""
     assert _absent_doors("fm.Chart(df).mark_heatmap()") == ["mark_heatmap"]
+    assert _absent_doors("fm.Chart(df).mark_dendrogram()") == ["mark_dendrogram"]
+    assert not _absent_doors("fm.Chart(df).mark_raster()")
     assert _absent_doors('fm.Summary("p", fn_="mean")') == ["Summary(fn_=)"]
     assert _absent_doors('chart.encode(x="a", transform=t)') == ["encode(transform=)"]
     assert _absent_doors('chart.encode(\n    x="a",\n    y="b",\n    transform=t,\n)') == [
@@ -382,8 +435,8 @@ def test_absent_door_check_detects_each_door_and_spares_a_real_keyword():
     assert not _absent_doors('fm.Chart(df).transform(t).encode(x="a", y="b")')
 
 
-@pytest.mark.parametrize("class_name", STATISTIC_TRANSFORMS)
-def test_statistic_transform_examples_name_only_doors_that_exist(class_name):
+@pytest.mark.parametrize("class_name", RUNNING_CLASSES + VALUE_CLASSES + CORE_FUNCTIONS)
+def test_core_examples_name_only_doors_that_exist(class_name):
     for source in _example_sources(class_name):
         assert not _absent_doors(source), f"{class_name}: {source}"
 
@@ -399,7 +452,7 @@ def _door_gaps(class_name: str, sources: list[str], docstring: str) -> list[str]
         for i, source in enumerate(sources)
         if _is_chart_example(source) and not _unrendered_charts(sources[i : i + 2])
     ]
-    for tokens in STATISTIC_DOORS[class_name]:
+    for tokens in DOORS[class_name]:
         if any(all(token in source for token in tokens) for source in rendered):
             break
     else:
@@ -415,8 +468,8 @@ def _class_docstring(class_name: str) -> str:
     return "\n".join(test.docstring for test in _core_class_doctests(class_name))
 
 
-@pytest.mark.parametrize("class_name", STATISTIC_TRANSFORMS)
-def test_statistic_transform_examples_use_the_class_or_the_mark_that_builds_it(class_name):
+@pytest.mark.parametrize("class_name", sorted(DOORS))
+def test_transform_examples_use_the_class_or_the_mark_that_builds_it(class_name):
     sources = _example_sources(class_name)
     assert _door_gaps(class_name, sources, _class_docstring(class_name)) == []
 
@@ -475,6 +528,236 @@ def test_unrendered_chart_is_detected():
     assert not _unrendered_charts(renamed)
     renamed[first_render] = "svg = chart.to_svg()"
     assert _unrendered_charts(renamed)
+
+
+def test_every_core_object_with_examples_is_checked():
+    """Every ``_core`` class or function that carries examples is in one of the
+    run-and-render, value-class or function groups, so a new one cannot fall
+    outside the render and door checks."""
+    with_examples = {
+        test.name.removeprefix("ferrum._core.")
+        for test in doctest.DocTestFinder().find(importlib.import_module("ferrum._core"))
+        if test.examples
+    }
+    checked = set(RUNNING_CLASSES) | set(VALUE_CLASSES) | set(CORE_FUNCTIONS)
+    assert with_examples == checked, (
+        f"unchecked: {sorted(with_examples - checked)}; no examples: {sorted(checked - with_examples)}"
+    )
+
+
+NO_CHART_DOOR_NOTE = "No chart draws this class directly:"
+
+
+def _unused_values(sources: list[str], docstring: str) -> list[str]:
+    """Return each ``_core`` value an example binds (``name = fm.<Class>(...)``)
+    that no later example draws: one that uses the name inside a rendered chart
+    (a chart example followed by its ``to_svg()``) or inside a ``render_svg`` or
+    ``render_png`` call. A docstring that says the class has no chart door
+    (``NO_CHART_DOOR_NOTE``) may leave its value unused."""
+    if NO_CHART_DOOR_NOTE in docstring:
+        return []
+    unused = []
+    for i, source in enumerate(sources):
+        match = _CORE_VALUE_BINDING.match(source)
+        if not match:
+            continue
+        name = re.compile(rf"\b{match.group(1)}\b")
+        drawn = any(
+            name.search(later)
+            and (
+                re.search(r"fm\.render_(?:svg|png)\(", later)
+                or (_is_chart_example(later) and not _unrendered_charts(sources[j : j + 2]))
+            )
+            for j, later in enumerate(sources[i + 1 :], start=i + 1)
+        )
+        if not drawn:
+            unused.append(source)
+    return unused
+
+
+@pytest.mark.parametrize("class_name", RUNNING_CLASSES + VALUE_CLASSES)
+def test_a_value_an_example_builds_is_drawn(class_name):
+    """A class value an example binds is used by a rendered chart or a render
+    call, or the docstring says the class has no chart door."""
+    assert not _unused_values(_example_sources(class_name), _class_docstring(class_name))
+
+
+def test_unused_value_is_detected():
+    """A bound class value no chart uses fails the check; using it in the
+    rendered chart, or saying the class has no chart door, passes."""
+    dead = [
+        'raster = fm.Raster("x", "y")',
+        "chart = fm.Chart(df).mark_raster()",
+        "svg = chart.to_svg()",
+    ]
+    assert _unused_values(dead, "") == [dead[0]]
+    used = [
+        'raster = fm.Raster("x", "y")',
+        "chart = fm.Chart(df).transform(raster).mark_image()",
+        "svg = chart.to_svg()",
+    ]
+    assert not _unused_values(used, "")
+    unrendered = used[:2]
+    assert _unused_values(unrendered, "") == [used[0]]
+    assert not _unused_values(dead, NO_CHART_DOOR_NOTE)
+    spec = ['spec = fm.ChartSpec(mark="point")', "fm.render_svg(spec, df).startswith('<svg')"]
+    assert not _unused_values(spec, "")
+    assert _unused_values(spec[:1], "") == spec[:1]
+    # A rendered string or a layout is a function result, not a chart or a class value.
+    for binding in ("svg = fm.render_svg(spec, df)", "layout = fm.compute_layout(spec)"):
+        assert not _is_chart_example(binding)
+        assert not _unused_values([binding], "")
+    assert _is_chart_example("chart = fm.lmplot(df, x='x', y='y')")
+
+
+def test_transform_examples_draw_columns_the_transform_emits():
+    """An example that encodes a column its transform does not emit fails when
+    run: the renderer refuses it. This covers column names only, not whether the
+    mark suits the rows."""
+    prelude = ">>> import ferrum as fm\n>>> import polars as pl\n>>> df = pl.DataFrame({'x': [0.1, 0.5, 0.9], 'y': [1.0, 2.0, 3.0]})\n"
+    source = 'fm.Chart(df).transform(fm.Hex("x", "y", bin_size=1.0)).mark_point().encode(x="hex_x", y="count").to_svg()'
+    test = doctest.DocTestParser().get_doctest(f"{prelude}>>> {source}\n", {}, "bad", "bad", 0)
+    assert [kind for _, kind in _run_doctests([test]).failures] == ["ValueError"]
+
+
+def test_contour_transform_example_draws_segments():
+    """The default isoline output is one row per segment with an end point, so
+    the transform-door example draws segments from both ends, not start dots."""
+    sources = [s for s in _example_sources("Contour") if "fm.Contour(" in s and "encode(" in s]
+    assert sources, "no Contour transform-door chart example"
+    for source in sources:
+        assert ".mark_segment(" in source, source
+        for column in ("contour_x", "contour_y", "contour_x2", "contour_y2"):
+            assert f'"{column}"' in source, f"{column}: {source}"
+
+
+def test_hex_transform_example_does_not_draw_vertex_rows_as_points():
+    """Hex emits six vertex rows per cell, so drawing its rows with
+    ``mark_point`` shows corner dots, not cells."""
+    sources = [s for s in _example_sources("Hex") if "fm.Hex(" in s and "encode(" in s]
+    assert sources, "no Hex transform-door chart example"
+    for source in sources:
+        assert ".mark_point(" not in source, source
+
+
+def test_compute_layout_returns_section_names_keys_the_result_has():
+    """Each key the Returns section names is a key of an actual layout."""
+    docstring = _class_docstring("compute_layout")
+    returns = docstring.split("Returns\n-------")[1].split("Raises\n------")[0]
+    named = re.findall(r"``(\w+)``", returns)
+    assert named, "the Returns section names no key"
+    namespace: dict = {}
+    for test in _core_class_doctests("compute_layout"):
+        runner = doctest.DocTestRunner(verbose=False)
+        runner.run(test, out=lambda _text: None, clear_globs=False)
+        namespace = test.globs
+    layout = namespace["layout"]
+    assert [key for key in named if key not in layout and key != "LayoutResult"] == []
+
+
+def test_wrong_door_example_fails_the_gate():
+    """An example that reaches for a door that does not exist is flagged by the
+    door check and also fails when run, so a ``ferrum._core`` docstring that
+    carries one cannot pass the must-pass group."""
+    prelude = (
+        ">>> import ferrum as fm\n>>> import polars as pl\n>>> df = pl.DataFrame({'x': [1.0]})\n"
+    )
+    wrong_doors = {
+        "fm.Chart(df).mark_heatmap().encode(x='x', y='x')": "AttributeError",
+        "fm.Chart(df).mark_point().encode(x='x', y='x', transform=fm.Unpivot(value_vars=['x']))": "ValueError",
+        "fm.Summary('x', fn_='mean')": "TypeError",
+    }
+    for source, kind in wrong_doors.items():
+        assert _absent_doors(source), source
+        docstring = f"{prelude}>>> {source}\n"
+        test = doctest.DocTestParser().get_doctest(docstring, {}, "wrong_door", "wrong_door", 0)
+        outcome = _run_doctests([test])
+        assert [failed_kind for _, failed_kind in outcome.failures] == [kind], source
+
+
+def test_core_examples_are_must_pass_with_no_allowance():
+    """The compiled extension's examples sit in the must-pass group: no ceiling
+    lets an undefined name, a wrong door or a refusal hide among them."""
+    assert "ferrum._core" in MUST_PASS
+    assert "ferrum._core" not in ILLUSTRATIVE_FAILURES
+
+
+@pytest.mark.parametrize("class_name", VALUE_CLASSES)
+def test_value_class_examples_run_and_stay_self_contained(class_name):
+    """``ChartSpec`` and ``EncodingSpec`` build a value, not a chart: their
+    examples run as written, and any chart one builds is rendered."""
+    result = _run_doctests(_core_class_doctests(class_name))
+    assert result.attempted > 0, f"{class_name} has no docstring examples"
+    assert not result.failures, f"{class_name}: {result.summary()}"
+    assert not _unrendered_charts(_example_sources(class_name))
+
+
+def _renders_and_shows_svg(examples: list[tuple[str, str]]) -> bool:
+    """Whether one ``(source, want)`` example calls ``fm.render_svg`` and shows,
+    as its own expected output, that the drawing is an SVG."""
+    return any(
+        "fm.render_svg(" in source
+        and source.endswith('.startswith("<svg")')
+        and want.strip() == "True"
+        for source, want in examples
+    )
+
+
+def _source_and_want(class_name: str) -> list[tuple[str, str]]:
+    return [
+        (example.source.strip(), example.want)
+        for test in _core_class_doctests(class_name)
+        for example in test.examples
+    ]
+
+
+def test_chart_spec_example_renders_its_spec():
+    """The spec the ``ChartSpec`` example builds is drawn by ``render_svg``,
+    and the example itself shows the drawing is an SVG."""
+    examples = _source_and_want("ChartSpec")
+    assert _renders_and_shows_svg(examples)
+    render = next(i for i, (source, _) in enumerate(examples) if "fm.render_svg(" in source)
+    unshown = "svg = fm.render_svg(spec, df, viewport=(400, 300))"
+    hidden = [*examples[:render], (unshown, ""), *examples[render + 1 :]]
+    assert not _renders_and_shows_svg(hidden)
+    discarded = [
+        *examples[:render],
+        ("_ = (fm.render_svg(spec, df, viewport=(400, 300)), None)[1]", ""),
+        *examples[render + 1 :],
+    ]
+    assert not _renders_and_shows_svg(discarded)
+    wrong_want = [*examples[:render], (examples[render][0], "False\n"), *examples[render + 1 :]]
+    assert not _renders_and_shows_svg(wrong_want)
+
+
+def test_continuous_scheme_example_draws_with_the_scheme_it_builds():
+    """The scheme the example builds is the scale of the chart it renders."""
+    sources = _example_sources("ContinuousScheme")
+    names = [
+        match.group(1)
+        for source in sources
+        if (match := re.match(r"(\w+) = fm\.ContinuousScheme\(", source))
+    ]
+    assert names, "ContinuousScheme builds no scheme in its examples"
+    rendered = [
+        source
+        for i, source in enumerate(sources)
+        if _is_chart_example(source) and not _unrendered_charts(sources[i : i + 2])
+    ]
+    assert any(f"scale={name}" in source for name in names for source in rendered)
+
+
+@pytest.mark.parametrize("function_name", CORE_FUNCTIONS)
+def test_core_function_examples_run_and_show_their_result(function_name):
+    """Each ``_core`` function's examples run as written, the data they use is
+    defined in the example, and the last one shows the result it expects."""
+    result = _run_doctests(_core_class_doctests(function_name))
+    assert result.attempted > 0, f"{function_name} has no docstring examples"
+    assert not result.failures, f"{function_name}: {result.summary()}"
+    examples = [
+        example for test in _core_class_doctests(function_name) for example in test.examples
+    ]
+    assert examples[-1].want.strip(), f"{function_name}: the last example shows no output"
 
 
 def test_doctests_do_not_leak_process_defaults():

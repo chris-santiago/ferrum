@@ -27,8 +27,8 @@ use crate::spec::encoding::EncodingSpec;
 /// x, y, color, size, shape, opacity, x2, y2 : EncodingSpec or str, optional
 ///     Encoding channels. Strings auto-wrap as ``EncodingSpec(field)``.
 /// data : str, optional
-///     Dataset name (referenced by ``Layer.data_source`` for multi-batch
-///     specs). Defaults to the primary dataset when omitted.
+///     Dataset name for a multi-batch spec. Defaults to the primary dataset
+///     when omitted.
 /// transforms : list of transform objects, optional
 ///     Stat transforms applied before rendering.
 /// facet : dict, optional
@@ -52,8 +52,13 @@ use crate::spec::encoding::EncodingSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [3.0, 1.0, 2.0]})
 /// >>> spec = fm.ChartSpec(mark="point", x="x", y="y")
-/// >>> json_str = spec.to_json()
+/// >>> spec == fm.ChartSpec.from_json(spec.to_json())
+/// True
+/// >>> fm.render_svg(spec, df, viewport=(400, 300)).startswith("<svg")
+/// True
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 // No-silent-drop seam (S4FIX2): deny unknown top-level keys so a typo'd field
@@ -119,7 +124,10 @@ pub struct ChartSpec {
     /// to a vertical encoding under a flip). A message that names a
     /// positional channel then names the channel the caller wrote, not the
     /// one the lowering moved it to; the flip itself drives layout, scales and
-    /// position adjustment exactly as a caller-written flip does. A layer's
+    /// position adjustment exactly as a caller-written flip does. Annotation
+    /// placement and `BreakAxis` routing read it too: a set fact leaves the
+    /// caller's coordinates and break axes as written, where a caller-written
+    /// flip exchanges them onto the drawn axes. A layer's
     /// own [`Layer::flip_by_call`] is read first, and a layer whose own is
     /// `false` still reads this slot's `true` (the two are or-ed, since a
     /// `false` cannot tell an unset layer fact from a stated one); the

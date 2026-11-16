@@ -825,7 +825,10 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_dendrogram().encode(x="sample", y="gene", color="expression")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [1.1, 2.2, 2.9, 4.1], "c": [4.0, 3.0, 2.0, 1.0]})
+/// >>> chart = fm.Chart(df).transform(fm.Linkage()).mark_point().encode(x="node_id", y="distance")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Linkage")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLinkage(pub(crate) TransformSpec);

@@ -491,7 +491,9 @@ use crate::transform::core::TransformSpec;
 /// 2D raster aggregation onto a uniform pixel grid.
 ///
 /// Bins ``(x, y)`` observations onto a rectangular grid and aggregates
-/// them into a raster image suitable for the ``image`` mark. Useful for
+/// them into a raster image that ``mark_image()`` draws when it binds ``x_min``,
+/// ``y_min``, ``x_max`` and ``y_max`` (``mark_raster()`` builds the same pair).
+/// Useful for
 /// rendering extremely large scatter datasets without per-point overdraw.
 ///
 /// Output is a single-row batch: ``x_min``, ``x_max``, ``y_min``,
@@ -532,7 +534,15 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_heatmap().encode(x="x", y="y", color="value")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [0.1 * i for i in range(40)], "y": [((i * 7) % 13) / 3.0 for i in range(40)]})
+/// >>> chart = fm.Chart(df).transform(fm.Raster("x", "y", resolution=16)).mark_image().encode(x="x_min", y="y_min", x2="x_max", y2="y_max")
+/// >>> svg = chart.to_svg()
+///
+/// The raster mark builds the same transform:
+///
+/// >>> chart = fm.Chart(df).mark_raster(resolution=16).encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Raster")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyRaster(pub(crate) TransformSpec);

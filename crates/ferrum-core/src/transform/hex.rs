@@ -391,9 +391,13 @@ use crate::transform::core::TransformSpec;
 /// — the observations that fall into each cell. Produces compact, visually
 /// uniform density representations suitable for large scatter data.
 ///
-/// Output columns: ``hex_x``, ``hex_y`` (Float64 cell centers), ``count``
-/// (Int64 observation count), and ``value`` (Float64, only when
-/// ``aggregate`` is ``"mean"`` or ``"sum"``).
+/// Output: six vertex rows per non-empty cell, with columns ``hex_x`` and
+/// ``hex_y`` (Float64 vertex position), ``hex_id`` (Int64 cell id, the same
+/// on a cell's six rows) and ``value`` (Float64, the cell's aggregate, the
+/// same on its six rows; the observation count when ``aggregate`` is
+/// ``"count"``). There is no ``count`` column. The transform-door example
+/// draws each cell as its own polygon; the ``mark_hex`` example is where the
+/// cells are coloured by the count.
 ///
 /// Parameters
 /// ----------
@@ -416,7 +420,15 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_hexbin(bins=20).encode(x="x", y="y")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [0.1 * i for i in range(40)], "y": [((i * 7) % 13) / 3.0 for i in range(40)]})
+/// >>> chart = fm.Chart(df).transform(fm.Hex("x", "y", bin_size=1.0)).mark_area().encode(x="hex_x", y="hex_y", detail="hex_id")
+/// >>> svg = chart.to_svg()
+///
+/// The hex mark builds the same transform:
+///
+/// >>> chart = fm.Chart(df).mark_hex().encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Hex")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyHex(pub(crate) TransformSpec);

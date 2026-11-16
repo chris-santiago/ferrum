@@ -228,10 +228,10 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_bar().encode(
-/// ...     x=fm.X("cut", sort=fm.Reorder(field="price", fn_="mean")),
-/// ...     y="price",
-/// ... )
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"cut": ["fair", "good", "ideal", "fair", "good", "ideal"], "price": [3.0, 5.0, 8.0, 4.0, 6.0, 9.0], "rank": [2, 0, 1, 5, 3, 4]})
+/// >>> chart = fm.Chart(df).transform(fm.Reorder("rank")).mark_bar().encode(x="cut", y="price")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Reorder")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyReorder(pub(crate) TransformSpec);

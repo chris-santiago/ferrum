@@ -47,9 +47,9 @@ use super::{compute_layout as compute_layout_internal, ThemeInputs, Viewport};
 /// Returns
 /// -------
 /// dict
-///     Layout geometry serialised as a JSON-derived dict with keys such as
-///     ``plot_area``, ``margins``, ``facet_panels``, and ``legend_box``.
-///     The exact schema follows the internal ``LayoutResult`` type.
+///     Layout geometry serialised as a JSON-derived dict with the keys
+///     ``axes``, ``panels`` and ``viewport``. The exact schema follows the
+///     internal ``LayoutResult`` type.
 ///
 /// Raises
 /// ------
@@ -67,9 +67,12 @@ use super::{compute_layout as compute_layout_internal, ThemeInputs, Viewport};
 /// Examples
 /// --------
 /// >>> import ferrum as fm
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [3.0, 1.0, 2.0]})
 /// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
-/// >>> layout = fm.compute_layout(chart.to_spec(), viewport=(400, 300),
-/// ...     x_tick_labels=[], y_tick_labels=[])
+/// >>> layout = fm.compute_layout(chart.to_spec(), viewport=(400, 300), x_tick_labels=["1", "2", "3"], y_tick_labels=["1", "2", "3"])
+/// >>> sorted(layout)
+/// ['axes', 'panels', 'viewport']
 #[pyfunction]
 #[pyo3(signature = (
     spec,

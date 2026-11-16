@@ -729,9 +729,11 @@ fn build_output(
 /// the levels reflect the surface actually contoured.
 ///
 /// Output columns: ``level_id`` (UInt32), ``level_value`` (Float64),
-/// ``contour_x`` (Float64), ``contour_y`` (Float64). Each row is one
-/// vertex; consecutive pairs form a segment (isoline mode) or a polygon
-/// vertex sequence (isoband mode).
+/// ``contour_x`` (Float64), ``contour_y`` (Float64). In isoline mode
+/// (``fill=False``) each row is one segment: ``contour_x`` and ``contour_y``
+/// are its start and the extra columns ``contour_x2`` and ``contour_y2``
+/// (Float64) its end point. In isoband mode (``fill=True``) each row is one
+/// polygon vertex and there are no ``contour_x2`` or ``contour_y2`` columns.
 ///
 /// Parameters
 /// ----------
@@ -760,7 +762,15 @@ fn build_output(
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_contour().encode(x="x", y="y")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [0.1 * i for i in range(40)], "y": [((i * 7) % 13) / 3.0 for i in range(40)]})
+/// >>> chart = fm.Chart(df).transform(fm.Kde2D("x", "y", n=32), fm.Contour(thresholds=4)).mark_segment().encode(x="contour_x", y="contour_y", x2="contour_x2", y2="contour_y2")
+/// >>> svg = chart.to_svg()
+///
+/// The contour mark builds the same transform:
+///
+/// >>> chart = fm.Chart(df).mark_contour().encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Contour")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyContour(pub(crate) TransformSpec);

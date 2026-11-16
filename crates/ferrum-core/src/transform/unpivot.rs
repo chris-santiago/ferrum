@@ -207,10 +207,10 @@ use crate::transform::group_key::parse_names_pyany;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_line().encode(
-/// ...     x="variable", y="value", color="id",
-/// ...     transform=fm.Unpivot(["score_a", "score_b"], variable="variable", value="value"),
-/// ... )
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"id": ["a", "b", "c"], "score_a": [1.0, 2.0, 3.0], "score_b": [2.0, 1.5, 4.0]})
+/// >>> chart = fm.Chart(df).transform(fm.Unpivot(id_vars=["id"], value_vars=["score_a", "score_b"], var_name="test", value_name="score")).mark_line().encode(x="id", y="score", color="test")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Unpivot")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyUnpivot(pub(crate) TransformSpec);

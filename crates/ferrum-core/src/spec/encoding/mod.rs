@@ -785,7 +785,17 @@ fn default_band_align() -> f64 {
 /// Examples
 /// --------
 /// >>> import ferrum as fm
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"sepal_length": [5.1, 4.9, 6.3], "sepal_width": [3.5, 3.0, 3.3]})
 /// >>> enc = fm.EncodingSpec("sepal_length", title="Sepal Length")
+/// >>> enc.field
+/// 'sepal_length'
+///
+/// ``Chart.encode(...)`` takes the channel classes, so a chart reaches this
+/// class through a ``ChartSpec`` rendered by ``fm.render_svg``:
+///
+/// >>> fm.render_svg(fm.ChartSpec(mark="point", x=enc, y="sepal_width"), df, viewport=(400, 300)).startswith("<svg")
+/// True
 #[pyclass(eq, module = "ferrum._core")]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

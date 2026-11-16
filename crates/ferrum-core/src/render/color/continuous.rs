@@ -277,10 +277,11 @@ use pyo3::exceptions::PyValueError;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "y": [2.0, 3.5, 1.5, 4.0], "value": [0.1, 0.4, 0.7, 0.9]})
 /// >>> scheme = fm.ContinuousScheme("viridis")
-/// >>> fm.Chart(df).mark_point().encode(
-/// ...     x="x", y="y", color=fm.Color("value", scale=scheme)
-/// ... )
+/// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y", color=fm.Color("value", scale=scheme))
+/// >>> svg = chart.to_svg()
 #[pyclass(name = "ContinuousScheme", module = "ferrum._core")]
 #[derive(Debug, Clone)]
 pub struct PyContinuousScheme(pub ContinuousScheme);

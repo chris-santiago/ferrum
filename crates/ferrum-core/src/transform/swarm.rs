@@ -336,13 +336,28 @@ use crate::transform::core::TransformSpec;
 ///     Minimum gap between point edges, in pixels. Must be ≥ 0.
 /// side : {"both", "left", "right"}, default "both"
 ///     Which side of the category centre to place displaced points.
+/// orient : {"vertical", "horizontal"}, default "vertical"
+///     ``"vertical"`` spreads points along the horizontal axis around each
+///     category on ``x``; ``"horizontal"`` spreads them vertically around
+///     each category on ``y``.
+/// dodge : str, optional
+///     Utf8 column whose values split each category into side-by-side
+///     sub-swarms. Rows whose ``dodge`` value is null are dropped.
 /// name : str, optional
 ///     Named output label for sibling ``Reorder(from_=...)`` lookup.
 ///
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_swarm().encode(x="val", y="category")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"group": ["a"] * 6 + ["b"] * 6, "val": [1.0, 1.1, 1.2, 2.0, 2.1, 2.2, 3.0, 3.1, 3.3, 4.0, 4.2, 4.1]})
+/// >>> chart = fm.Chart(df).transform(fm.Swarm("group", "val")).mark_point().encode(x="group", y="val")
+/// >>> svg = chart.to_svg()
+///
+/// The swarm mark builds the same transform:
+///
+/// >>> chart = fm.Chart(df).mark_swarm().encode(x="group", y="val")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Swarm")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySwarm(pub(crate) TransformSpec);

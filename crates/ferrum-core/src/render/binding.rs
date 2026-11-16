@@ -58,8 +58,12 @@ use super::{render_png as render_png_internal, render_svg as render_svg_internal
 /// Examples
 /// --------
 /// >>> import ferrum as fm
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [3.0, 1.0, 2.0]})
 /// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
 /// >>> svg = fm.render_svg(chart.to_spec(), df, viewport=(400, 300))
+/// >>> svg.startswith("<svg")
+/// True
 #[pyfunction]
 #[pyo3(signature = (spec, data, *, viewport, theme = None, config = None, chart_config = None))]
 pub fn render_svg(
@@ -121,8 +125,12 @@ pub fn render_svg(
 /// Examples
 /// --------
 /// >>> import ferrum as fm
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 3.0], "y": [3.0, 1.0, 2.0]})
 /// >>> chart = fm.Chart(df).mark_point().encode(x="x", y="y")
 /// >>> png_bytes = fm.render_png(chart.to_spec(), df, viewport=(400, 300))
+/// >>> png_bytes[:4]
+/// b'\x89PNG'
 #[pyfunction]
 #[pyo3(signature = (spec, data, *, viewport, theme = None, config = None, chart_config = None))]
 pub fn render_png<'py>(

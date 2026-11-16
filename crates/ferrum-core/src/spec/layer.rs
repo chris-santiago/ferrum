@@ -358,10 +358,13 @@ pub struct Layer {
     /// Whether the call that built this layer applied the `CoordKind::Flip`
     /// it draws under on the caller's behalf (`catplot(orient="h")`). A message
     /// that names a positional channel for this layer then names the channel
-    /// the caller wrote rather than the one the lowering moved it to; only the
-    /// name a message prints reads this, never layout, scales or position
-    /// adjustment. A layer a caller attached keeps `false`, as does one under
-    /// a caller-written flip. `false` is omitted from the wire; see
+    /// the caller wrote rather than the one the lowering moved it to. Three
+    /// readers act on it: that message naming, annotation placement and
+    /// `BreakAxis` routing (a set fact leaves the caller's coordinates and
+    /// break axes as written; a caller-written flip exchanges them onto the
+    /// drawn axes). Layout, scales and position adjustment never read it. A
+    /// layer a caller attached keeps `false`, as does one under a
+    /// caller-written flip. `false` is omitted from the wire; see
     /// [`crate::render::prepare::layer_names_unflipped`] for the resolution
     /// that falls back to [`crate::spec::chart::ChartSpec::flip_by_call`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
