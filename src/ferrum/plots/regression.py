@@ -1745,10 +1745,9 @@ def lmplot(
         and for an ``x aggregate=`` on every method (``x_estimator=``
         aggregates the response within each ``x_bins`` bin, never the
         predictor, so it is never the remedy), the remedy is to compute it
-        ahead of the fit with ``.transform(...)`` and pass its output
-        column as the call's own ``x=`` (``y=`` for the response); a
-        column bound by a later ``.encode()`` is read the same way, the fit
-        being built again from it. ``y``'s ``bin=``/
+        ahead of the fit with ``.transform(...)`` and bind its output
+        column with a later ``.encode()``, the fit being built again from
+        it. ``y``'s ``bin=``/
         ``aggregate=`` take that same remedy on every method but
         ``"logistic"``, whose response must be the raw 0/1 column (a bin
         start or a mean of it is not binary, so the fit would refuse the

@@ -233,8 +233,7 @@ def test_a_post_build_aggregate_on_y_is_refused_too():
     assert str(err.value) == (
         "regplot(y=Y('w', aggregate='mean')) is not supported: the fit reads the raw response, "
         "so aggregate= would be ignored. Compute the aggregate with "
-        ".transform(fm.transform_aggregate(...)) and pass its output column as the call's own "
-        "y=, or drop aggregate=."
+        ".transform(fm.transform_aggregate(...)) and bind its output column, or drop aggregate=."
     )
 
 
