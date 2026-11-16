@@ -44,7 +44,7 @@ def _get_seen() -> set:
 
 
 def warn_once(
-    channel: str, kwarg: str, message: Optional[str] = None, *, stacklevel: int = 3
+    channel: str, kwarg: str, message: Optional[str] = None, *, stacklevel: int | None = None
 ) -> None:
     """Emit a ``UserWarning`` the first time a ``(channel, kwarg, message)`` triple is seen.
 
@@ -67,14 +67,13 @@ def warn_once(
         from ``channel`` and ``kwarg``; this default text is itself part of
         the key, so a caller that always passes ``None`` still dedups
         against itself the same way it always has.
-    stacklevel : int, default 3
-        Passed through to ``warnings.warn``. The default of ``3`` is tuned
-        for the common shape "user code -> one ferrum helper -> `warn_once`"
-        (1 = inside this function, 2 = the helper, 3 = the helper's caller).
-        A caller with an *extra* frame between the user and this function
-        (e.g. a small wrapper that itself calls `warn_once`) should pass a
-        correspondingly higher value so the emitted warning still points at
-        the user's own call site rather than into ferrum's source.
+    stacklevel : int or None, default None
+        Passed through to ``warnings.warn``. ``None`` names the first frame
+        outside ``ferrum`` (:func:`user_stacklevel`), whatever depth the
+        warning is raised at: a desugar reached from a render, a composition
+        or a figure all point at the user's own line. An explicit value is
+        counted from this function (1 = inside it, 2 = its caller) and is for
+        a caller that wants a frame inside ferrum named.
 
     Examples
     --------
@@ -90,7 +89,9 @@ def warn_once(
     if key in seen:
         return
     seen.add(key)
-    warnings.warn(msg, UserWarning, stacklevel=stacklevel)
+    warnings.warn(
+        msg, UserWarning, stacklevel=user_stacklevel() if stacklevel is None else stacklevel
+    )
 
 
 def user_stacklevel() -> int:

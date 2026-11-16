@@ -2323,12 +2323,25 @@ fn emit_warnings(py: Python<'_>, warnings: &[super::RenderWarning]) -> PyResult<
         return Ok(());
     }
     let warnings_mod = py.import("warnings")?;
+    // Rust frames are invisible to Python, so the innermost Python frame is
+    // the ferrum wrapper that called into the renderer. `user_stacklevel`
+    // walks out of the package from there to the user's own line, so a
+    // warning names the caller on every route, whatever its depth.
+    // `importlib.import_module` rather than `py.import`: `py.import` imports
+    // the parent package `ferrum` first, which the cargo test binary cannot
+    // resolve, so a stand-in registered as `ferrum._warn` would never be found.
+    let user_stacklevel = py
+        .import("importlib")?
+        .call_method1("import_module", ("ferrum._warn",))?
+        .getattr("user_stacklevel")?;
     for w in warnings {
         // Forward the intentional Display contract (a stable user-facing
         // sentence), not the derived Debug of the enum's internal fields
         // (SEAM-07). See `RenderWarning`'s Display impl in `render/mod.rs`.
         let msg = format!("{w}");
-        warnings_mod.call_method1("warn", (msg,))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("stacklevel", user_stacklevel.call0()?)?;
+        warnings_mod.call_method("warn", (msg,), Some(&kwargs))?;
     }
     Ok(())
 }
@@ -2639,6 +2652,40 @@ mod composite_leaf_binding_tests {
     }
 }
 
+/// `emit_warnings` imports `ferrum._warn`, which the Rust test binary (no
+/// installed `ferrum` package) cannot resolve. Tests that render through a
+/// warning-emitting entry register a stand-in whose `user_stacklevel` returns
+/// 1, the innermost Python frame, so `warnings.catch_warnings` still sees
+/// every warning.
+#[cfg(test)]
+mod user_stacklevel_stub {
+    use pyo3::prelude::*;
+
+    /// Serialises every test that records or swaps process-global
+    /// `warnings` state (`catch_warnings`, `warnings.warn`, the
+    /// `ferrum._warn` registration). CPython documents those as not
+    /// thread-safe, and cargo runs tests on concurrent OS threads, which was
+    /// observed to clobber a sibling's recorded messages. Tolerate poisoning
+    /// (`unwrap_or_else(|e| e.into_inner())`) so one test's panic cannot
+    /// cascade-fail its siblings.
+    pub(super) static WARNING_STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const STUB: &std::ffi::CStr = c"
+def user_stacklevel():
+    return 1
+";
+
+    /// Register the stand-in as `ferrum._warn` unless a module is already
+    /// registered under that name.
+    pub(super) fn install(py: Python<'_>) {
+        let sys_modules = py.import("sys").unwrap().getattr("modules").unwrap();
+        if !sys_modules.contains("ferrum._warn").unwrap() {
+            let stub = PyModule::from_code(py, STUB, c"stub.py", c"ferrum._warn").unwrap();
+            sys_modules.set_item("ferrum._warn", stub).unwrap();
+        }
+    }
+}
+
 // ── Task 5c REVISE fix: composite warning threading ────────────────────────
 //
 // `render_composite_scene` used to drop every leaf's `RenderWarning`s (they
@@ -2709,23 +2756,12 @@ mod composite_warning_tests {
         PyRecordBatchReader::new(Box::new(reader))
     }
 
-    /// `warnings.catch_warnings(record=True)` mutates *process-global*
-    /// interpreter state (the `warnings` module's filter list); CPython
-    /// documents it as not thread-safe. Cargo's default parallel test runner
-    /// can run any of the three `catch_warnings`-based tests below on
-    /// concurrent OS threads, which was observed to intermittently clobber a
-    /// sibling's recorded messages (empty `messages` under `--test-threads`
-    /// > 1, reliable under `--test-threads=1`). These are the only
-    /// `catch_warnings` users in this crate, so serializing them against each
-    /// other with a plain (non-GIL) mutex is sufficient — tolerate poisoning
-    /// so one test's panic can't cascade-fail its siblings.
-    static WARNING_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn render_composite_svg_forwards_leaf_warnings_to_python() {
-        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::user_stacklevel_stub::WARNING_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pyo3::Python::initialize();
         Python::attach(|py| {
+            super::user_stacklevel_stub::install(py);
             let tree_dict = PyDict::new(py);
             tree_dict.set_item("kind", "leaf").unwrap();
             tree_dict
@@ -2786,9 +2822,10 @@ mod composite_warning_tests {
     /// interactive entry forwards the same warning through `emit_warnings`.
     #[test]
     fn render_composite_interactive_forwards_leaf_warnings_to_python() {
-        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::user_stacklevel_stub::WARNING_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pyo3::Python::initialize();
         Python::attach(|py| {
+            super::user_stacklevel_stub::install(py);
             let tree_dict = PyDict::new(py);
             tree_dict.set_item("kind", "leaf").unwrap();
             tree_dict
@@ -2849,9 +2886,10 @@ mod composite_warning_tests {
     /// entry directly (no composite tree).
     #[test]
     fn render_interactive_forwards_leaf_warnings_to_python() {
-        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::user_stacklevel_stub::WARNING_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pyo3::Python::initialize();
         Python::attach(|py| {
+            super::user_stacklevel_stub::install(py);
             let data = single_leaf_payload(color_overflow_batch());
             let spec = color_overflow_spec();
 
@@ -2902,9 +2940,10 @@ mod composite_warning_tests {
     /// boundary — RED on pre-#162 code, which had no channel to carry it.
     #[test]
     fn render_svg_surfaces_a_degenerate_transform_warning() {
-        let _guard = WARNING_CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::user_stacklevel_stub::WARNING_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         pyo3::Python::initialize();
         Python::attach(|py| {
+            super::user_stacklevel_stub::install(py);
             use crate::transform::core::TransformSpec;
             use crate::transform::smooth::{SmoothMethod, SmoothOutput, SmoothSpec};
 
@@ -3327,5 +3366,73 @@ mod layer_unknown_column_message_tests {
         assert!(layer_unknown_column_message(1, "color", "c", "plain", false, None)
             .expect("known")
             .starts_with("layer 1: encoding 'color'"));
+    }
+}
+
+/// `emit_warnings` names the user's line: every forwarded warning carries the
+/// `stacklevel` that `ferrum._warn.user_stacklevel()` computes, and nothing
+/// else about the call changes.
+#[cfg(test)]
+mod emit_warnings_stacklevel_tests {
+    use super::*;
+    use crate::render::RenderWarning;
+
+    const STUBS: &std::ffi::CStr = c"
+calls = []
+
+def user_stacklevel():
+    return 7
+
+def warn(message, *args, **kwargs):
+    calls.append((message, args, kwargs))
+";
+
+    #[test]
+    fn each_warning_is_forwarded_with_the_computed_stacklevel() {
+        let _guard = super::user_stacklevel_stub::WARNING_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        pyo3::Python::initialize();
+        Python::attach(|py| {
+            let stubs = PyModule::from_code(py, STUBS, c"stubs.py", c"ferrum_stacklevel_stubs")
+                .expect("stub module compiles");
+            let sys_modules = py.import("sys").unwrap().getattr("modules").unwrap();
+            let warnings_mod = py.import("warnings").unwrap();
+
+            // The stub stands in for `ferrum._warn` and for `warnings.warn`;
+            // both are restored whatever the assertions find.
+            let real_warn = warnings_mod.getattr("warn").unwrap();
+            let prior_warn_mod = sys_modules.get_item("ferrum._warn").ok();
+            sys_modules.set_item("ferrum._warn", &stubs).unwrap();
+            warnings_mod.setattr("warn", stubs.getattr("warn").unwrap()).unwrap();
+
+            let ws = [
+                RenderWarning::NoRowsToDraw { faceted: false },
+                RenderWarning::NoRowsToDraw { faceted: true },
+            ];
+            let result = emit_warnings(py, &ws);
+
+            warnings_mod.setattr("warn", real_warn).unwrap();
+            match prior_warn_mod {
+                Some(m) => sys_modules.set_item("ferrum._warn", m).unwrap(),
+                None => super::user_stacklevel_stub::install(py),
+            }
+            result.expect("emit_warnings forwards both warnings");
+
+            let calls = stubs.getattr("calls").unwrap();
+            assert_eq!(calls.len().unwrap(), 2, "one warn call per RenderWarning");
+            for (i, w) in ws.iter().enumerate() {
+                let (message, args, kwargs): (String, Vec<Bound<'_, PyAny>>, Bound<'_, PyDict>) =
+                    calls.get_item(i).unwrap().extract().unwrap();
+                assert_eq!(message, format!("{w}"), "the Display text is forwarded unchanged");
+                assert!(args.is_empty(), "no positional category or stacklevel: {args:?}");
+                let level: usize = kwargs
+                    .get_item("stacklevel")
+                    .unwrap()
+                    .expect("stacklevel keyword is passed")
+                    .extract()
+                    .unwrap();
+                assert_eq!(level, 7, "stacklevel comes from ferrum._warn.user_stacklevel()");
+                assert_eq!(kwargs.len(), 1, "only stacklevel is passed: {kwargs:?}");
+            }
+        });
     }
 }

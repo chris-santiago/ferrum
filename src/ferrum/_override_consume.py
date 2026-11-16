@@ -46,6 +46,7 @@ from ferrum._core import (  # type: ignore[attr-defined]
 from ferrum._override_apply import _SCALE_TYPE_TAGS, OverridePayload
 from ferrum._entry import EntryRefusal
 from ferrum._layer import merge_style
+from ferrum._warn import user_stacklevel
 from ferrum.exceptions import _OverrideRefusal
 from ferrum.marks.base import resolve_layer_style
 
@@ -497,5 +498,5 @@ def emit_deprecations(payload: OverridePayload) -> None:
         warnings.warn(
             f"override({path}=...) is deprecated; use {typed_equivalent} instead.",
             DeprecationWarning,
-            stacklevel=2,
+            stacklevel=user_stacklevel(),
         )
