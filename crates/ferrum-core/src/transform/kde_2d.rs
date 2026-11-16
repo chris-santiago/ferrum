@@ -15,6 +15,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
+use crate::transform::pair_arg::extract_range_quad;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -677,7 +678,7 @@ impl PyKde2D {
         y: &str,
         bandwidth: Option<&Bound<'_, PyAny>>,
         n: usize,
-        extent: Option<(f64, f64, f64, f64)>,
+        extent: Option<&Bound<'_, PyAny>>,
         groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
@@ -717,18 +718,7 @@ impl PyKde2D {
                 }
             }
         };
-        if let Some((xmin, xmax, ymin, ymax)) = extent {
-            if !xmin.is_finite() || !xmax.is_finite() || !ymin.is_finite() || !ymax.is_finite() {
-                return Err(PyValueError::new_err(
-                    "Kde2D: extent values must all be finite",
-                ));
-            }
-            if xmin >= xmax || ymin >= ymax {
-                return Err(PyValueError::new_err(
-                    "Kde2D: extent must satisfy xmin < xmax and ymin < ymax",
-                ));
-            }
-        }
+        let extent = extent.map(|obj| extract_range_quad("Kde2D", "extent", obj)).transpose()?;
         let groupby = parse_groupby_pyany("Kde2D", groupby)?;
         Ok(PyKde2D(TransformSpec::Kde2D(Kde2DSpec {
             x: x.to_string(),

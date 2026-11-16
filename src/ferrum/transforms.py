@@ -34,6 +34,7 @@ from ferrum._validate import (
     coerce_finite_real,
     coerce_frame,
     coerce_impute_options,
+    coerce_range_pair,
     is_real_number,
 )
 from ferrum.position import _validate_stack_offset
@@ -860,7 +861,7 @@ def transform_density(
     bandwidth: float | None = None,
     kernel: str = "gaussian",
     groupby: Sequence[str] | None = None,
-    extent: tuple[float, float] | None = None,
+    extent: Sequence[float] | None = None,
     steps: int | None = None,
     cumulative: bool = False,
     as_: tuple[str, str] = ("value", "density"),
@@ -883,7 +884,9 @@ def transform_density(
     groupby : list of str, optional
         Compute separate densities per group.
     extent : tuple of (float, float), optional
-        Domain extent for the density grid.
+        Domain extent for the density grid: a list, tuple, ``range`` or 1-D
+        array of two finite numbers with ``lo < hi``. A set, bytes, a mapping
+        or a generator is refused.
     steps : int, optional
         Number of grid steps.
     cumulative : bool, default False
@@ -934,7 +937,7 @@ def transform_density(
         _reject_repeated_groupby_names(groupby_list, where="transform_density")
         spec["groupby"] = groupby_list
     if extent is not None:
-        spec["extent"] = list(extent)
+        spec["extent"] = list(coerce_range_pair("transform_density", "extent", extent))
     if steps is not None:
         spec["steps"] = steps
     return spec

@@ -1,6 +1,7 @@
 use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
+use crate::transform::pair_arg::extract_range;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -971,7 +972,7 @@ impl PyKde {
         bandwidth: Option<&Bound<'_, PyAny>>,
         bw_adjust: f64,
         n: usize,
-        extent: Option<(f64, f64)>,
+        extent: Option<&Bound<'_, PyAny>>,
         cumulative: bool,
         shared_extent: bool,
         kernel: &str,
@@ -1013,13 +1014,7 @@ impl PyKde {
                 }
             }
         };
-        if let Some((a, b)) = extent {
-            if !a.is_finite() || !b.is_finite() || a >= b {
-                return Err(PyValueError::new_err(
-                    "Kde: extent must be (lo, hi) with lo < hi and both finite",
-                ));
-            }
-        }
+        let extent = extent.map(|obj| extract_range("Kde", "extent", obj)).transpose()?;
         crate::transform::vocabulary::check_declared(KERNELS, "Kde", "kernel", kernel)?;
         let kernel_str = kernel.to_string();
         let groupby = parse_groupby_pyany("Kde", groupby)?;

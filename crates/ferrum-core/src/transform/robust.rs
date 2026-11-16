@@ -27,6 +27,7 @@
 use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
+use crate::transform::pair_arg::extract_range;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -776,19 +777,15 @@ impl PyRobust {
         inject_metrics: bool,
         groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
-        x_range: Option<[f64; 2]>,
+        x_range: Option<&Bound<'_, PyAny>>,
         x_range_pad: Option<f64>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
             return Err(PyValueError::new_err("Robust: x and y must be non-empty"));
         }
-        if let Some([a, b]) = x_range {
-            if !a.is_finite() || !b.is_finite() {
-                return Err(PyValueError::new_err(format!(
-                    "Robust: x_range must be (lo, hi) with both finite; received [{a}, {b}]"
-                )));
-            }
-        }
+        let x_range = x_range
+            .map(|obj| extract_range("Robust", "x_range", obj).map(|(lo, hi)| [lo, hi]))
+            .transpose()?;
         if let Some(pad) = x_range_pad {
             if !pad.is_finite() || pad < 0.0 {
                 return Err(PyValueError::new_err(format!(
@@ -2318,24 +2315,27 @@ mod tests {
     #[test]
     fn pyrobust_new_refuses_a_non_finite_x_range_at_either_end() {
         pyo3::Python::initialize();
-        for (a, b) in [
-            (f64::NAN, 8.0),
-            (8.0, f64::NAN),
-            (f64::INFINITY, 8.0),
-            (8.0, f64::INFINITY),
-            (f64::NEG_INFINITY, 8.0),
-            (8.0, f64::NEG_INFINITY),
+        for (a, b, shown) in [
+            (f64::NAN, 8.0, "(nan, 8)"),
+            (8.0, f64::NAN, "(8, nan)"),
+            (f64::INFINITY, 8.0, "(inf, 8)"),
+            (8.0, f64::INFINITY, "(8, inf)"),
+            (f64::NEG_INFINITY, 8.0, "(-inf, 8)"),
+            (8.0, f64::NEG_INFINITY, "(8, -inf)"),
         ] {
-            let result = PyRobust::new(
+            pyo3::Python::attach(|py| {
+let pair = pyo3::types::PyList::new(py, [a, b]).expect("a two-item list builds");
+let result = PyRobust::new(
                 "x", "y", 100, None, 1.345, 25, 1e-8, "fitted",
-                false, false, None, None, Some([a, b]), None,
+                false, false, None, None, Some(pair.as_any()), None,
             );
             let err = result.err().unwrap_or_else(|| panic!("x_range=[{a}, {b}] must be refused, not accepted"));
             assert_eq!(
                 err.to_string(),
-                format!("ValueError: Robust: x_range must be (lo, hi) with both finite; received [{a}, {b}]"),
+                format!("ValueError: Robust: x_range must be (lo, hi) with lo < hi and both finite; got {shown}"),
                 "x_range=[{a}, {b}]"
             );
+});
         }
     }
 

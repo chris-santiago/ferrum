@@ -24,11 +24,10 @@ wrapper has no entry in ``_MINIMAL_CALLS`` the coverage test fails loudly
 (an ``AssertionError``, not a skip) rather than under-covering silently.
 
 Numeric-element sequence parameters (``transform_density(extent=)``) are outside
-the derived set by the same rule that defines it, and
-``test_numeric_sequence_params_are_refused_downstream`` pins *why* that exclusion
-is safe rather than asserting it in prose: its char-split reaches a typed wire
-boundary that refuses it loudly. ``transform_window(frame=)`` has its own typed
-check at construction.
+the derived set by the same rule that defines it: each has its own typed pair
+reader that refuses a string at construction
+(``tests/test_ordered_pair_params.py`` pins ``extent="ab"``).
+``transform_window(frame=)`` has its own typed check at construction too.
 """
 
 from __future__ import annotations
@@ -153,7 +152,7 @@ def test_derivation_finds_the_known_members_of_the_family():
     assert ("transform_flatten", "as_") in _DERIVED_PARAMS  # Sequence[str] | None
     # Not a sequence: a direction keyword that legitimately takes a string.
     assert ("transform_top_k", "sort") not in _DERIVED_PARAMS
-    # Not a sequence of *strings*: numeric extents, see the downstream pin.
+    # Not a sequence of *strings*: numeric extents, which have their own pair reader.
     assert ("transform_density", "extent") not in _DERIVED_PARAMS
     assert ("transform_window", "frame") not in _DERIVED_PARAMS
 
@@ -436,22 +435,6 @@ def test_a_set_keyvals_is_still_refused_on_both_impute_doors():
 
 def test_a_range_keyvals_is_read_once_and_unchanged():
     assert fm.transform_impute("v", key="t", keyvals=range(3))["keyvals"] == [0, 1, 2]
-
-
-@pytest.mark.parametrize(
-    "transform, expected_type",
-    [
-        (lambda: fm.transform_density("x", extent="ab"), "f64"),
-    ],
-)
-def test_numeric_sequence_params_are_refused_downstream(transform, expected_type):
-    """Why a numeric-element sequence parameter is outside the derived set,
-    pinned rather than asserted: its char-split does reach the wire, but the
-    typed deserialization boundary refuses the resulting strings loudly, so
-    there is no silent-corruption mode to guard against at the wrapper."""
-    df = pl.DataFrame({"x": [1.0, 2.0, 3.0, 4.0]})
-    with pytest.raises(ValueError, match=f'invalid type: string "a", expected {expected_type}'):
-        fm.Chart(df).transform(transform()).mark_point().encode(x="x", y="x").to_svg()
 
 
 # ---------------------------------------------------------------------------

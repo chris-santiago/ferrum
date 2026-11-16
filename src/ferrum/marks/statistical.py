@@ -3,6 +3,7 @@ into MarkDesugarResult objects consumed by Chart._resolve_pending."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from ferrum import Bin, Kde, Smooth
@@ -28,7 +29,7 @@ def desugar_density(
     bw_adjust: float = 1.0,
     kernel: str = "gaussian",
     n: int = 512,
-    extent: Any = None,
+    extent: Sequence[float] | None = None,
     cumulative: bool = False,
     multiple: str = "layer",
     fill: bool = True,
@@ -263,7 +264,7 @@ def desugar_histogram(
     bins: Any = None,
     bin_count: Any = None,
     bin_width: Any = None,
-    extent: Any = None,
+    extent: Sequence[float] | None = None,
     nice: bool = True,
     density: bool = False,
     cumulative: bool = False,
@@ -544,7 +545,7 @@ def desugar_smooth(
     show_metrics: bool = False,
     groupby: Any = None,
     name: str | None = None,
-    x_range: list[float] | None = None,
+    x_range: Sequence[float] | None = None,
     x_range_pad: float | None = None,
     _x_title: str | None = None,
     _y_title: str | None = None,

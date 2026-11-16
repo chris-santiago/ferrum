@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Literal, get_args, get_type_hints
 
-from ferrum._validate import validate_choice
+from ferrum._validate import coerce_limit_pair, validate_choice
+
+
+def _coerce_limits(coord, voice: str) -> None:
+    """Store *coord*'s ``xlim`` and ``ylim`` as ``(lo, hi)`` tuples of builtin numbers, or raise ``ValueError``.
+
+    Each limit is a list, tuple, ``range`` or 1-D numpy array of two finite
+    numbers; a reversed pair is kept (it reverses the axis). A set, bytes, a
+    mapping, an iterator or a non-finite end is refused in *voice*.
+    """
+    for param in ("xlim", "ylim"):
+        value = getattr(coord, param)
+        if value is not None:
+            object.__setattr__(coord, param, coerce_limit_pair(voice, param, value))
 
 
 def _coord_wire(coord) -> dict | None:
@@ -78,8 +92,12 @@ class CoordCartesian:
     ----------
     xlim : (float, float) | None
         Explicit x-axis domain ``(min, max)``.  ``None`` uses data extent.
+        A list, tuple, ``range`` or 1-D array of two finite numbers; a
+        reversed pair reverses the axis. A set, bytes, a mapping, an iterator
+        or a non-finite end is refused.
     ylim : (float, float) | None
-        Explicit y-axis domain ``(min, max)``.  ``None`` uses data extent.
+        Explicit y-axis domain ``(min, max)``, read like ``xlim``.  ``None``
+        uses data extent.
     expand : bool
         Add padding around the data extent (default ``True``).
     clip : bool
@@ -92,10 +110,13 @@ class CoordCartesian:
     ... )
     """
 
-    xlim: tuple[float, float] | None = None
-    ylim: tuple[float, float] | None = None
+    xlim: Sequence[float] | None = None
+    ylim: Sequence[float] | None = None
     expand: bool = True
     clip: bool = True
+
+    def __post_init__(self) -> None:
+        _coerce_limits(self, "CoordCartesian")
 
     def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""
@@ -117,9 +138,11 @@ class CoordFixed:
         Width-to-height ratio of one data unit.  ``1.0`` makes the plot
         square in data space.
     xlim : (float, float) | None
-        Explicit x-axis domain.
+        Explicit x-axis domain: a list, tuple, ``range`` or 1-D array of two
+        finite numbers; a reversed pair reverses the axis. A set, bytes, a
+        mapping, an iterator or a non-finite end is refused.
     ylim : (float, float) | None
-        Explicit y-axis domain.
+        Explicit y-axis domain, read like ``xlim``.
     expand : bool
         Add padding around data extent (default ``True``).
     clip : bool
@@ -133,10 +156,13 @@ class CoordFixed:
     """
 
     ratio: float = 1.0
-    xlim: tuple[float, float] | None = None
-    ylim: tuple[float, float] | None = None
+    xlim: Sequence[float] | None = None
+    ylim: Sequence[float] | None = None
     expand: bool = True
     clip: bool = True
+
+    def __post_init__(self) -> None:
+        _coerce_limits(self, "CoordFixed")
 
     def to_spec_dict(self) -> dict:
         """Return dict serialization for ChartSpec coord param."""

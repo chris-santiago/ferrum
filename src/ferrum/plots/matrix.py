@@ -41,6 +41,7 @@ functions call it directly and forward its result as ``mark_rect`` kwargs.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from ferrum import Bin2D, Chart, ClusterMapChart, JointChart, RepeatChart, Repeat
@@ -50,6 +51,7 @@ from ferrum._levels import distinct_non_null_levels
 from ferrum._registry import registry_output_columns, registry_secondary_columns
 from ferrum._validate import (
     coerce_finite_real,
+    coerce_limit_pair,
     coerce_pixel_value,
     is_none_color_sentinel,
     validate_choice,
@@ -1581,8 +1583,8 @@ def jointplot(
     marginal_kind: str = "hist",
     ratio: int = 5,
     space: float = 0.05,
-    xlim: Any = None,
-    ylim: Any = None,
+    xlim: Sequence[float] | None = None,
+    ylim: Sequence[float] | None = None,
     joint_kws: Any = None,
     marginal_kws: Any = None,
     height: float | None = None,
@@ -1622,11 +1624,13 @@ def jointplot(
     space : float, default 0.05
         Gap (in layout units) between the center and marginal panels.
     xlim : tuple, optional
-        ``(min, max)`` domain override for the x-axis.  Applied as an
+        ``(min, max)`` domain override for the x-axis: a list, tuple, ``range``
+        or 1-D array of two finite numbers (a reversed pair reverses the axis);
+        a set, bytes, a mapping or an iterator is refused.  Applied as an
         explicit scale domain on the center and top-marginal x encodings
         via ``X(field, scale={"domain": [min, max]})``.
     ylim : tuple, optional
-        ``(min, max)`` domain override for the y-axis.  Applied as an
+        ``(min, max)`` domain override for the y-axis, read like ``xlim``.  Applied as an
         explicit scale domain on the center and right-marginal y encodings
         via ``Y(field, scale={"domain": [min, max]})``.
     joint_kws : dict, optional
@@ -1682,6 +1686,10 @@ def jointplot(
     # Read once, here, at jointplot's own door (see displot's twin comment
     # in distribution.py).
     hue = _grouping_hue("jointplot", hue)
+    if xlim is not None:
+        xlim = coerce_limit_pair("jointplot", "xlim", xlim)
+    if ylim is not None:
+        ylim = coerce_limit_pair("jointplot", "ylim", ylim)
 
     return _jointplot_build(
         data,
@@ -1761,8 +1769,8 @@ def _jointplot_build(
     marginal_kind: str,
     ratio: int,
     space: float,
-    xlim: Any,
-    ylim: Any,
+    xlim: Sequence[float] | None,
+    ylim: Sequence[float] | None,
     joint_kws: Any,
     marginal_kws: Any,
     height: float | None,

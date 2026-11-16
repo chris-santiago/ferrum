@@ -9,6 +9,7 @@
 use arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
+use crate::transform::pair_arg::extract_range;
 use pyo3::prelude::*;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -338,8 +339,8 @@ impl PyBin2D {
         y: &str,
         bins_x: Option<&Bound<'_, PyAny>>,
         bins_y: Option<&Bound<'_, PyAny>>,
-        extent_x: Option<(f64, f64)>,
-        extent_y: Option<(f64, f64)>,
+        extent_x: Option<&Bound<'_, PyAny>>,
+        extent_y: Option<&Bound<'_, PyAny>>,
         cumulative: bool,
         name: Option<String>,
     ) -> PyResult<Self> {
@@ -354,9 +355,9 @@ impl PyBin2D {
         // Reject reversed/degenerate explicit extents at construction, mirroring
         // the 1-D `Bin` (which errors on `lo >= hi`). A reversed `extent=(hi, lo)`
         // otherwise makes the apply-time row filter exclude every in-range value,
-        // silently dropping all rows (S4FIX2 no-silent-drop seam).
-        validate_extent(extent_x, "extent_x")?;
-        validate_extent(extent_y, "extent_y")?;
+        // silently dropping all rows.
+        let extent_x = extent_x.map(|obj| extract_range("Bin2D", "extent_x", obj)).transpose()?;
+        let extent_y = extent_y.map(|obj| extract_range("Bin2D", "extent_y", obj)).transpose()?;
         Ok(PyBin2D(TransformSpec::Bin2D(Bin2DSpec {
             x: x.into(),
             y: y.into(),

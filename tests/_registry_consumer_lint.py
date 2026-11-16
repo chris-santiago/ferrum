@@ -962,6 +962,7 @@ KNOWN_CALL_ARGUMENT_CALLEES = frozenset(
         "_written_field",  # _written_field("x"/"y", value) -- the CHANNEL SLOT positional naming how to parse a caller's shorthand string, never a transform's output column read
         "_unique_col_name",  # _unique_col_name(df.columns, "count") -- reads the SOURCE frame's own columns, never a transform's output batch
         "append",  # list.append("count") building a column-name list
+        "coerce_range_pair",  # coerce_range_pair("transform_density", "extent", value) -- the public DOOR and PARAMETER names the refusal speaks as, never a transform's output column read
         "col",  # pl.col("value")
         "get",  # dict.get("x") / dict.get("theoretical")
         "getattr",  # getattr(obj, "count")

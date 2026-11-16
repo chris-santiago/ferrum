@@ -9,6 +9,7 @@
 use arrow::array::{ArrayRef, Float64Array, RecordBatch};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
+use crate::transform::pair_arg::extract_endpoints;
 use pyo3::prelude::*;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
@@ -81,12 +82,12 @@ pub(crate) struct PyReferenceLine(pub(crate) TransformSpec);
 #[pymethods]
 impl PyReferenceLine {
     #[new]
-    #[pyo3(signature = (x_field, y_field, *, x = (0.0, 1.0), y = (0.0, 1.0), name = None))]
+    #[pyo3(signature = (x_field, y_field, *, x = None, y = None, name = None), text_signature = "(x_field, y_field, *, x=(0.0, 1.0), y=(0.0, 1.0), name=None)")]
     fn new(
         x_field: &str,
         y_field: &str,
-        x: (f64, f64),
-        y: (f64, f64),
+        x: Option<&Bound<'_, PyAny>>,
+        y: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
     ) -> PyResult<Self> {
         if x_field.is_empty() || y_field.is_empty() {
@@ -94,11 +95,8 @@ impl PyReferenceLine {
                 "ReferenceLine: x_field and y_field must be non-empty",
             ));
         }
-        if !x.0.is_finite() || !x.1.is_finite() || !y.0.is_finite() || !y.1.is_finite() {
-            return Err(PyValueError::new_err(
-                "ReferenceLine: endpoint coordinates must be finite",
-            ));
-        }
+        let x = x.map_or(Ok((0.0, 1.0)), |obj| extract_endpoints("ReferenceLine", "x", obj))?;
+        let y = y.map_or(Ok((0.0, 1.0)), |obj| extract_endpoints("ReferenceLine", "y", obj))?;
         Ok(PyReferenceLine(TransformSpec::ReferenceLine(ReferenceLineSpec {
             x_field: x_field.to_string(),
             y_field: y_field.to_string(),

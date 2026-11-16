@@ -1,6 +1,7 @@
 use arrow::array::{ArrayRef, Float64Array, RecordBatch, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
+use crate::transform::pair_arg::extract_range;
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -1299,7 +1300,7 @@ impl PyBin {
         bins: Option<&Bound<'_, PyAny>>,
         bin_count: Option<usize>,
         bin_width: Option<f64>,
-        extent: Option<(f64, f64)>,
+        extent: Option<&Bound<'_, PyAny>>,
         nice: bool,
         cumulative: bool,
         shared_extent: bool,
@@ -1325,13 +1326,7 @@ impl PyBin {
                 ));
             }
         }
-        if let Some((a, b)) = extent {
-            if !a.is_finite() || !b.is_finite() || a >= b {
-                return Err(PyValueError::new_err(
-                    "Bin: extent must be (lo, hi) with lo < hi and both finite",
-                ));
-            }
-        }
+        let extent = extent.map(|obj| extract_range("Bin", "extent", obj)).transpose()?;
         let bin_err = |e: String| PyValueError::new_err(format!("Bin: {e}"));
         check_agg_pairing(agg_field.is_some(), agg.is_some()).map_err(|e| bin_err(e.into()))?;
         let agg = agg.map(|m| AggFn::parse_or_refuse("agg", &m)).transpose().map_err(bin_err)?;

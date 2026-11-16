@@ -4,6 +4,7 @@
 //! pyo3::prelude::*`) rather than left inline in `mod.rs`.
 
 use pyo3::exceptions::PyValueError;
+use crate::transform::pair_arg::extract_range;
 use pyo3::prelude::*;
 
 use crate::transform::core::TransformSpec;
@@ -139,19 +140,15 @@ impl PySmooth {
         inject_metrics: bool,
         groupby: Option<&Bound<'_, PyAny>>,
         name: Option<String>,
-        x_range: Option<[f64; 2]>,
+        x_range: Option<&Bound<'_, PyAny>>,
         x_range_pad: Option<f64>,
     ) -> PyResult<Self> {
         if x.is_empty() || y.is_empty() {
             return Err(PyValueError::new_err("Smooth: x and y must be non-empty"));
         }
-        if let Some([a, b]) = x_range {
-            if !a.is_finite() || !b.is_finite() {
-                return Err(PyValueError::new_err(format!(
-                    "Smooth: x_range must be (lo, hi) with both finite; received [{a}, {b}]"
-                )));
-            }
-        }
+        let x_range = x_range
+            .map(|obj| extract_range("Smooth", "x_range", obj).map(|(lo, hi)| [lo, hi]))
+            .transpose()?;
         if let Some(pad) = x_range_pad {
             if !pad.is_finite() || pad < 0.0 {
                 return Err(PyValueError::new_err(format!(

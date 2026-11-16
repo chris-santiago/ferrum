@@ -668,26 +668,29 @@ fn test_all_method_aliases_accepted_by_pysmooth_new() {
 #[test]
 fn pysmooth_new_refuses_a_non_finite_x_range_at_either_end() {
     pyo3::Python::initialize();
-    for (a, b) in [
-        (f64::NAN, 8.0),
-        (8.0, f64::NAN),
-        (f64::INFINITY, 8.0),
-        (8.0, f64::INFINITY),
-        (f64::NEG_INFINITY, 8.0),
-        (8.0, f64::NEG_INFINITY),
+    for (a, b, shown) in [
+        (f64::NAN, 8.0, "(nan, 8)"),
+        (8.0, f64::NAN, "(8, nan)"),
+        (f64::INFINITY, 8.0, "(inf, 8)"),
+        (8.0, f64::INFINITY, "(8, inf)"),
+        (f64::NEG_INFINITY, 8.0, "(-inf, 8)"),
+        (8.0, f64::NEG_INFINITY, "(8, -inf)"),
     ] {
-        let result = PySmooth::new(
+        pyo3::Python::attach(|py| {
+let pair = pyo3::types::PyList::new(py, [a, b]).expect("a two-item list builds");
+let result = PySmooth::new(
             "x", "y", "lm",
             None, None, None, None, 200, 0,
             None, None, "fitted",
-            false, false, None, None, Some([a, b]), None,
+            false, false, None, None, Some(pair.as_any()), None,
         );
         let err = result.err().unwrap_or_else(|| panic!("x_range=[{a}, {b}] must be refused, not accepted"));
         assert_eq!(
             err.to_string(),
-            format!("ValueError: Smooth: x_range must be (lo, hi) with both finite; received [{a}, {b}]"),
+            format!("ValueError: Smooth: x_range must be (lo, hi) with lo < hi and both finite; got {shown}"),
             "x_range=[{a}, {b}]"
         );
+});
     }
 }
 

@@ -3338,19 +3338,14 @@ def test_x_range_pad_negative_is_refused():
     assert str(excinfo.value) == "Robust: x_range_pad must be a finite fraction >= 0; received -0.1"
 
 
-def _rust_f64_display(value: float) -> str:
-    """Rust's `{}` Display for `f64`, narrowed to the values this module's
-    `x_range` refusal tests ever pass through it: `NaN` for not-a-number,
-    `inf`/`-inf` for the infinities, and the two whole-valued finite
-    endpoints the fixture below uses (`1.0`, `8.0`), which print with no
-    trailing `.0`. Not a general `f64` formatter: a non-whole finite
-    value falls through to Python's `repr`, which disagrees with Rust's
-    `{}` in exponent form (e.g. `1e-07` vs `0.0000001`)."""
-    if math.isnan(value):
-        return "NaN"
-    if math.isinf(value):
-        return "inf" if value > 0 else "-inf"
-    return str(int(value)) if value == int(value) else repr(value)
+def _pair_end_text(value: float) -> str:
+    """How a refused `x_range` end reads in the `got (lo, hi)` text: `nan`,
+    `inf` and `-inf` for the non-finite values and a whole number without a
+    fraction (`8` for `8.0`); the only values this module's refusal tests
+    pass through it."""
+    if math.isnan(value) or math.isinf(value):
+        return repr(value)
+    return str(int(value))
 
 
 #: value name -> the float it names, for every non-finite `x_range`
@@ -3392,9 +3387,9 @@ def test_a_non_finite_x_range_endpoint_is_refused(door, position, value_name):
     x_range = [value, 8.0] if position == "lo" else [1.0, value]
     with pytest.raises(ValueError) as excinfo:
         build(x_range)
-    lo_text, hi_text = (_rust_f64_display(x_range[0]), _rust_f64_display(x_range[1]))
+    lo_text, hi_text = (_pair_end_text(x_range[0]), _pair_end_text(x_range[1]))
     assert str(excinfo.value) == (
-        f"{label}: x_range must be (lo, hi) with both finite; received [{lo_text}, {hi_text}]"
+        f"{label}: x_range must be (lo, hi) with lo < hi and both finite; got ({lo_text}, {hi_text})"
     ), (door, position, value_name)
 
 

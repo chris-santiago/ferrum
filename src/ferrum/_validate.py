@@ -76,6 +76,15 @@ Independent predicates live here:
   normalizers as arguments (the temporal conversion lives in a module this
   leaf may not import, as ``validate_color_value`` takes its color parser).
 
+- ``coerce_range_pair`` and ``coerce_limit_pair`` are the one reader of an
+  ordered ``(lo, hi)`` pair (their shared ``_pair_ends`` reads the kinds): a
+  list, tuple, ``range`` or 1-D numpy array of two real numbers, anything
+  else (a set, bytes, a mapping, an iterator) refused unread. The range
+  flavour (``transform_density(extent=)``) also needs both ends finite with
+  ``lo < hi``; the limit flavour (``CoordCartesian``/``CoordFixed``
+  ``xlim``/``ylim``, ``jointplot`` limits) needs only finite ends, because a
+  reversed limit reverses the axis. Both return builtin numbers.
+
 - ``coerce_positive_real`` is ``coerce_finite_real``'s ``> 0`` sibling, for a
   dimensionless ratio (a figure function's ``aspect``).
 
@@ -652,9 +661,91 @@ def _frame_ends(frame: Any) -> list[Any] | None:
     ordered = isinstance(frame, (list, tuple, range)) or (
         isinstance(frame, np.ndarray) and frame.ndim == 1
     )
-    if not ordered or len(frame) != 2:
+    if not ordered:
+        return None
+    try:
+        if len(frame) != 2:
+            return None
+    except OverflowError:
+        # A range longer than a C ssize_t has no len(); it is not a pair either.
         return None
     return list(frame)
+
+
+def _pair_end_text(end: Any) -> str:
+    """One end of a refused pair as text: a whole number without a fraction, anything else as its float."""
+    try:
+        as_float = float(end)
+    except (OverflowError, ValueError):
+        return repr(end)
+    if math.isfinite(as_float) and as_float == int(as_float):
+        return str(int(as_float))
+    return repr(as_float)
+
+
+def _pair_shape_refusal(voice: str, param: str, value: Any) -> ValueError:
+    """The refusal for a *value* that is not two numbers held in a list, tuple, ``range`` or 1-D array."""
+    text = (
+        f"{voice}: {param} must be a (lo, hi) pair of numbers as a list or tuple, "
+        f"got {type(value).__name__} {value!r}"
+    )
+    if isinstance(value, (set, frozenset)):
+        text += "; a set has no order, so the ends would change from run to run"
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        text += "; iterating it yields integers"
+    return ValueError(text)
+
+
+def _pair_ends(voice: str, param: str, value: Any) -> tuple[Any, Any]:
+    """The two real-number ends of *value*, or a shape refusal.
+
+    Only a list, tuple, ``range`` or 1-D numpy array of length 2 is read (the
+    kinds :func:`_frame_ends` reads); every other kind is refused unread, so
+    a set never yields its ends in hash order and a generator is not
+    consumed. An end that is not a real number (:func:`is_real_number`) is a
+    shape refusal too. Finiteness and order are the callers' checks.
+    """
+    ends = _frame_ends(value)
+    if ends is None or not all(is_real_number(end) for end in ends):
+        raise _pair_shape_refusal(voice, param, value)
+    return ends[0], ends[1]
+
+
+def coerce_range_pair(voice: str, param: str, value: Any) -> tuple[int | float, int | float]:
+    """Return *value* as a ``(lo, hi)`` statistic range of builtin numbers, or raise ``ValueError``.
+
+    The one reader of an ordered range pair: ``transform_density(extent=)``
+    and the like. *value* is a list, tuple, ``range`` or 1-D numpy array of
+    two real numbers (see :func:`_pair_ends`), both finite with ``lo < hi``.
+    A reversed or equal pair is malformed here (a statistic's range has an
+    order); coordinate limits, which may reverse an axis, use
+    :func:`coerce_limit_pair`. *voice* is the public door and *param* the
+    parameter the refusals speak as.
+    """
+    lo, hi = _pair_ends(voice, param, value)
+    lo_f, hi_f = as_finite_real(lo), as_finite_real(hi)
+    if lo_f is None or hi_f is None or not lo_f < hi_f:
+        raise ValueError(
+            f"{voice}: {param} must be (lo, hi) with lo < hi and both finite; "
+            f"got ({_pair_end_text(lo)}, {_pair_end_text(hi)})"
+        )
+    return coerce_finite_real(param, lo), coerce_finite_real(param, hi)
+
+
+def coerce_limit_pair(voice: str, param: str, value: Any) -> tuple[int | float, int | float]:
+    """Return *value* as a ``(lo, hi)`` axis limit of builtin numbers, or raise ``ValueError``.
+
+    The sibling of :func:`coerce_range_pair` for a coordinate limit: the same
+    kinds are read and both ends must be finite, but a reversed pair is kept
+    because it reverses the axis.
+    """
+    lo, hi = _pair_ends(voice, param, value)
+    if as_finite_real(lo) is None or as_finite_real(hi) is None:
+        raise ValueError(
+            f"{voice}: {param} must be a (lo, hi) pair of finite numbers; "
+            f"got ({_pair_end_text(lo)}, {_pair_end_text(hi)})"
+        )
+    return coerce_finite_real(param, lo), coerce_finite_real(param, hi)
 
 
 #: The row offsets a window frame end can hold: the signed 64-bit range the engine reads.
