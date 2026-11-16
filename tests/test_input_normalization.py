@@ -89,6 +89,19 @@ def test_lazyframe_renders_like_its_collected_frame(route):
     assert _quiet(fn, df.lazy()) == _quiet(fn, df)
 
 
+def _mapped_bars_svg(d) -> str:
+    chart = fm.Chart(d).mark_bar()
+    return chart.encode(x=fm.X("g", axis=fm.Axis(label_map={"a": "A"})), y="y").to_svg()
+
+
+def test_lazyframe_relabels_tick_text_through_label_map():
+    df = _frame()
+    svg = _quiet(_mapped_bars_svg, df.lazy())
+    assert ">A</text>" in svg
+    assert ">a</text>" not in svg
+    assert svg == _quiet(_mapped_bars_svg, df)
+
+
 def test_lazyframe_spec_keeps_the_temporal_annotation():
     df = _frame()
     lazy = fm.Chart(df.lazy()).mark_line().encode(x="t", y="y").to_spec()

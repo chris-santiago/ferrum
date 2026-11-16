@@ -377,13 +377,13 @@ _ORDINAL_UNION_CONTROL_HASHES = {
     "categorical_bar_temporal_line": {
         "fm.layer": "9f112fc7ec2f70f0",
         "+": "1a8ac40fe0c24787",
-        "interactive": "374f5ba1bc1ce13f",
+        "interactive": "fce57cdf02197adf",
     },
     "integer_category_ordinal_union": {
         "fm.layer": "b8cc832a7a444d3e",
         "+": "c1439d743c0b264a",
         # Each operand's marks index its own rows.
-        "interactive": "ebdf704a9eaf0c41",
+        "interactive": "f693bd2fdc962338",
     },
 }
 
@@ -532,7 +532,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ),
     ("area", "T", "+", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside the scale's "
             "explicit domain, so they are not drawn; widen the domain, "
@@ -551,7 +551,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ),
     ("area", "T", "Chart.layer", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside the "
             "scale's explicit domain, so they are not drawn; "
@@ -562,7 +562,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ("area", "T", "fm.layer", "static"): ("drawn", "19211423d0f5b8c4", ()),
     ("area", "T", "fm.layer", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside the scale's "
             "explicit domain, so they are not drawn; widen the "
@@ -573,7 +573,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ("area", "T", "LayerChart", "static"): ("drawn", "19211423d0f5b8c4", ()),
     ("area", "T", "LayerChart", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside the "
             "scale's explicit domain, so they are not drawn; "
@@ -593,7 +593,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ),
     ("area", "undeclared", "+", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside the "
             "scale's explicit domain, so they are not drawn; "
@@ -613,7 +613,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ),
     ("area", "undeclared", "Chart.layer", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside "
             "the scale's explicit domain, so they are "
@@ -625,7 +625,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ("area", "undeclared", "fm.layer", "static"): ("drawn", "19211423d0f5b8c4", ()),
     ("area", "undeclared", "fm.layer", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside "
             "the scale's explicit domain, so they are "
@@ -636,7 +636,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
     ("area", "undeclared", "LayerChart", "static"): ("drawn", "19211423d0f5b8c4", ()),
     ("area", "undeclared", "LayerChart", "interactive"): (
         "drawn",
-        "54765f470858906e",
+        "bdb1b9d6b56abaa8",
         (
             "x scale: 3 row(s) of 'when' fall outside "
             "the scale's explicit domain, so they are "
@@ -646,57 +646,57 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
         ),
     ),
     ("bar", "T", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("bar", "T", "+", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "T", "+", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("bar", "T", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("bar", "T", "Chart.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "T", "Chart.layer", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("bar", "T", "fm.layer", "static"): ("drawn", "1c19c5df157d891b", ()),
-    ("bar", "T", "fm.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "T", "fm.layer", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("bar", "T", "LayerChart", "static"): ("drawn", "1c19c5df157d891b", ()),
-    ("bar", "T", "LayerChart", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "T", "LayerChart", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("bar", "undeclared", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("bar", "undeclared", "+", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "+", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("bar", "undeclared", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("bar", "undeclared", "Chart.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "Chart.layer", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("bar", "undeclared", "fm.layer", "static"): ("drawn", "1c19c5df157d891b", ()),
-    ("bar", "undeclared", "fm.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "fm.layer", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("bar", "undeclared", "LayerChart", "static"): ("drawn", "1c19c5df157d891b", ()),
-    ("bar", "undeclared", "LayerChart", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "LayerChart", "interactive"): ("drawn", "d5bc2a2b3d6a038c", ()),
     ("line", "T", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("line", "T", "+", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "T", "+", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("line", "T", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("line", "T", "Chart.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "T", "Chart.layer", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("line", "T", "fm.layer", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
-    ("line", "T", "fm.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "T", "fm.layer", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("line", "T", "LayerChart", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
-    ("line", "T", "LayerChart", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "T", "LayerChart", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("line", "undeclared", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("line", "undeclared", "+", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "+", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("line", "undeclared", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("line", "undeclared", "Chart.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "Chart.layer", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("line", "undeclared", "fm.layer", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
-    ("line", "undeclared", "fm.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "fm.layer", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("line", "undeclared", "LayerChart", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
-    ("line", "undeclared", "LayerChart", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "LayerChart", "interactive"): ("drawn", "fce57cdf02197adf", ()),
     ("point", "T", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("point", "T", "+", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "T", "+", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("point", "T", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("point", "T", "Chart.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "T", "Chart.layer", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("point", "T", "fm.layer", "static"): ("drawn", "e32fb45e04ea221f", ()),
-    ("point", "T", "fm.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "T", "fm.layer", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("point", "T", "LayerChart", "static"): ("drawn", "e32fb45e04ea221f", ()),
-    ("point", "T", "LayerChart", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "T", "LayerChart", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("point", "undeclared", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("point", "undeclared", "+", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "+", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("point", "undeclared", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
-    ("point", "undeclared", "Chart.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "Chart.layer", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("point", "undeclared", "fm.layer", "static"): ("drawn", "e32fb45e04ea221f", ()),
-    ("point", "undeclared", "fm.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "fm.layer", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("point", "undeclared", "LayerChart", "static"): ("drawn", "e32fb45e04ea221f", ()),
-    ("point", "undeclared", "LayerChart", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "LayerChart", "interactive"): ("drawn", "16a68374ec136a3b", ()),
     ("rect", "T", "+", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
-    ("rect", "T", "+", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "T", "+", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rect", "T", "Chart.layer", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
-    ("rect", "T", "Chart.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "T", "Chart.layer", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rect", "T", "fm.layer", "static"): (
         "drawn",
         "9dc80c4da0d9303c",
@@ -706,7 +706,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
             "resolved scale is continuous",
         ),
     ),
-    ("rect", "T", "fm.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "T", "fm.layer", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rect", "T", "LayerChart", "static"): (
         "drawn",
         "9dc80c4da0d9303c",
@@ -716,11 +716,11 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
             "resolved scale is continuous",
         ),
     ),
-    ("rect", "T", "LayerChart", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "T", "LayerChart", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rect", "undeclared", "+", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
-    ("rect", "undeclared", "+", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "+", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rect", "undeclared", "Chart.layer", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
-    ("rect", "undeclared", "Chart.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "Chart.layer", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rect", "undeclared", "fm.layer", "static"): (
         "drawn",
         "9dc80c4da0d9303c",
@@ -730,7 +730,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
             "width, but the resolved scale is continuous",
         ),
     ),
-    ("rect", "undeclared", "fm.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "fm.layer", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rect", "undeclared", "LayerChart", "static"): (
         "drawn",
         "9dc80c4da0d9303c",
@@ -741,7 +741,7 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
             "continuous",
         ),
     ),
-    ("rect", "undeclared", "LayerChart", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "LayerChart", "interactive"): ("drawn", "040ba6b77aaa61fc", ()),
     ("rule", "T", "+", "static"): (
         "refused",
         "layer 1: mark_rule: column 'when' has unsupported dtype: "
@@ -823,37 +823,37 @@ _BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
         "string)",
     ),
     ("text", "T", "+", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
-    ("text", "T", "+", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "T", "+", "interactive"): ("drawn", "185f310984285caa", ()),
     ("text", "T", "Chart.layer", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
-    ("text", "T", "Chart.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "T", "Chart.layer", "interactive"): ("drawn", "185f310984285caa", ()),
     ("text", "T", "fm.layer", "static"): ("drawn", "ae61410c6236d75f", ()),
-    ("text", "T", "fm.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "T", "fm.layer", "interactive"): ("drawn", "185f310984285caa", ()),
     ("text", "T", "LayerChart", "static"): ("drawn", "ae61410c6236d75f", ()),
-    ("text", "T", "LayerChart", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "T", "LayerChart", "interactive"): ("drawn", "185f310984285caa", ()),
     ("text", "undeclared", "+", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
-    ("text", "undeclared", "+", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "+", "interactive"): ("drawn", "185f310984285caa", ()),
     ("text", "undeclared", "Chart.layer", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
-    ("text", "undeclared", "Chart.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "Chart.layer", "interactive"): ("drawn", "185f310984285caa", ()),
     ("text", "undeclared", "fm.layer", "static"): ("drawn", "ae61410c6236d75f", ()),
-    ("text", "undeclared", "fm.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "fm.layer", "interactive"): ("drawn", "185f310984285caa", ()),
     ("text", "undeclared", "LayerChart", "static"): ("drawn", "ae61410c6236d75f", ()),
-    ("text", "undeclared", "LayerChart", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "LayerChart", "interactive"): ("drawn", "185f310984285caa", ()),
     ("tick", "T", "+", "static"): ("drawn", "230f8a2223a2e55e", ()),
-    ("tick", "T", "+", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "T", "+", "interactive"): ("drawn", "2da5cff272e49923", ()),
     ("tick", "T", "Chart.layer", "static"): ("drawn", "230f8a2223a2e55e", ()),
-    ("tick", "T", "Chart.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "T", "Chart.layer", "interactive"): ("drawn", "2da5cff272e49923", ()),
     ("tick", "T", "fm.layer", "static"): ("drawn", "f148000c6632e781", ()),
-    ("tick", "T", "fm.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "T", "fm.layer", "interactive"): ("drawn", "2da5cff272e49923", ()),
     ("tick", "T", "LayerChart", "static"): ("drawn", "f148000c6632e781", ()),
-    ("tick", "T", "LayerChart", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "T", "LayerChart", "interactive"): ("drawn", "2da5cff272e49923", ()),
     ("tick", "undeclared", "+", "static"): ("drawn", "230f8a2223a2e55e", ()),
-    ("tick", "undeclared", "+", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "+", "interactive"): ("drawn", "2da5cff272e49923", ()),
     ("tick", "undeclared", "Chart.layer", "static"): ("drawn", "230f8a2223a2e55e", ()),
-    ("tick", "undeclared", "Chart.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "Chart.layer", "interactive"): ("drawn", "2da5cff272e49923", ()),
     ("tick", "undeclared", "fm.layer", "static"): ("drawn", "f148000c6632e781", ()),
-    ("tick", "undeclared", "fm.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "fm.layer", "interactive"): ("drawn", "2da5cff272e49923", ()),
     ("tick", "undeclared", "LayerChart", "static"): ("drawn", "f148000c6632e781", ()),
-    ("tick", "undeclared", "LayerChart", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "LayerChart", "interactive"): ("drawn", "2da5cff272e49923", ()),
 }
 
 

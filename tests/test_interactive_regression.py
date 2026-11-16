@@ -351,10 +351,11 @@ def test_polar_chart_coord_kind_is_polar():
 
 # ── tick_levels structure (zoom scale label fix) ──────────────────────────────
 #
-# Regression for: build_zoomed_text_json matched tick labels by scale-function
-# pixel position, which diverges from the axis layout's uniform-band positions.
-# Fixed by clustering axis text by shared coordinate instead.
-# These tests prove the preconditions that the clustering approach relies on.
+# The tick levels are the scale's own zoom ladder: the tick positions and labels
+# the scale would draw at each zoom level, on the wire for the runtime to read.
+# They are not what the page draws as tick text (the axis layout draws that, after
+# `label_format` and `label_map`), and the zoom path does not match drawn text
+# against them. These tests pin the ladder's structure.
 
 
 def _scatter_scene(width: int = 400, height: int = 300) -> dict:

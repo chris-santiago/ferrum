@@ -126,17 +126,17 @@ def test_categorical_annotation_band_positions_differ_for_first_and_last():
 
 
 # ---------------------------------------------------------------------------
-# REND-05 — label-map engine (_render_prepare)
+# REND-05 — label_map crosses to the renderer
 # ---------------------------------------------------------------------------
 
 
-def test_axis_label_map_remapped_text_appears_in_svg_after_render_prepare_split():
-    """Regression: REND-05 — _collect_label_maps/_rename_through_label_maps wired from _render_prepare.
+def test_axis_label_map_relabelled_text_appears_in_svg():
+    """Regression: REND-05 — an Axis(label_map=...) reaches the renderer.
 
-    A chart with Axis(label_map=...) must produce remapped tick labels in the
-    rendered SVG.  If _render.py lost its import from _render_prepare, the
-    label_map would be silently ignored and the raw column values ('a', 'b', 'c')
-    would appear instead of the remapped names.
+    A chart with Axis(label_map=...) must produce relabelled tick text in the
+    rendered SVG.  If the map stopped crossing the wire, it would be silently
+    ignored and the raw column values ('a', 'b', 'c') would appear instead of
+    the display names.
     """
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [1.0, 2.0, 3.0]})
     chart = (
@@ -150,10 +150,7 @@ def test_axis_label_map_remapped_text_appears_in_svg_after_render_prepare_split(
 
     svg = chart.to_svg()
 
-    assert "Alpha" in svg, (
-        "'Alpha' not found in SVG — _collect_label_maps/_rename_through_label_maps "
-        "must be imported from _render_prepare and called during render."
-    )
+    assert "Alpha" in svg, "'Alpha' not found in SVG — the label_map must reach the renderer."
     assert "Beta" in svg, "'Beta' not found in SVG after label_map remapping."
     assert "Gamma" in svg, "'Gamma' not found in SVG after label_map remapping."
 
@@ -230,8 +227,11 @@ def test_new_modules_import_cleanly_after_render_surface_split():
     assert not hasattr(ferrum._render_prepare, "_resolve_category_coords_in_annotations"), (
         "annotation categories are resolved by the renderer's scale, not by ferrum._render_prepare"
     )
-    assert hasattr(ferrum._render_prepare, "_collect_label_maps"), (
-        "_collect_label_maps missing from ferrum._render_prepare"
+    assert hasattr(ferrum._render_prepare, "_classify_field"), (
+        "_classify_field missing from ferrum._render_prepare"
+    )
+    assert not hasattr(ferrum._render_prepare, "_rename_through_label_maps"), (
+        "label_map relabels tick text in the renderer, not by renaming data in ferrum._render_prepare"
     )
     assert hasattr(ferrum._pdf, "_png_to_minimal_pdf"), (
         "_png_to_minimal_pdf missing from ferrum._pdf"

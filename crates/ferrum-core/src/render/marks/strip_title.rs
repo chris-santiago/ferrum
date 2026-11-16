@@ -53,6 +53,7 @@ pub fn build_row_strip_title(
             None,
             1.0,
         ),
+        tick_axis: None,
     };
 
     vec![bg, txt]
@@ -101,6 +102,7 @@ pub fn build_strip_title(
             None,
             1.0,
         ),
+        tick_axis: None,
     };
 
     vec![bg, txt]

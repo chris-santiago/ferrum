@@ -158,6 +158,7 @@ fn multiple_annotation_types_both_appear() {
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         },
+        tick_axis: None,
     };
     let scene = minimal_scene(vec![annotation_line(), text_node]);
     let svg = walk_svg(&scene, false).unwrap();
@@ -231,6 +232,7 @@ fn below_marks_appears_after_grid_and_before_marks_in_svg() {
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         },
+        tick_axis: None,
     }];
     let svg = walk_svg(&scene, false).unwrap();
 
@@ -274,6 +276,7 @@ fn chrome_above_appears_after_marks_and_before_annotations_in_svg() {
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         },
+        tick_axis: None,
     }]);
     scene.panels[0].chrome_above = vec![annotation_line()];
     let svg = walk_svg(&scene, false).unwrap();
@@ -363,6 +366,7 @@ fn scene_with_clip_escape_order_fixture() -> SceneGraph {
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
+            tick_axis: None,
         }],
         ..MarkBatch::default()
     });

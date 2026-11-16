@@ -535,6 +535,16 @@ pub enum SceneNode {
         /// bytes deserializes to `None` via `serde(default)`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slot: Option<usize>,
+        /// The PHYSICAL axis whose tick this text labels: `X` for a label on a
+        /// horizontal axis (bottom/top), `Y` for one on a vertical axis
+        /// (left/right), whatever channel the caller bound to it. `None` for
+        /// every other text (titles, legend labels, mark labels, annotations,
+        /// polar labels). The interactive runtime recognises tick labels by
+        /// this tag rather than by matching their text, so a relabelled or
+        /// custom-formatted tick still follows its axis. Absent on legacy wire
+        /// bytes deserializes to `None` via `serde(default)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tick_axis: Option<TickAxis>,
     },
     Image {
         x: f64,
@@ -865,6 +875,14 @@ pub enum CoordKind {
     Geo {
         projection: GeoProjection,
     },
+}
+
+/// The physical axis a tick label sits on (see `SceneNode::Text::tick_axis`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TickAxis {
+    X,
+    Y,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

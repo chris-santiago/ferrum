@@ -80,6 +80,7 @@ pub fn build_legend(
                 None,
                 1.0,
             ),
+            tick_axis: None,
         });
     }
 
@@ -182,6 +183,7 @@ pub fn build_legend(
                 content: tick.label.clone(),
                 slot: None,
                 style: tick_label_style.clone(),
+                tick_axis: None,
             });
         }
     }
@@ -348,6 +350,7 @@ pub fn build_legend(
             content: entry.label.clone(),
             slot: None,
             style: label_text_style.clone(),
+            tick_axis: None,
         });
     }
 

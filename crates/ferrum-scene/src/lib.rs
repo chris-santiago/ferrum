@@ -428,6 +428,7 @@ mod tests {
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
+            tick_axis: None,
         };
         let chrome_above_node = SceneNode::Line {
             x1: 0.0,
@@ -710,5 +711,50 @@ mod tests {
         )
         .expect("deserialize");
         assert_eq!(with_null.color, None);
+    }
+
+    // ── SceneNode::Text::tick_axis ────────────────────────────────────────────
+
+    fn plain_text(tick_axis: Option<TickAxis>) -> SceneNode {
+        SceneNode::Text {
+            x: 1.0,
+            y: 2.0,
+            content: "t".into(),
+            style: TextStyle {
+                font_size: 12.0,
+                font_weight: FontWeight::Normal,
+                anchor: TextAnchor::Middle,
+                baseline: TextBaseline::Alphabetic,
+                angle: 0.0,
+                color: Some(Color::rgb(50, 50, 50)),
+                opacity: 1.0,
+                font_family: "sans-serif".to_string(),
+            },
+            slot: None,
+            tick_axis,
+        }
+    }
+
+    #[test]
+    fn untagged_text_serializes_no_tick_axis_key() {
+        let json = serde_json::to_string(&plain_text(None)).unwrap();
+        assert!(!json.contains("tick_axis"), "{json}");
+    }
+
+    #[test]
+    fn tick_axis_round_trips_in_snake_case() {
+        for (axis, word) in [(TickAxis::X, "x"), (TickAxis::Y, "y")] {
+            let json = serde_json::to_string(&plain_text(Some(axis))).unwrap();
+            assert!(json.contains(&format!("\"tick_axis\":\"{word}\"")), "{json}");
+            let back: SceneNode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, plain_text(Some(axis)));
+        }
+    }
+
+    #[test]
+    fn legacy_text_json_without_tick_axis_deserializes_to_none() {
+        let json = serde_json::to_string(&plain_text(None)).unwrap();
+        let back: SceneNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, plain_text(None));
     }
 }

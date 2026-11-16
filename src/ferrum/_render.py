@@ -13,14 +13,7 @@ import warnings
 from typing import TYPE_CHECKING, Literal
 
 from ferrum._coerce import normalize_for_rust, to_arrow_table
-from ferrum._render_prepare import (
-    _axis_label_maps,
-    _check_category_columns,
-    _classify_field,
-    _collect_label_maps,
-    _rename_annotation_categories,
-    _rename_through_label_maps,
-)
+from ferrum._render_prepare import _check_category_columns, _classify_field
 from ferrum._warn import user_stacklevel
 from ferrum.encoding.base import ChannelBase, _unset_statistic
 
@@ -673,23 +666,13 @@ class _RenderMixin:
             kw = json.loads(spec.to_json())
             kw = chart._inject_auto_tooltips(kw)
             spec = ChartSpec.from_json(json.dumps(kw))
-        # F17: apply Axis(label_map=...) column-value remapping before data
-        # reaches Rust so the scale domain uses the display labels.
-        label_maps = _collect_label_maps(chart)
-        raw_data, applied_maps = _rename_through_label_maps(chart._data, label_maps)
-        data = normalize_for_rust(to_arrow_table(raw_data))
+        data = normalize_for_rust(to_arrow_table(chart._data))
         viewport = chart._native_size()
         from ferrum.themes._defaults import get_default_theme
 
         effective_theme = chart._theme or get_default_theme()
         theme_dict = effective_theme.to_spec_dict() if effective_theme else {}
         chart_config_dict = chart._resolve_chart_config()
-        if label_maps and chart_config_dict.get("annotations"):
-            # An annotation category names a data value; the data above was renamed through
-            # label_map, so the category follows the same map to reach the same band.
-            chart_config_dict["annotations"] = _rename_annotation_categories(
-                chart_config_dict["annotations"], _axis_label_maps(chart, applied_maps)
-            )
         if override_payload is not None:
             from ferrum._override_consume import (
                 apply_properties,

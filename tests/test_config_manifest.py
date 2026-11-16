@@ -1326,3 +1326,28 @@ def test_wire_gate_leaves_break_axis_axis_shape_errors_to_serde():
         assert expected in msg, (axis_value, msg)
         # Not the gate's message: these shapes name no token to report.
         assert "axis must be one of" not in msg, (axis_value, msg)
+
+
+# ---------------------------------------------------------------------------
+# label_map — a chart-level axis field the renderer honors as tick text
+# ---------------------------------------------------------------------------
+
+
+def test_label_map_is_a_honored_axis_style_field_reachable_from_python():
+    manifest = _load_rust_manifest()
+    assert manifest["AxisStyleSpec.label_map"]["honored"] is True
+    assert "AxisStyleSpec.label_map" not in _EXPECTED_PYTHON_ABSENT
+    assert _is_reachable_from_python("AxisStyleSpec.label_map")
+    assert "label_map" in {f.name for f in fields(AxisConfig)}
+    assert "label_map" in inspect.signature(ConfigureMixin.configure_axis).parameters
+
+
+@pytest.mark.parametrize("section", ["axis", "axis_x", "axis_y"])
+def test_wire_gate_accepts_label_map_in_every_axis_section(section):
+    """A raw chart config naming ``label_map`` under an axis section passes the key gate and
+    relabels that section's ticks."""
+    df = pl.DataFrame({"c": ["a", "b"], "v": [1.0, 2.0]})
+    chart = fm.Chart(df).mark_bar().encode(x="c", y="v")
+    chart = chart._append_configure(_RawConfigLayer({section: {"label_map": {"a": "Ay"}}}))
+    svg = chart.to_svg()
+    assert (">Ay</text>" in svg) is (section != "axis_y")

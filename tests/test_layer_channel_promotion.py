@@ -366,7 +366,7 @@ def test_a_channel_without_a_constant_cell_has_no_mark_kwarg(channel: str) -> No
 # `point + line` with no auxiliary binding: SVG bytes and the interactive
 # scene JSON.
 _UNBOUND_SVG_DIGEST = "a7c51bb8e0acfdf660de97f8cffd0132d67b455d91c75fdc90ee80032687c49a"
-_UNBOUND_SCENE_DIGEST = "2212bfb4a1fc00406a2d8b655892ed120c58a107568dfbcebcc0786964eccb4f"
+_UNBOUND_SCENE_DIGEST = "75a03fd50dfaf53a8bdf2fe34fe150761597b4e398c99476bf39a65487d5dc07"
 
 
 def test_an_unbound_layered_chart_renders_its_pinned_bytes() -> None:

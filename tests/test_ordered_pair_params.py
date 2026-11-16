@@ -533,7 +533,7 @@ _REVERSED_LIMIT_DIGESTS = {
     "Chart.ylim": "e23995783079dbd6",
     "jointplot.xlim": "6f0ac136a1764197",
     "jointplot.ylim": "c43ec1bb9b98ebd3",
-    "interactive.xlim": "121b06352bac156c",
+    "interactive.xlim": "500d83f02b1b4361",
 }
 
 

@@ -4,7 +4,7 @@ Round 1 found 3 bugs (LazyFrame bypassing Date/Categorical/Duration casts),
 confirmed fixed in bd182a8. This round targets:
 - RecordBatch date-cast bypass (new bug)
 - Arrow CDI boundary with unusual pyarrow types
-- Interaction between coerce and the _render_inputs / label_map pipeline
+- Interaction between coerce and the label_map tick relabel
 - Unicode / special-character column names through Arrow
 - GeoJSON edge cases
 - Polars complex types (Struct, List, nested)
@@ -458,9 +458,8 @@ def test_chart_with_annotations_and_categorical_data():
 
 def test_chart_with_label_map_and_data_coercion():
     """Chart with Axis(label_map=...) applied to data that needs coercion.
-    Tests the interaction between label_map remapping (_render.py lines 68-115)
-    and the coerce pipeline.
-    Targets _render_inputs flow: label_map is applied before to_arrow_table.
+    The data crosses to Rust through the coerce pipeline unchanged; the renderer
+    relabels the tick text, so the display names appear and the data values do not.
     """
     import ferrum as fr
     from ferrum.encoding import X, Y
@@ -481,6 +480,10 @@ def test_chart_with_label_map_and_data_coercion():
     )
     svg = chart.to_svg()
     assert "<svg" in svg
+    for display in ("Alpha", "Beta", "Gamma"):
+        assert f">{display}</text>" in svg
+    for value in ("a", "b", "c"):
+        assert f">{value}</text>" not in svg
 
 
 def test_chart_composition_with_different_data_types():
@@ -2187,10 +2190,8 @@ def test_recordbatch_non_date_passthrough():
 
 def test_label_map_with_dict_encoded_x_column():
     """Axis(label_map=...) applied to a dictionary-encoded x column.
-    label_map runs in polars space before _sanitize_for_rust, so the
-    dictionary encoding should be handled by the polars conversion.
-
-    Targets _render.py lines 414-415: _rename_through_label_maps then _sanitize_for_rust.
+    The dictionary column is decoded to its category text on the way to Rust, so
+    the renderer's tick text for it is the dictionary values and the map relabels them.
     """
     import ferrum as fr
     from ferrum.encoding import X
@@ -2210,15 +2211,14 @@ def test_label_map_with_dict_encoded_x_column():
     )
     svg = chart.to_svg()
     assert "<svg" in svg
-    assert "Alpha" in svg
+    for display in ("Alpha", "Beta", "Gamma"):
+        assert f">{display}</text>" in svg
 
 
 def test_label_map_with_null_typed_x_column():
     """Axis(label_map=...) applied to a Null-typed x column.
-    The label_map code checks for string/categorical dtype, so it should
-    be a no-op on a null column (which becomes float64 after sanitize).
-
-    Targets _render.py lines 414-415.
+    A null column (float64 after sanitize) has no tick whose text is a key, so the
+    map matches nothing and the chart renders as it does without it.
     """
     import ferrum as fr
     from ferrum.encoding import X
@@ -2240,6 +2240,7 @@ def test_label_map_with_null_typed_x_column():
     # Should not crash even though the column is all nulls
     svg = chart.to_svg()
     assert "<svg" in svg
+    assert ">Alpha</text>" not in svg
 
 
 # ================================================================

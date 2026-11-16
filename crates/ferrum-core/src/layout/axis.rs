@@ -485,6 +485,10 @@ pub(crate) struct AxisLabelOverrides {
     /// [`resolve_y_overlap`](crate::layout::axis::resolve_y_overlap) for y's
     /// transpose of the four primitives).
     pub overlap: Option<LabelOverlap>,
+    /// Display text keyed by a tick's formatted text (`fm.Axis(label_map=)`).
+    /// `None` → every tick draws its own text. Never an empty map: the merge
+    /// drops an empty one. Read only through [`AxisInput::display_labels`].
+    pub display_text: Option<std::collections::BTreeMap<String, String>>,
     /// Whether tick labels render. `None` → `true`. Per-channel
     /// `fm.Axis(labels=)` writes it unconditionally; chart-level
     /// `configure_axis(labels=)` fills it only when still `None`, so
@@ -861,6 +865,24 @@ impl AxisInput {
             self.categorical_placement.as_ref().map(|p| p.len()),
             self.tick_labels.len()
         );
+    }
+
+    /// The text each tick draws: `tick_labels` with the axis's `label_map`
+    /// applied to each entry's exact text. The one reader of the map, so
+    /// measurement, overlap handling and emission agree on the drawn text
+    /// while every producer of `tick_labels` stays a data-text producer.
+    /// Borrowed when no map is set, so an unmapped axis pays nothing. A
+    /// replacement is never looked up again, so a swapping map swaps once.
+    pub(crate) fn display_labels(&self) -> std::borrow::Cow<'_, [String]> {
+        match &self.overrides.labels.display_text {
+            Some(map) if !map.is_empty() => std::borrow::Cow::Owned(
+                self.tick_labels
+                    .iter()
+                    .map(|label| map.get(label).unwrap_or(label).clone())
+                    .collect(),
+            ),
+            _ => std::borrow::Cow::Borrowed(&self.tick_labels),
+        }
     }
 
     /// This axis's tick-mark length: its own override, else the theme's.
@@ -1964,7 +1986,7 @@ pub(crate) fn compute_y_label_band_width(
         return 0.0;
     }
     let max_label_w = input
-        .tick_labels
+        .display_labels()
         .iter()
         .map(|s| metrics.measure_width(s, label_font_size))
         .fold(0.0_f64, f64::max);
@@ -2138,9 +2160,10 @@ pub fn layout_y_axis(
     // positions labels draw at, not `cascade_slot_h` slots (which
     // understates every gap but a Log axis's tightest, the 9-to-10 one).
     let tick_positions: Vec<f64> = (0..n).map(tick_position).collect();
+    let display = input.display_labels();
     let overlap_visible = resolve_y_overlap(
         input.overrides.labels.overlap,
-        &input.tick_labels,
+        &display,
         &tick_positions,
         label_font_size,
         metrics,
@@ -2165,7 +2188,7 @@ pub fn layout_y_axis(
         // (y's projection factor is `sin|angle|` against `cascade_slot_h`).
         let sin_factor = override_angle.to_radians().sin().abs();
         stamp_override_angle_with_elide(
-            &input.tick_labels,
+            &display,
             override_angle,
             sin_factor,
             cascade_slot_h,
@@ -2174,8 +2197,7 @@ pub fn layout_y_axis(
             tick_position,
         )
     } else {
-        let ticks: Vec<TickLayout> = input
-            .tick_labels
+        let ticks: Vec<TickLayout> = display
             .iter()
             .enumerate()
             .map(|(i, label)| TickLayout {
@@ -3606,6 +3628,7 @@ pub(super) fn lay_out_x_tick_labels(
         ..
     } = *ctx;
     let n = input.tick_labels.len();
+    let display = input.display_labels();
     let slot_w = if n > 0 { panel_w / n as f64 } else { 0.0 };
     // Uniform-slot fallback range (left → right, in pixel order): slot `i`'s center
     // is `panel_x + (i + 0.5)*slot_w` via `Axis1D::uniform_center`.
@@ -3670,7 +3693,7 @@ pub(super) fn lay_out_x_tick_labels(
         // against `cascade_slot_w`).
         let cos_factor = override_angle.to_radians().cos().abs();
         stamp_override_angle_with_elide(
-            &input.tick_labels,
+            &display,
             override_angle,
             cos_factor,
             cascade_slot_w,
@@ -3682,7 +3705,7 @@ pub(super) fn lay_out_x_tick_labels(
         // Run the graduated collision cascade, biased by any `label_overlap`
         // override (B5 unit 6b).
         let cascade = cascade_collision_recovery(
-            &input.tick_labels,
+            &display,
             cascade_slot_w,
             label_font_size,
             label_gap,
@@ -3699,7 +3722,7 @@ pub(super) fn lay_out_x_tick_labels(
                 position: tick_position(i),
                 label: label.clone(),
                 label_angle: cascade.angle,
-                elided: is_elision_strategy && label != &input.tick_labels[i],
+                elided: is_elision_strategy && label != &display[i],
                 culled: !cascade.visible[i],
                 label_font_size: cascade.font_size,
                 is_major: true,
@@ -3734,7 +3757,7 @@ pub(super) fn lay_out_x_tick_labels(
     // keeps its data, and a label band it cannot hold is never drawn into the
     // next row or past the canvas. Drawing no label at all is reported as
     // every label culled.
-    let labels = &input.tick_labels;
+    let labels = &display;
     let label_pad_eff = input.overrides.labels.padding.unwrap_or(2.0).max(0.0);
     let least_label_band =
         ctx.tick_size + label_pad_eff + label_font_size.min(metrics.line_height(label_font_size));
@@ -8943,5 +8966,241 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── `label_map`: display text read through one accessor ──────────────────
+
+    fn display_map(pairs: &[(&str, &str)]) -> Option<std::collections::BTreeMap<String, String>> {
+        Some(pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect())
+    }
+
+    fn strings(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// An axis with no map hands back its own labels, borrowed: charts without
+    /// a map pay nothing and stay byte-identical.
+    #[test]
+    fn display_labels_borrow_when_the_axis_has_no_map() {
+        let input = axis_input(AxisOrient::Bottom, None, strings(&["a", "b"]), None);
+        assert!(matches!(input.display_labels(), std::borrow::Cow::Borrowed(_)));
+        let mut empty = input.clone();
+        empty.overrides.labels.display_text = display_map(&[]);
+        assert!(matches!(empty.display_labels(), std::borrow::Cow::Borrowed(_)));
+    }
+
+    /// A key replaces the tick whose text equals it exactly; a key that matches
+    /// no tick, and a tick no key names, change nothing.
+    #[test]
+    fn display_labels_replace_by_exact_tick_text() {
+        let mut input = axis_input(AxisOrient::Bottom, None, strings(&["a", "b", "B", "2"]), None);
+        input.overrides.labels.display_text = display_map(&[("b", "Bee"), ("zzz", "Z"), ("2.0", "two")]);
+        assert_eq!(input.display_labels().as_ref(), strings(&["a", "Bee", "B", "2"]).as_slice());
+    }
+
+    /// A swapping map reads each tick's own text once: the replacement is never
+    /// looked up again.
+    #[test]
+    fn display_labels_do_not_chain_replacements() {
+        let mut input = axis_input(AxisOrient::Bottom, None, strings(&["a", "b"]), None);
+        input.overrides.labels.display_text = display_map(&[("a", "b"), ("b", "a")]);
+        assert_eq!(input.display_labels().as_ref(), strings(&["b", "a"]).as_slice());
+    }
+
+    /// The `axis_input` of `labels`, and the same axis with `map` applied: the
+    /// mapped one must lay out exactly as the first does once its labels are
+    /// replaced by hand.
+    fn mapped_and_renamed(labels: &[&str], map: &[(&str, &str)], angle: Option<f64>) -> (AxisInput, AxisInput) {
+        let mut mapped = axis_input(AxisOrient::Bottom, None, strings(labels), angle);
+        mapped.overrides.labels.display_text = display_map(map);
+        let renamed_labels: Vec<String> = labels
+            .iter()
+            .map(|l| map.iter().find(|(k, _)| k == l).map_or((*l).to_owned(), |(_, v)| (*v).to_owned()))
+            .collect();
+        let renamed = axis_input(AxisOrient::Bottom, None, renamed_labels, angle);
+        (mapped, renamed)
+    }
+
+    /// Emission: the drawn tick carries the display text and the data tick's
+    /// own position.
+    #[test]
+    fn layout_x_axis_emits_the_display_text() {
+        let m = mock(5.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m);
+        let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let (mapped, _) = mapped_and_renamed(&["a", "b", "c"], &[("b", "Bee")], None);
+        let plain = axis_input(AxisOrient::Bottom, None, strings(&["a", "b", "c"]), None);
+        let (layout, _) = layout_x_axis(&mapped, panel, 0, 13.0, 4.0, &ctx);
+        let (base, _) = layout_x_axis(&plain, panel, 0, 13.0, 4.0, &ctx);
+        let labels: Vec<&str> = layout.ticks.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, ["a", "Bee", "c"]);
+        let positions = |a: &AxisLayout| a.ticks.iter().map(|t| t.position).collect::<Vec<_>>();
+        assert_eq!(positions(&layout), positions(&base));
+    }
+
+    /// Measurement and overlap: a display label wide enough to collide runs the
+    /// same collision cascade the hand-renamed axis runs, so the drawn labels,
+    /// angles, culls and elisions agree tick for tick, and differ from the
+    /// unmapped axis (the fixture discriminates).
+    #[test]
+    fn layout_x_axis_judges_collisions_on_the_display_text() {
+        let m = mock(10.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m);
+        let panel = Rect { x: 0.0, y: 0.0, w: 240.0, h: 200.0 };
+        let long = "A rather long display label";
+        let (mapped, renamed) = mapped_and_renamed(&["a", "b", "c", "d"], &[("b", long), ("c", long)], None);
+        let plain = axis_input(AxisOrient::Bottom, None, strings(&["a", "b", "c", "d"]), None);
+        let (got, got_warning) = layout_x_axis(&mapped, panel, 0, 13.0, 4.0, &ctx);
+        let (want, want_warning) = layout_x_axis(&renamed, panel, 0, 13.0, 4.0, &ctx);
+        let (base, _) = layout_x_axis(&plain, panel, 0, 13.0, 4.0, &ctx);
+        assert_eq!(got, want);
+        assert_eq!(got_warning, want_warning);
+        assert_ne!(got.ticks, base.ticks, "fixture: the display text must change the cascade's outcome");
+    }
+
+    /// The elision flag compares the drawn text with the display text, so a
+    /// label the cascade did not shorten is never flagged. The fixture reaches
+    /// the `Elided` strategy (culling off, labels too long for any angle, 40 px
+    /// slots): the long data labels are elided, and the short display label of
+    /// `bravo` stays whole and unflagged. Compared with the hand-renamed axis.
+    #[test]
+    fn layout_x_axis_flags_elision_against_the_display_text() {
+        let m = MockMetrics {
+            measure: |text: &str, _fs: f64| if text.chars().count() > 1 { 1e18 } else { 5.0 },
+            line_h_factor: 1.2,
+        };
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let panel = Rect { x: 0.0, y: 0.0, w: 160.0, h: 200.0 };
+        let (mapped, renamed) =
+            mapped_and_renamed(&["alpha", "bravo", "charlie", "delta"], &[("bravo", "b")], None);
+        let (got, got_warning) = layout_x_axis(&mapped, panel, 0, 13.0, 4.0, &ctx);
+        let (want, want_warning) = layout_x_axis(&renamed, panel, 0, 13.0, 4.0, &ctx);
+        assert_eq!(got.ticks, want.ticks);
+        assert_eq!(got_warning, want_warning);
+        assert!(
+            matches!(got_warning, Some(AxisLabelWarning::LabelsElided { .. })),
+            "fixture: the cascade must end Elided, got {got_warning:?}"
+        );
+        assert_eq!(got.ticks[1].label, "b");
+        assert!(!got.ticks[1].elided, "a label the cascade left whole is not flagged");
+        assert!(
+            got.ticks.iter().enumerate().any(|(i, t)| i != 1 && t.elided),
+            "fixture: the long labels are elided"
+        );
+    }
+
+    /// The stride cull over a band budget reads the display text: the culled
+    /// ticks carry it, and the survivors lay out as on the hand-renamed axis.
+    /// The unmapped axis (all narrow labels) needs no cull under the same
+    /// budget, so the stride path is reached only through the display text.
+    #[test]
+    fn layout_x_axis_stride_culls_on_the_display_text() {
+        let m = MockMetrics {
+            measure: |s: &str, _fs: f64| {
+                s.chars()
+                    .map(|c| match c {
+                        'W' => 42.0,
+                        '\u{2026}' => 10.0,
+                        _ => 8.0,
+                    })
+                    .sum::<f64>()
+            },
+            line_h_factor: 1.2,
+        };
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(0), 4.0, &m);
+        let budgeted = ctx.with_band_budget(43.0);
+        let (mapped, renamed) =
+            mapped_and_renamed(&["a0", "a1", "a2", "a3"], &[("a1", "W"), ("a3", "W")], Some(45.0));
+        let plain = axis_input(AxisOrient::Bottom, None, strings(&["a0", "a1", "a2", "a3"]), Some(45.0));
+        let (got, _) = lay_out_x_tick_labels(&mapped, 0.0, 120.0, &budgeted);
+        let (want, _) = lay_out_x_tick_labels(&renamed, 0.0, 120.0, &budgeted);
+        let (base, _) = lay_out_x_tick_labels(&plain, 0.0, 120.0, &budgeted);
+        assert_eq!(got, want);
+        assert!(
+            got[1].culled && got[3].culled && !got[0].culled && !got[2].culled,
+            "fixture: the wide display labels are culled: {got:?}"
+        );
+        assert_eq!((got[1].label.as_str(), got[3].label.as_str()), ("W", "W"));
+        assert!(base.iter().all(|t| !t.culled), "fixture: the data text needs no cull");
+    }
+
+    /// A forced angle takes the override path, which stamps and elides the
+    /// display text.
+    #[test]
+    fn layout_x_axis_override_angle_reads_the_display_text() {
+        let m = mock(10.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m);
+        let panel = Rect { x: 0.0, y: 0.0, w: 120.0, h: 200.0 };
+        let long = "A rather long display label";
+        let (mapped, renamed) = mapped_and_renamed(&["a", "b", "c"], &[("b", long)], Some(0.0));
+        let (got, _) = layout_x_axis(&mapped, panel, 0, 13.0, 4.0, &ctx);
+        let (want, _) = layout_x_axis(&renamed, panel, 0, 13.0, 4.0, &ctx);
+        assert_eq!(got.ticks, want.ticks);
+        assert!(got.ticks.iter().any(|t| t.elided), "fixture: the override path elides the long label");
+    }
+
+    /// The x band the axis reserves is measured on the display text.
+    #[test]
+    fn x_label_band_is_measured_on_the_display_text() {
+        let m = mock(10.0);
+        let ctx = LabelBandCtx::new(11.0, legacy_gap(8), 4.0, &m);
+        let long = "A rather long display label";
+        let (mapped, renamed) = mapped_and_renamed(&["a", "b", "c", "d"], &[("b", long)], None);
+        let plain = axis_input(AxisOrient::Bottom, None, strings(&["a", "b", "c", "d"]), None);
+        let band = |i: &AxisInput| estimate_x_label_band(i, 240.0, &ctx);
+        assert_eq!(band(&mapped), band(&renamed));
+        assert_ne!(band(&mapped), band(&plain), "fixture: the display text changes the band");
+    }
+
+    /// The y gutter is as wide as the widest DISPLAY label.
+    #[test]
+    fn y_label_band_is_measured_on_the_display_text() {
+        let m = mock(10.0);
+        let labels = ["0", "100"];
+        let mut mapped = axis_input(AxisOrient::Left, None, strings(&labels), None);
+        mapped.overrides.labels.display_text = display_map(&[("100", "one hundred")]);
+        let renamed = axis_input(AxisOrient::Left, None, strings(&["0", "one hundred"]), None);
+        let plain = axis_input(AxisOrient::Left, None, strings(&labels), None);
+        let band = |i: &AxisInput| compute_y_label_band_width(i, 11.0, &m, 4.0, true);
+        assert_eq!(band(&mapped), band(&renamed));
+        assert!(band(&mapped) > band(&plain));
+    }
+
+    /// y emission reads the display text. (The y overlap policy reads only the
+    /// label count, so no test can distinguish it from reading the data text.)
+    #[test]
+    fn layout_y_axis_emits_the_display_text() {
+        let m = mock(10.0);
+        let panel = Rect { x: 0.0, y: 0.0, w: 200.0, h: 40.0 };
+        let labels = ["0", "1", "2", "3"];
+        let mut mapped = axis_input(AxisOrient::Left, None, strings(&labels), None);
+        mapped.overrides.labels.display_text = display_map(&[("1", "one"), ("2", "two")]);
+        mapped.overrides.labels.overlap = Some(LabelOverlap::Greedy);
+        let mut renamed = axis_input(AxisOrient::Left, None, strings(&["0", "one", "two", "3"]), None);
+        renamed.overrides.labels.overlap = Some(LabelOverlap::Greedy);
+        let (got, _) = layout_y_axis(&mapped, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let (want, _) = layout_y_axis(&renamed, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        assert_eq!(got.ticks, want.ticks);
+        assert_eq!(got.ticks[1].label, "one");
+    }
+
+    /// A forced y angle stamps and elides the display text: only the long
+    /// display label overflows its slot, so only it is elided.
+    #[test]
+    fn layout_y_axis_override_angle_reads_the_display_text() {
+        let m = mock(10.0);
+        let panel = Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 };
+        let long = "one hundred and one";
+        let mut mapped = axis_input(AxisOrient::Left, None, strings(&["0", "1", "2", "3"]), Some(90.0));
+        mapped.overrides.labels.display_text = display_map(&[("1", long)]);
+        let renamed = axis_input(AxisOrient::Left, None, strings(&["0", long, "2", "3"]), Some(90.0));
+        let plain = axis_input(AxisOrient::Left, None, strings(&["0", "1", "2", "3"]), Some(90.0));
+        let (got, _) = layout_y_axis(&mapped, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let (want, _) = layout_y_axis(&renamed, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        let (base, _) = layout_y_axis(&plain, panel, 0, 11.0, 13.0, 4.0, 4.0, &m);
+        assert_eq!(got.ticks, want.ticks);
+        assert!(got.ticks[1].elided && got.ticks[1].label.starts_with("one"), "{:?}", got.ticks[1]);
+        assert!(got.ticks.iter().enumerate().all(|(i, t)| i == 1 || !t.elided));
+        assert!(base.ticks.iter().all(|t| !t.elided), "fixture: the data text fits");
     }
 }

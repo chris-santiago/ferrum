@@ -1313,7 +1313,7 @@ _RECORDED_BEFORE = {
     "glm-panel-lmplot": "f63b0309d45f02972944ca65adadf6d0d5a503b5770dbe8393ecae367ba4acfe",
     "logistic-whole-regplot": "0170091ebbb8e213e44cc4af28692b9966b4c383a68f082690384befee5331b1",
     "glm-panel-hand-written": "8eb7ac7efa881f133396446eb46d6e246bbd595ec9bb61f9d6044c435b8f6283",
-    "logistic-interactive-panel": "e02d7fdb8232336075010f1d69185708cbabf4c3b681360d7d83c1c082f296a6",
+    "logistic-interactive-panel": "8bca9a32203e04f5c98d5c9d06c0bc19b782add1bb221bc4581377fc6bb4d997",
 }
 _COMPUTED_DIGESTS = {
     **_RECORDED_BEFORE,
@@ -1331,9 +1331,9 @@ _COMPUTED_DIGESTS = {
     "logistic-whole-plus": "808ef9c6c3fb02e6e146821f41ba6214ba1b65a44daa3d8c36b9e16c8c697a31",
     "logistic-whole-chart-layer": "5658e659f7e572cb2aa93f735bf8b95242711eeee8bdce991f8f2644c1a6ec05",
     "logistic-whole-layerchart": "4f2a497ec19fc0eb691f6d52d8094ab84328d22d1933464ccafcd5081df60b8c",
-    "logistic-interactive-whole": "6a0c5822fa81fdc32e8e4776dd0ae441fdb038eecdc59a89277f7f0ae1999f89",
-    "logistic-interactive-lmplot": "2660930dee9d07542e7c79054067a962e601c0648fc0f65f36a62ce407e80b1a",
-    "logistic-interactive-regplot": "e6aafdc4ab6554d1c2b9201cd80c689ff652f9b21b48ac9afc5c528eb20f1678",
+    "logistic-interactive-whole": "34007e0d0cf7e2461edc880d57c21ed7c1122552782051242393810ad75799b6",
+    "logistic-interactive-lmplot": "9648577f063feaeff4d2b4756753cde73c47dfc5f60af78a3ae5faad9f90a096",
+    "logistic-interactive-regplot": "9df126466cc12dfdb1058c9b011069f8f4f0e64e5eec98c801f0db597215a3c2",
     "glm-panel-lmplot-ci": "17b0b45fb99f69bb279280ec3bb63a8029b1842156505626484e11f00b696f32",
     "glm-panel-lmplot-no-scatter": "3cf1336d18a47cda43c3dbda9d20e0bae356e8bdbcd209fd14a0fccdc3f75884",
     "glm-panel-lmplot-grid": "f6cc1b5ac0225eb847cb39d853e5e6baf949442cc36641c84d290f326320f0b2",
@@ -1348,10 +1348,10 @@ _COMPUTED_DIGESTS = {
     "glm-whole-plus": "bac1aeb708449a52b848f633eae4ae9f5c35a5b3e5f633c9730555d4fac3cc94",
     "glm-whole-chart-layer": "af36401b1f90c4c4c75f4ee7456032c514f97d1b6fdd586bc528a88aa3ffd53f",
     "glm-whole-layerchart": "b31051d1a2cb041966e92ea00dc2512f70b960bb2a7d08c65fb44d1c37a5397e",
-    "glm-interactive-panel": "aa5d353d4b05709a44976f41b37f39febcbed38a83a34f7324cba7c9c92e17ef",
-    "glm-interactive-whole": "7a28ff1f79330fbd4d00386a461e699d88b875de263a6d641af9a5582140f96f",
-    "glm-interactive-lmplot": "fe7d672f303979337476740e8234086c0b176afe8d1757e40528067e2e8ba738",
-    "glm-interactive-regplot": "120065c75c14d2e76863bf32d38c68c2941eeb6074f547c0b42be3723cc80e2b",
+    "glm-interactive-panel": "271a22093881929c17ae21c498e52d870f7a2823c193405ff106672fc9ca30bc",
+    "glm-interactive-whole": "ea83e7a5b1e826caf305baa91b81d2aeeea7d49eb17323c6847aecb0043a8f96",
+    "glm-interactive-lmplot": "a52bf48df3762ed316b9c1399346996e5daa58b956ea6ed289fc58b9bc9fda48",
+    "glm-interactive-regplot": "686712a0250d71805472455a407c163799f3bb45877c41fede990e94c9c477f4",
 }
 
 

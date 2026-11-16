@@ -57,9 +57,30 @@ _UNSET_DEFAULTED_FIELDS: frozenset[str] = frozenset(
     {"ticks", "tick_extra", "grid", "labels", "label_flush", "label_overlap", "domain"}
 )
 
-# Fields that exist only in the Python layer and must not be forwarded to
-# the Rust renderer (they have no corresponding key in EncodingSpec.axis.extra).
-_PYTHON_ONLY_FIELDS: frozenset[str] = frozenset({"label_map"})
+
+def validate_label_map(owner: str, value: Any) -> dict[str, str]:
+    """Return the owner's own copy of *value*, raising unless it is a ``{tick_text: display_text}``
+    dict of strings.
+
+    Tick text is text: a key or value that is not a string (``{2: 'two'}``,
+    ``{'b': None}``) can never match a tick or label one, so it is refused
+    where the map is built instead of silently doing nothing at render time.
+    The one shared check for :class:`Axis` and the chart-level ``AxisConfig``, which store the
+    returned copy so a change to the caller's dict afterwards cannot reach the renderer
+    unchecked.
+    """
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"{owner}(label_map=...): expected a dict mapping tick text to display text, "
+            f"got {type(value).__name__}: {value!r}"
+        )
+    for key, display in value.items():
+        if not isinstance(key, str) or not isinstance(display, str):
+            raise ValueError(
+                f"{owner}(label_map=...): keys and values must be strings, got "
+                f"{key!r}: {display!r}; write the key as the tick text, e.g. {{'2': 'two'}}"
+            )
+    return dict(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,10 +178,18 @@ class Axis:
     zindex : int, optional
         Z-index for layering.
     label_map : dict[str, str], optional
-        Mapping from original tick-label text to display text.  Applied in the
-        Python layer at render time by renaming the corresponding column values
-        in the DataFrame before Rust computes the scale domain.  Keys not
-        present in the data are silently ignored.
+        Mapping from tick text to display text.  The renderer replaces a tick's
+        text with the display text when the tick's formatted text (after
+        ``label_format``) equals a key, so it works on categorical, numeric and
+        temporal axes alike.  It relabels tick text only: the data, the scale
+        domain, ``sort=``, ``domain=``, filters, tooltips, legends and
+        annotation categories keep the data values, so a display label is not a
+        category.  Keys that match no tick are ignored.  Keys and values must be
+        strings (``{"2": "two"}``, not ``{2: "two"}``): a non-string key or value
+        raises ``ValueError`` and a map that is not a dict raises ``TypeError``,
+        both at construction.  The ``Axis`` keeps its own copy of the dict.  Like
+        every other ``Axis`` option, the map reaches the panel axis from the layer
+        that establishes the channel.
 
         Example — rename categorical axis labels::
 
@@ -248,9 +277,11 @@ class Axis:
 
         if not is_unspecified(self.label_overlap):
             validate_label_overlap("Axis.label_overlap", self.label_overlap)  # type: ignore[arg-type]
+        if self.label_map is not None:
+            object.__setattr__(self, "label_map", validate_label_map("Axis", self.label_map))
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for the renderer, omitting only unset/None/Python-only fields.
+        """Serialize to dict for the renderer, omitting only unset/None fields.
 
         ``ticks``/``tick_extra``/``grid``/``labels``/``label_flush``/
         ``label_overlap``/``domain`` follow the two-way omit-vs-explicit
@@ -282,9 +313,6 @@ class Axis:
         )
         result: dict[str, Any] = {}
         for f in fields(self):
-            # Python-only fields have no Rust counterpart — never forward them.
-            if f.name in _PYTHON_ONLY_FIELDS:
-                continue
             if f.name == "title":
                 # Three-way title contract (mirrors base.py and prepare.rs):
                 #   _UNSET  → omit key; Rust falls back to field name (default)

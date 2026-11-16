@@ -146,7 +146,7 @@ class TestAxisConfigBaselineProperties:
             "nice=None, zero=None, label_padding=None, grid_opacity=None, orient=None, "
             "translate=None, min_band=None, max_band=None, tick_extra=None, "
             "tick_min_step=None, title_orient=None, zindex=None, labels=None, "
-            "ticks=None, title=_UNSET, offset=None, label_flush=None)"
+            "ticks=None, title=_UNSET, offset=None, label_flush=None, label_map=None)"
         )
 
     def test_eq(self) -> None:

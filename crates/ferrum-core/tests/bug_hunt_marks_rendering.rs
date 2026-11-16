@@ -437,6 +437,7 @@ mod tests {
                 baseline: TextBaseline::Alphabetic,
                 opacity: 1.0,
             },
+            tick_axis: None,
         };
         let json = serde_json::to_string(&node).unwrap();
         let back: SceneNode = serde_json::from_str(&json).unwrap();

@@ -728,6 +728,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
                 ctx.mark_style.text.baseline.as_deref(),
                 row_opacity,
             ),
+            tick_axis: None,
         }, i);
         anchors.push((px, py));
     }

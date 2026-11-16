@@ -218,6 +218,7 @@ pub fn build(ctx: &DrawCtx<'_>) -> Result<MarkBuildResult, RenderError> {
                 ctx.theme.typography.font_family.as_str(),
                 ctx.mark_style.text.font_weight.as_deref(), None, ctx.mark_style.paint.opacity,
             ),
+            tick_axis: None,
         };
 
         if draw_leader {

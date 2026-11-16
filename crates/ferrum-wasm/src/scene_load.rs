@@ -200,6 +200,17 @@ pub struct TextElementData {
     /// rescale affine by explicit slot instead of the column-frequency
     /// heuristic it replaces.
     pub slot: Option<usize>,
+    /// The physical axis whose tick this text labels, mirrored verbatim from
+    /// `SceneNode::Text::tick_axis`. `None` for every other text. The zoomed
+    /// text path (`text_json.rs`) recognises tick labels by this tag, never by
+    /// matching their text.
+    pub tick_axis: Option<ferrum_scene::TickAxis>,
+    /// The index of the scene panel whose node lists this text was collected
+    /// from: `Some` for everything collected inside the panel loop (axes,
+    /// strip titles, annotations, mark labels), `None` for the scene title,
+    /// legend and decorations. A tick label belongs to the panel it was
+    /// collected from, so one panel's zoom never moves another panel's ticks.
+    pub panel: Option<usize>,
     /// The mark batch this text draws in, when that batch blends
     /// additively: the page's text overlay draws each such batch in its own
     /// screen-blended layer. `None` for chrome text and for the text of a
@@ -520,6 +531,9 @@ pub struct SceneCollector {
     /// panel's plot area, so `render_frame` can scissor each panel's mesh
     /// draw independently.
     pub mark_mesh_panels: Vec<MarkMeshPanel>,
+    /// The scene panel the nodes being collected belong to (`None` outside
+    /// the panel loop); stamped onto every text element a `collect_*` call adds.
+    current_panel: Option<usize>,
     /// Snapshot of `circles.len()` at the last `emit` call.
     prev_c: usize,
     /// Snapshot of `rects.len()` at the last `emit` call.
@@ -545,8 +559,23 @@ impl SceneCollector {
             raws: Vec::new(),
             draw_commands: Vec::new(),
             mark_mesh_panels: Vec::new(),
+            current_panel: None,
             prev_c: 0,
             prev_r: 0,
+        }
+    }
+
+    /// Set the scene panel the following `collect_*` calls belong to
+    /// (`None` for scene-level nodes: title, legend, decorations).
+    pub fn set_panel(&mut self, panel: Option<usize>) {
+        self.current_panel = panel;
+    }
+
+    /// Stamp the current panel onto the text elements added since `first_text`.
+    fn stamp_panel(&mut self, first_text: usize) {
+        let panel = self.current_panel;
+        for text in &mut self.texts[first_text..] {
+            text.panel = panel;
         }
     }
 
@@ -559,6 +588,7 @@ impl SceneCollector {
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
     ) -> Result<(), TaperError> {
+        let first_text = self.texts.len();
         collect_nodes(
             nodes,
             &mut self.circles,
@@ -570,6 +600,7 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         )?;
+        self.stamp_panel(first_text);
         self.emit(None);
         Ok(())
     }
@@ -604,6 +635,7 @@ impl SceneCollector {
         let blend_batch = target
             .additive
             .then_some(BlendedBatch { panel_id: target.panel_id, batch_idx: target.batch_idx });
+        self.stamp_panel(first_text);
         for text in &mut self.texts[first_text..] {
             text.blend_batch = blend_batch;
         }
@@ -625,6 +657,7 @@ impl SceneCollector {
         batch_cap: Option<StrokeCap>,
         batch_join: Option<StrokeJoin>,
     ) -> Result<(), TaperError> {
+        let first_text = self.texts.len();
         collect_nodes(
             nodes,
             &mut self.circles,
@@ -636,6 +669,7 @@ impl SceneCollector {
             batch_cap,
             batch_join,
         )?;
+        self.stamp_panel(first_text);
         // Emit draw commands for any Circle/Rect annotation nodes so they
         // appear at the correct z-order (after mark batches).
         self.emit(None);
@@ -902,6 +936,7 @@ fn transform_node(node: &SceneNode, ls: &LayoutScale) -> SceneNode {
             content,
             style,
             slot,
+            tick_axis,
         } => {
             let (x, y) = ls.apply(*x, *y);
             SceneNode::Text {
@@ -910,6 +945,7 @@ fn transform_node(node: &SceneNode, ls: &LayoutScale) -> SceneNode {
                 content: content.clone(),
                 style: transform_text_style(style, mag),
                 slot: *slot,
+                tick_axis: *tick_axis,
             }
         }
         SceneNode::Image { x, y, w, h, data } => {
@@ -1149,6 +1185,7 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<
         // (every panel today) `maybe_transform_nodes`/`transform_rect` are
         // no-ops, so nothing changes for existing scenes.
         let ls = &panel.layout_scale;
+        collector.set_panel(Some(panel_idx));
 
         // Grid: non-mark → static mesh. Snap Line nodes to pixel centers to
         // avoid sub-pixel aliasing in the GPU rasterizer (the SVG renderer
@@ -1218,6 +1255,8 @@ pub fn load_scene_with_packed(scene: &SceneGraph, packed_data: &[u8]) -> Result<
         // marks in WASM (matching SVG painter order).
         collector.collect_annotation(&maybe_transform_nodes(&panel.annotations, ls), None, None)?;
     }
+
+    collector.set_panel(None);
 
     // Legend, decorations: non-mark → static mesh
     collector.collect_static(&scene.legend, None, None)?;
@@ -1876,6 +1915,7 @@ fn collect_nodes(
                 content,
                 style,
                 slot,
+                tick_axis,
             } => {
                 texts.push(TextElementData {
                     x: *x,
@@ -1883,6 +1923,8 @@ fn collect_nodes(
                     content: content.clone(),
                     style: style.clone(),
                     slot: *slot,
+                    tick_axis: *tick_axis,
+                    panel: None,
                     blend_batch: None,
                 });
             }
@@ -3774,12 +3816,47 @@ mod tests {
         };
         let cleared = TextStyle { color: None, ..painted.clone() };
         let nodes = vec![
-            SceneNode::Text { x: 1.0, y: 1.0, content: "cleared".into(), style: cleared, slot: None },
-            SceneNode::Text { x: 2.0, y: 2.0, content: "painted".into(), style: painted, slot: None },
+            SceneNode::Text { x: 1.0, y: 1.0, content: "cleared".into(), style: cleared, slot: None, tick_axis: None, },
+            SceneNode::Text { x: 2.0, y: 2.0, content: "painted".into(), style: painted, slot: None, tick_axis: None, },
         ];
         let data = load_scene(&make_scene_with_nodes(MarkBatchKind::Text, nodes)).unwrap();
         let contents: Vec<&str> = data.text_elements.iter().map(|t| t.content.as_str()).collect();
         assert_eq!(contents, ["painted"], "a cleared text node must emit no overlay element");
+    }
+
+    /// Every text element records the tick tag it carried and the scene panel
+    /// whose node list it was collected from (`None` for scene-level text), so
+    /// the zoomed-text path can recognise a panel's tick labels structurally.
+    #[test]
+    fn a_tick_labels_axis_tag_and_panel_reach_its_text_element() {
+        use ferrum_scene::{FontWeight, TextAnchor, TextBaseline, TextStyle, TickAxis};
+        let style = TextStyle {
+            font_size: 12.0,
+            font_weight: FontWeight::Normal,
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Alphabetic,
+            angle: 0.0,
+            color: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            opacity: 1.0,
+            font_family: "sans-serif".to_string(),
+        };
+        let text = |content: &str, tick_axis| SceneNode::Text {
+            x: 1.0,
+            y: 1.0,
+            content: content.into(),
+            style: style.clone(),
+            slot: None,
+            tick_axis,
+        };
+        let mut scene = make_scene_with_nodes(MarkBatchKind::Text, vec![text("mark label", None)]);
+        scene.title = vec![text("title", None)];
+        scene.panels[0].axes = vec![text("tick", Some(TickAxis::X)), text("axis title", None)];
+        let data = load_scene(&scene).unwrap();
+        let find = |c: &str| data.text_elements.iter().find(|t| t.content == c).unwrap();
+        assert_eq!((find("title").tick_axis, find("title").panel), (None, None));
+        assert_eq!((find("tick").tick_axis, find("tick").panel), (Some(TickAxis::X), Some(0)));
+        assert_eq!((find("axis title").tick_axis, find("axis title").panel), (None, Some(0)));
+        assert_eq!((find("mark label").tick_axis, find("mark label").panel), (None, Some(0)));
     }
 
     #[test]
@@ -3807,6 +3884,7 @@ mod tests {
                 content: "Hello".to_string(),
                 style: style.clone(),
                 slot: None,
+                tick_axis: None,
             },
             SceneNode::Text {
                 x: 200.0,
@@ -3814,6 +3892,7 @@ mod tests {
                 content: "World".to_string(),
                 style,
                 slot: None,
+                tick_axis: None,
             },
         ];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
@@ -3852,6 +3931,7 @@ mod tests {
             content: "Label".to_string(),
             style,
             slot: None,
+            tick_axis: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
         let data = load_scene(&scene).unwrap();
@@ -3899,6 +3979,7 @@ mod tests {
             content: "R2".to_string(),
             style,
             slot: Some(2),
+            tick_axis: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
 
@@ -3946,6 +4027,7 @@ mod tests {
             content: "untagged".to_string(),
             style,
             slot: None,
+            tick_axis: None,
         }];
         let scene = make_scene_with_nodes(MarkBatchKind::Text, nodes);
 
@@ -4071,6 +4153,7 @@ mod tests {
                 opacity: 1.0,
                 font_family: "sans-serif".to_string(),
             },
+            tick_axis: None,
         };
 
         let scene = SceneGraph {
@@ -5721,7 +5804,7 @@ mod tests {
             opacity: 1.0,
             font_family: "sans-serif".to_string(),
         };
-        nodes.push(SceneNode::Text { x: 50.0, y: 50.0, content: "mark text".into(), style, slot: None });
+        nodes.push(SceneNode::Text { x: 50.0, y: 50.0, content: "mark text".into(), style, slot: None, tick_axis: None, });
         let mut scene = make_blend_test_scene();
         scene.panels[0].marks = [BlendMode::Additive, BlendMode::Normal]
             .into_iter()
@@ -5934,6 +6017,7 @@ mod tests {
             content: "Title".to_string(),
             style: text_style,
             slot: None,
+            tick_axis: None,
         };
 
         // Build the scene graph.
@@ -7403,6 +7487,30 @@ mod tests {
         }
     }
 
+    /// A layout-scaled panel's tick label keeps its axis tag (and moves with the scale),
+    /// so a ratio-fitted cell's ticks still follow its zoom.
+    #[test]
+    fn a_layout_scaled_tick_keeps_its_axis_tag() {
+        let ls = gap_fix_layout_scale();
+        for axis in [ferrum_scene::TickAxis::X, ferrum_scene::TickAxis::Y] {
+            let node = SceneNode::Text {
+                x: 5.0,
+                y: 6.0,
+                content: "2".to_string(),
+                style: gap_fix_text_style(12.0, 0.0),
+                slot: None,
+                tick_axis: Some(axis),
+            };
+            match transform_node(&node, &ls) {
+                SceneNode::Text { x, tick_axis, .. } => {
+                    assert_eq!(tick_axis, Some(axis));
+                    assert!((x - 20.0).abs() < 1e-9, "the scaled position still applies, got {x}");
+                }
+                other => panic!("expected Text, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn transform_node_text_scales_position_and_font_size_leaves_angle() {
         let ls = gap_fix_layout_scale();
@@ -7412,6 +7520,7 @@ mod tests {
             content: "hi".to_string(),
             style: gap_fix_text_style(12.0, 45.0),
             slot: Some(1),
+            tick_axis: Some(ferrum_scene::TickAxis::Y),
         };
         match transform_node(&node, &ls) {
             SceneNode::Text {
@@ -7420,7 +7529,9 @@ mod tests {
                 content,
                 style,
                 slot,
+                tick_axis,
             } => {
+                assert_eq!(tick_axis, Some(ferrum_scene::TickAxis::Y), "the tick tag survives the layout scale");
                 assert!((x - 20.0).abs() < 1e-9, "x: got {x}");
                 assert!((y - 43.0).abs() < 1e-9, "y: got {y}");
                 assert_eq!(content, "hi");

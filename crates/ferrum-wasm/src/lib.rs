@@ -1047,7 +1047,6 @@ impl WasmRenderer {
             },
             &loaded.data,
             &loaded.baked_panels,
-            &self.interaction,
             &render::PanelTransformState {
                 zoom_transforms: &self.zoom.transforms,
                 slot_rescales: &self.slot_rescales,

@@ -9697,12 +9697,12 @@ _FIGURE_DIGESTS = {
 
 # The interactive scene each hue figure draws.
 _FIGURE_SCENE_DIGESTS = {
-    "lmplot/hue": "de4baef90f117d8f893cd369c14229890eef23897bf8d9277e5017b80bd169cb",
-    "lmplot/hue-size": "75235c3490d8f87598cfbc19a2cb3835c4bec5c72940cf473f29b05ac40206ef",
-    "lmplot/robust-hue": "9828e396f1cfd7e3e85a42b5352ad38ab06546550e2edf45386fe278e1b3fc40",
-    "lmplot/x_bins-hue": "03446a41b512f2d3eb720bcc9fcbedf2053981cf782f13e21de79a9aaebdd46b",
-    "regplot/hue": "de4baef90f117d8f893cd369c14229890eef23897bf8d9277e5017b80bd169cb",
-    "lmplot/col-hue": "b19963e854966e2b994caf12ffb1dcf215656327697fe8ef2d02c445eddc25be",
+    "lmplot/hue": "5d2a79ea3a8116a993d9ec570a94659e78c2884de7119d57ed33d27f0647de5c",
+    "lmplot/hue-size": "9f534001aab6991c196223923d53bd1d63d35e7def04b96faba80c3fb4da13e9",
+    "lmplot/robust-hue": "6911292b16e03d032642a7d14601f37df21db4fdb8bdb84707dd7ae394ac7aea",
+    "lmplot/x_bins-hue": "3b74aded86848a5c6fe1c7f57fc8e0506f4b29c2d9ee3ca9d48b32468aefd429",
+    "regplot/hue": "5d2a79ea3a8116a993d9ec570a94659e78c2884de7119d57ed33d27f0647de5c",
+    "lmplot/col-hue": "325e42b4fe037305295a602ee5b813bb653cff107263597070207c36a21b6fa4",
 }
 
 
@@ -14963,11 +14963,11 @@ _FACET_PARTIAL_ALL_NULL = pl.DataFrame(
 _FACET_PARTIAL_ALL_NULL_DIGESTS = {
     "lm": (
         "f4c14ebbdcd7a7046f7f7d4c9532b4560141c5aa246bea2d9232d46f7de7f365",
-        "f6c7378bf774c5340dd8d9d638f44c443fd67bffd8217fbd70e40b80cf873963",
+        "37a21ed49e82cd2f51a84eb9484fd09608a2c1a3e8831088b83e29049c045a58",
     ),
     "loess": (
         "40acd92c197104fe9e9681505cb4c339b8347d9a1c3a48e4d626299a5ec5382c",
-        "f47792a3184d842d6bab8946f82794f060793353bb50c21b0c1078dd21b55cd2",
+        "6fe57a8bf041ace6e2cb1adc250e74eaee3d5b3318c59a749f8b08d7b72d80ac",
     ),
 }
 
@@ -15704,21 +15704,21 @@ _REGROUP_CONTROLS: dict[str, tuple[Callable[[], Any], tuple[str, str]]] = {
         lambda: _resid() + P(),
         (
             "fd49e8c120af904fad68873e0c1d3eb12d2bde65dcfdea252367c879f4c941d4",
-            "4da8ed8948135722a0f089a12e5da3a1f7b678fed02660affd81c07049c3463d",
+            "40125e3e02f89d3442d4ab36d4009c1d1a5bf4ee01cbed66f3764c08adb8fe55",
         ),
     ),
     "lmplot+P": (
         lambda: fm.lmplot(df, x="v", y="y") + P(),
         (
             "7947575162b432e08b6c869276319844f89c056c6f928f5cf3d5addc5a0f1144",
-            "1d829d523228086c1f8e271e0f954f6e8df701743ccf794fb6b848cb168be497",
+            "6b4b5ce9e300526a6c248417eb3fddc86024384df6eca55a79ab7428d8562233",
         ),
     ),
     "smooth-tick-pre-attach": (
         lambda: _smooth(color="c").layer(layer("tick")),
         (
             "29f975a0714ba420631e7eb407d53fefd9bf2897aacc0b8b7f71f70074e6d9a4",
-            "c26bdbb2ce0872f8e52e3f744054d630ac4788c6740c5afff51f62ef604e9f78",
+            "b3619eae9c539112b3e0c7fb1a531c16380a0f879e853af52998a9bc0986f569",
         ),
     ),
 }
@@ -15913,7 +15913,7 @@ _PALETTE_CONTROLS: dict[str, Callable[[], Any]] = {
 }
 _PALETTE_CONTROL_DIGESTS = (
     "913791d61cd343decbb2d1ed4b6e28c3d6addbe9146d3f1a48a71c12a817bf1a",
-    "0d475e208cc304ed3c961d67ca592cce613562cde74b7fd27c0dcfc170e1d17a",
+    "01b899365f958ac0c8cef2afbca110b3eafe2150cba27284eeb8d50ac16dcf72",
 )
 
 
@@ -16015,28 +16015,28 @@ _ERROR_CONTROLS: dict[str, tuple[Callable[[], fm.Chart], tuple[str, str]]] = {
         lambda: mk("errorbar", x="g", y="y"),
         (
             "c99631559dec413767c30efe68868c1fdd39a7c4cc9839b585255637a73a297f",
-            "6b6954e6482c6d0c06e31ecfe897f7643f59947caf575f01167b5369fbb2fd95",
+            "511ece4b1d0ed3d2b9ef7a2a5d9c07e0bc74b3ce59034f3aec52ad7925f5204f",
         ),
     ),
     "errorbar/detail-equal-to-x": (
         lambda: mk("errorbar", x="g", y="y", detail="g"),
         (
             "c99631559dec413767c30efe68868c1fdd39a7c4cc9839b585255637a73a297f",
-            "6b6954e6482c6d0c06e31ecfe897f7643f59947caf575f01167b5369fbb2fd95",
+            "511ece4b1d0ed3d2b9ef7a2a5d9c07e0bc74b3ce59034f3aec52ad7925f5204f",
         ),
     ),
     "errorbar/color": (
         lambda: mk("errorbar", x="g", y="y", color="c"),
         (
             "b61ca59f90e91c9b4fa52475b7a14f952922d977307be545f82f4e9c3f61548a",
-            "dffa9265804efc4eedbc9740c2241cc2b50171f9696b85a324f29cb2328e76be",
+            "50f077b37dfa24dcf78896c02e55a19d9a0dee6ad741a5be1f320f444ecbd117",
         ),
     ),
     "errorband": (
         lambda: mk("errorband", x="v", y="y"),
         (
             "3a6f6f9f0abd135801fd7abea060c9d3be24013f00f8ba004b20fe1bf505053d",
-            "53209cdbea9de0af9363149deb1a37bd4941e9e53d81213c34af230557d41363",
+            "c275e42b13d5b8c6768781ed88339310cc3b85f6b26f54ae219b4506d3d3ac05",
         ),
     ),
 }
@@ -16116,15 +16116,15 @@ def test_lmplot_fits_each_method_per_group_of_every_grouping_spelling(method, sp
 _LM_CONTROLS: dict[str, tuple[str, str]] = {
     "logistic": (
         "9d01c587dfe98a80e44bbf2d4ce91e7bebfae318fe20abb53a3b7b816244bec3",
-        "b67775cdcf8daad0354e56d374b0e97b1aacf0fec4cb7fb04286497d4fbbabf6",
+        "1528029cfc8220e2773f35bae71f8c62fd2878f561fb451fb72023044d58b2d1",
     ),
     "glm": (
         "7684275e841b008430028dfcdf05f35e2b044179f5aefeecc95a439535f3a8fa",
-        "fcef1074e4d8fa85f5296edcb618d977455eed4fbdcb527f68c0c1284d0943ac",
+        "759645c8f8166bcd1adc30499e039fbc353a7bca024ff1a73a3af6c943031827",
     ),
     "robust": (
         "137e9e41ef5e22b0ba446e2f4cbd1f78ade7c9ca499da90f24536752747a428d",
-        "19d8fbaa69ad453943ff792d4c8b75c75fd96e02bc2556bb9c371e8259630acb",
+        "0f760982f0a8517f65caa672e749acf43086508d6d39c22335d9af99937867b6",
     ),
 }
 

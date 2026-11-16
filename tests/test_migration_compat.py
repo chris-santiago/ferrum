@@ -4,7 +4,7 @@ B1  – type_ kwarg alias on channel constructors
 B3  – aggregate shorthand auto-infers groupby from sibling non-aggregate fields
 B4  – nice=True on Scale objects serializes to {"nice": true} in spec dict
 F16 – reverse= on positional scales serializes to {"reverse": true} in spec dict
-F17 – Axis(label_map=...) remaps categorical tick labels at render time
+F17 – Axis(label_map=...) relabels tick text at render time
 M5  – annotate_abline(slope, intercept) draws a slope+intercept line
 """
 
@@ -458,11 +458,11 @@ def test_axis_label_map_stored():
     assert ax.label_map == {"a": "Alpha", "b": "Beta"}
 
 
-def test_axis_label_map_not_emitted_to_dict():
-    """label_map is a Python-only field and must not appear in to_dict()."""
+def test_axis_label_map_emitted_to_dict():
+    """label_map crosses to the renderer as an axis key, which relabels the tick text."""
     ax = fm.Axis(label_map={"a": "Alpha"})
     d = ax.to_dict()
-    assert "label_map" not in d
+    assert d == {"label_map": {"a": "Alpha"}}
 
 
 def test_axis_label_map_none_to_dict_unchanged():
@@ -492,7 +492,7 @@ def test_axis_labels_remapping_renders():
 
 
 def test_axis_labels_remapping_partial():
-    """label_map only remaps specified keys; unlisted values pass through unchanged."""
+    """label_map only relabels the specified ticks; unlisted ticks keep their text."""
     df = pl.DataFrame({"cat": ["a", "b", "c"], "val": [1.0, 2.0, 3.0]})
     chart = (
         fm.Chart(df)
@@ -506,8 +506,9 @@ def test_axis_labels_remapping_partial():
     assert "<svg" in svg
     assert "Alpha" in svg
     # b and c should still appear as-is
-    assert "b" in svg
-    assert "c" in svg
+    assert "Beta" not in svg
+    assert ">b</text>" in svg
+    assert ">c</text>" in svg
 
 
 def test_axis_labels_bool_still_works():

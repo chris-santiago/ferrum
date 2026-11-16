@@ -4324,6 +4324,13 @@ pub(crate) fn axis_style_fill_from(
         fill_only_if_none,
     );
     set(&mut o.labels.angle, style.label_angle, fill_only_if_none);
+    // An empty map is "no relabel", so it never claims the slot a later
+    // (chart-level) map may still fill.
+    set(
+        &mut o.labels.display_text,
+        style.label_map.clone().filter(|m| !m.is_empty()),
+        fill_only_if_none,
+    );
     // The `labels.format` slot is owned by the chart-level path only. The
     // per-channel path threads it separately after this merge, so it must stay
     // empty here.
@@ -5182,6 +5189,7 @@ mod axis_style_fill_from_tests {
             label_format: Some(".2f".into()),
             label_format_type: None,
             label_overlap: Some("parity".into()),
+            label_map: Some([("b".to_owned(), "Bee".to_owned())].into()),
             label_flush: Some(true),
             labels: Some(false), // show toggle — NOT an overrides field; must be ignored
             ticks: Some(false),  // show toggle — ignored
@@ -5236,6 +5244,7 @@ mod axis_style_fill_from_tests {
         assert_eq!(o.labels.format.get().spec, None);
         assert_eq!(o.labels.overlap, Some(LabelOverlap::Parity));
         assert_eq!(o.labels.flush, Some(true));
+        assert_eq!(o.labels.display_text, Some([("b".to_owned(), "Bee".to_owned())].into()));
         assert_eq!(o.ticks.extra, Some(true));
         assert_eq!(o.ticks.min_step, Some(0.5));
         assert_eq!(o.ticks.values, Some(vec![0.0, 1.0, 2.0]));
@@ -5256,6 +5265,45 @@ mod axis_style_fill_from_tests {
         assert_eq!(o.placement.max_band, Some(40.0));
         assert_eq!(o.placement.offset, Some(2.0));
         assert_eq!(o.placement.zindex, Some(1));
+    }
+
+    fn map_of(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+    }
+
+    /// A `label_map` lands on the axis's display-text slot on both paths, and an
+    /// empty map writes nothing (it means "no relabel", the same as absent).
+    #[test]
+    fn label_map_lands_on_the_display_text_slot_and_empty_means_none() {
+        let spec = AxisStyleSpec { label_map: Some(map_of(&[("b", "Bee")])), ..Default::default() };
+        for fill_only_if_none in [false, true] {
+            let mut o = AxisStyleOverrides::default();
+            axis_style_fill_from(&mut o, &spec, "x", fill_only_if_none).unwrap();
+            assert_eq!(o.labels.display_text, Some(map_of(&[("b", "Bee")])));
+        }
+        let empty = AxisStyleSpec { label_map: Some(map_of(&[])), ..Default::default() };
+        let mut o = AxisStyleOverrides::default();
+        axis_style_fill_from(&mut o, &empty, "x", false).unwrap();
+        assert_eq!(o.labels.display_text, None);
+    }
+
+    /// The per-channel map wins over a chart-level one as a whole: the maps are
+    /// not merged key by key.
+    #[test]
+    fn a_chart_level_label_map_never_overrides_a_per_channel_one() {
+        let channel = AxisStyleSpec { label_map: Some(map_of(&[("b", "Bee")])), ..Default::default() };
+        let chart = AxisStyleSpec {
+            label_map: Some(map_of(&[("b", "Chart"), ("c", "See")])),
+            ..Default::default()
+        };
+        let mut o = AxisStyleOverrides::default();
+        axis_style_fill_from(&mut o, &channel, "x", false).unwrap();
+        axis_style_fill_from(&mut o, &chart, "x", true).unwrap();
+        assert_eq!(o.labels.display_text, Some(map_of(&[("b", "Bee")])));
+
+        let mut unset = AxisStyleOverrides::default();
+        axis_style_fill_from(&mut unset, &chart, "x", true).unwrap();
+        assert_eq!(unset.labels.display_text, Some(map_of(&[("b", "Chart"), ("c", "See")])));
     }
 
     /// Chart-level fill (`fill_only_if_none = true`) fills only `None` slots
@@ -5288,6 +5336,7 @@ mod axis_style_fill_from_tests {
                 font_size: Some(94.0),
                 flush: Some(false),
                 overlap: Some(LabelOverlap::Greedy),
+                display_text: Some([("b".to_owned(), "Pre".to_owned())].into()),
                 show: Some(true),
             },
             title: crate::layout::axis::AxisTitleOverrides {

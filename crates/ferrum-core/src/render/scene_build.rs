@@ -2791,6 +2791,7 @@ fn build_title(
             None,
             1.0,
         ),
+        tick_axis: None,
     });
     if let (Some(subtitle), Some(sy)) = (&title.subtitle, title.subtitle_y) {
         let resolved_sub_color = title_spec
@@ -2817,6 +2818,7 @@ fn build_title(
                 None,
                 1.0,
             ),
+            tick_axis: None,
         });
     }
 }
@@ -3471,6 +3473,7 @@ fn build_polar_axes(
                     None,
                     1.0,
                 ),
+                tick_axis: None,
             });
         }
     }
@@ -4629,6 +4632,67 @@ mod tests {
             fill_opacity: 1.0,
             angle: 0.0,
         }
+    }
+
+    /// Polar axis labels are a separate Text producer from `build_axis` and are
+    /// never tick-tagged: they do not follow a Cartesian zoom, even when one
+    /// reads the same text as a Cartesian ladder label. The Cartesian control
+    /// proves the same text IS tagged there, so the polar `None` is the
+    /// producer's doing, not an absent tick.
+    #[test]
+    fn polar_axis_labels_carry_no_tick_axis_tag() {
+        pyo3::Python::initialize();
+        use arrow::array::Float64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+        let spec = |coord: Option<serde_json::Value>| -> ChartSpec {
+            let mut spec = serde_json::json!({
+                "data": {"kind": "named", "name": "default"},
+                "mark": "point",
+                "encoding": {"x": {"field": "x"}, "y": {"field": "y"}},
+            });
+            if let Some(coord) = coord {
+                spec["coord"] = coord;
+            }
+            serde_json::from_value(spec).expect("the spec deserializes")
+        };
+        let axis_texts = |scene: &ferrum_scene::SceneGraph| -> Vec<(String, Option<ferrum_scene::TickAxis>)> {
+            scene
+                .panels
+                .iter()
+                .flat_map(|p| p.axes.iter())
+                .filter_map(|n| match n {
+                    SceneNode::Text { content, tick_axis, .. } => Some((content.clone(), *tick_axis)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cartesian = axis_texts(&try_build_scene_for(&spec(None), &batch).expect("cartesian renders"));
+        let polar = axis_texts(
+            &try_build_scene_for(&spec(Some(serde_json::json!({"kind": "polar"}))), &batch).expect("polar renders"),
+        );
+        let tagged: Vec<&String> = cartesian.iter().filter(|(_, t)| t.is_some()).map(|(c, _)| c).collect();
+        assert!(!tagged.is_empty(), "fixture: the Cartesian control tags its ticks");
+        assert!(!polar.is_empty(), "fixture: the polar scene draws axis labels");
+        assert!(
+            polar.iter().any(|(c, _)| tagged.contains(&c)),
+            "fixture: a polar label reads the same as a tagged Cartesian label: {polar:?} vs {tagged:?}"
+        );
+        assert!(
+            polar.iter().all(|(_, t)| t.is_none()),
+            "polar labels must stay untagged: {polar:?}"
+        );
     }
 
     /// B5: Path nodes inside apply_polar_node_transform must have their

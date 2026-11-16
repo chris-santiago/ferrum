@@ -893,6 +893,7 @@ fn build_one(
                     opacity: 1.0,
                     font_family: "Inter, system-ui, sans-serif".to_string(),
                 },
+                tick_axis: None,
             });
         }
         AnnotationSpec::Arrow {
@@ -1253,6 +1254,7 @@ fn span_label_node(
             opacity: 1.0,
             font_family: "Inter, system-ui, sans-serif".to_string(),
         },
+        tick_axis: None,
     })
 }
 
@@ -1341,6 +1343,7 @@ fn emit_bracket(
                 opacity: 1.0,
                 font_family: "Inter, system-ui, sans-serif".to_string(),
             },
+            tick_axis: None,
         });
     }
 }
@@ -1439,6 +1442,7 @@ fn emit_callout(
             opacity: 1.0,
             font_family: "Inter, system-ui, sans-serif".to_string(),
         },
+        tick_axis: None,
     });
     Ok(())
 }

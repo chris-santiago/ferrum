@@ -152,9 +152,9 @@ def test_a_zero_row_leaf_inside_a_nested_concat_draws_and_warns_once():
 # a filter-emptied leaf and a LayerChart keep the bytes they had: digests measured on the
 # build before the lowering change
 _FILTER_EMPTIED_STATIC = "c1bae2df847ab9dd2447cf566602f44fc7aeea56de1f5160b7927d0213a01458"
-_FILTER_EMPTIED_INTERACTIVE = "34e0fb92ba464966570384629d159384015f5ae8ee147a4f3d61894983bb7d1c"
+_FILTER_EMPTIED_INTERACTIVE = "ea7b6960e6283b35c68e1f2c0c151817f3bce24000535220c3dd29b817841510"
 _LAYER_STATIC = "4f4034c67a84a324c58c53764db3e6adc3aa9475310c7d89c0abd166f2a84d5e"
-_LAYER_INTERACTIVE = "d00b1c2234f8704778441b0a66f9b3fbb6cbd9ac3ddb0fb3260ace641196da62"
+_LAYER_INTERACTIVE = "257a0650795045407ac7fd7c46827568abbe8e35126923d4cdae6c61f1fcaa6e"
 
 
 def test_a_filter_emptied_leaf_beside_a_populated_leaf_keeps_its_bytes():

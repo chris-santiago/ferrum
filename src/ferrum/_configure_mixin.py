@@ -169,6 +169,7 @@ class ConfigureMixin:
         title: "TitleParam" = _UNSET,
         offset: "float | None" = None,
         label_flush: "bool | None" = None,
+        label_map: "dict[str, str] | None" = None,
         # Deprecated aliases — accepted with a DeprecationWarning.
         min_extent: object = _MISSING,
         max_extent: object = _MISSING,
@@ -265,6 +266,10 @@ class ConfigureMixin:
         label_flush : bool, optional
             Align the first and last tick labels flush with the axis ends
             instead of letting them overhang the plot bounds.
+        label_map : dict[str, str], optional
+            Mapping from tick text to display text, relabelling the tick text
+            of both axes (see :attr:`ferrum.axis.Axis.label_map`). A
+            per-channel ``fm.Axis(label_map=...)`` wins over this.
 
         Returns
         -------
@@ -344,6 +349,7 @@ class ConfigureMixin:
             title=title,
             offset=offset,
             label_flush=label_flush,
+            label_map=label_map,
         )
         return self._append_configure(Configure(axis=cfg))
 

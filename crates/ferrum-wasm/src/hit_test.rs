@@ -1731,6 +1731,7 @@ mod bug_hunt_tests {
             content: "hello".into(),
             slot: None,
             style: text_style(12.0),
+            tick_axis: None,
         }];
         // Click within font_size radius of anchor — should hit.
         assert!(
@@ -1752,6 +1753,7 @@ mod bug_hunt_tests {
             content: "label".into(),
             slot: None,
             style: text_style(16.0),
+            tick_axis: None,
         }];
         assert!(
             hit_test_texts(&nodes, 50.0, 50.0).is_some(),
@@ -1802,6 +1804,7 @@ mod bug_hunt_tests {
                 content: "label".into(),
                 slot: None,
                 style: text_style(14.0),
+                tick_axis: None,
             }],
             data_indices: Some(vec![0]),
             ..MarkBatch::default()
@@ -2515,6 +2518,7 @@ mod tests {
                 content: "label-node".into(),
                 slot: None,
                 style: text_style_small(),
+                tick_axis: None,
             }],
             data_indices: Some(vec![0]),
             blend: ferrum_scene::BlendMode::Normal,

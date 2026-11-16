@@ -331,6 +331,14 @@ pub struct AxisStyleSpec {
     pub label_format_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_overlap: Option<String>,
+    /// Display text for tick labels: a tick whose formatted text (after
+    /// `label_format`) equals a key draws the value instead. Ordered by key so
+    /// serialization is byte-deterministic. Tick text only: data, scale
+    /// domains and every other reference to a category keep the data value.
+    /// An empty map means no relabel. Consumed by `AxisInput::display_labels`
+    /// (`layout/axis.rs`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_map: Option<std::collections::BTreeMap<String, String>>,
     /// Flush the first/last rendered tick label at the axis boundary.
     /// Consumed by `render/marks/axis.rs`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -840,6 +848,7 @@ pub(crate) const AXIS_STYLE_CANONICAL_KEYS: &[&str] = &[
     "label_format",
     "label_format_type",
     "label_overlap",
+    "label_map",
     "label_flush",
     "labels",
     "ticks",
@@ -1631,6 +1640,36 @@ mod tests {
         );
         let good: Result<AxisStyleSpec, _> = serde_json::from_str(r##"{"grid_color":"#f00"}"##);
         assert!(good.is_ok());
+    }
+
+    #[test]
+    fn axis_style_label_map_parses_as_an_ordered_string_map() {
+        let s: AxisStyleSpec =
+            serde_json::from_str(r#"{"label_map":{"b":"Bee","a":"Ay"}}"#).unwrap();
+        let map = s.label_map.as_ref().expect("label_map parsed");
+        assert_eq!(
+            map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>(),
+            [("a", "Ay"), ("b", "Bee")],
+            "the map is ordered by key so serialization is byte-deterministic"
+        );
+        assert_eq!(
+            serde_json::to_string(&s).unwrap(),
+            r#"{"label_map":{"a":"Ay","b":"Bee"}}"#
+        );
+    }
+
+    #[test]
+    fn axis_style_without_a_label_map_serializes_no_key() {
+        let s: AxisStyleSpec = serde_json::from_str(r#"{"title":"T"}"#).unwrap();
+        assert_eq!(s.label_map, None);
+        assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"title":"T"}"#);
+    }
+
+    #[test]
+    fn axis_style_label_map_refuses_a_non_string_value() {
+        for bad in [r#"{"label_map":{"b":3}}"#, r#"{"label_map":{"b":null}}"#, r#"{"label_map":["b"]}"#] {
+            assert!(serde_json::from_str::<AxisStyleSpec>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

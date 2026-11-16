@@ -849,7 +849,6 @@ pub(crate) fn upload_transform_and_render(
     gpu_resources: &GpuResources,
     scene_data: &SceneData,
     scene_panels: &[ferrum_scene::Panel],
-    interaction: &ferrum_scene::InteractionConfig,
     transforms: &PanelTransformState,
     panel_id: usize,
 ) -> Result<String, crate::error::WasmRenderError> {
@@ -912,7 +911,6 @@ pub(crate) fn upload_transform_and_render(
         .map(|p| (p.plot_area.x, p.plot_area.y, p.plot_area.w, p.plot_area.h));
     let text_json = crate::text_json::build_zoomed_text_json(
         &scene_data.text_elements,
-        interaction,
         panel_id,
         &transform,
         &secondary_affines,

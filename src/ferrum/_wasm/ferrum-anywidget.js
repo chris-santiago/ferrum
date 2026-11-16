@@ -123,10 +123,10 @@ function _placeTextSvg(svgEl, texts) {
 // unblended run: each blended batch is one run, keyed `panel:batch`, and the
 // unblended text before it is a run keyed `before:panel:batch`.
 //
-// A batch's blended text is usually contiguous, but zoom's tick-coincidence
-// heuristic (build_zoomed_text_json) can re-emit one of a batch's labels as
-// an unblended tick label mid-batch, splitting one batch into two non-adjacent
-// blended runs that would otherwise share the same `panel:batch` key. Each
+// A batch's blended text is usually contiguous, but any unblended text
+// emitted between a batch's labels (a tick label the zoom path re-emitted
+// without the blend tag) splits one batch into two non-adjacent blended runs
+// that would otherwise share the same `panel:batch` key. Each
 // base key is suffixed with an occurrence count past the first so every run
 // gets a unique key — two runs sharing a key would make `_placeTextRuns`
 // reuse one DOM element for both, and the second join would overwrite the

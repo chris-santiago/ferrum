@@ -2,7 +2,7 @@
 
 use crate::layout::{AxisLayout, AxisOrient, Rect, TextAnchor, ThemeInputs};
 use crate::render::draw::{to_scene_stroke, to_scene_text_style, ClearablePaint};
-use ferrum_scene::SceneNode;
+use ferrum_scene::{SceneNode, TickAxis};
 
 /// An axis's scene nodes, split by what positions them.
 ///
@@ -348,6 +348,10 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
         if axis.show_labels && !tick.culled {
             let lines: Vec<&str> = tick.label.split('\n').collect();
             let horizontal = matches!(axis.orient, AxisOrient::Bottom | AxisOrient::Top);
+            // The physical axis the label sits on, from this axis's own orient
+            // (the same fact `placed_along` carries), so a flipped chart's
+            // x-channel labels on a left axis are tagged `Y`.
+            let physical_axis = if horizontal { TickAxis::X } else { TickAxis::Y };
             if lines.len() == 1 || !horizontal {
                 // Single-line label, or a vertical axis (no multi-line for those).
                 nodes.push(AxisTickNode {
@@ -366,6 +370,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                             None,
                             1.0,
                         ),
+                        tick_axis: Some(physical_axis),
                     },
                     anchor: tick.position,
                 });
@@ -400,6 +405,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                                 None,
                                 1.0,
                             ),
+                            tick_axis: Some(physical_axis),
                         },
                         anchor: tick.position,
                     });
@@ -434,6 +440,7 @@ pub fn build_axis(axis: &AxisLayout, theme: &ThemeInputs, tick_slot: Option<usiz
                 None,
                 1.0,
             ),
+            tick_axis: None,
         }
     });
 
@@ -1047,6 +1054,67 @@ mod tests {
             assert_eq!(*slot, None, "axis title must never carry a slot tag");
         } else {
             panic!("expected title Text node");
+        }
+    }
+
+    /// Every tick label carries the PHYSICAL axis it sits on (horizontal
+    /// axes are `X`, vertical ones `Y`, whatever channel they show, so a
+    /// flipped chart's x labels on a left axis are `Y`), a multi-line label
+    /// tags each of its lines, and the title stays untagged.
+    #[test]
+    fn build_axis_tags_every_tick_label_with_its_physical_axis_and_never_the_title() {
+        let layout = |orient: AxisOrient, label: &str| AxisLayout {
+            orient,
+            panel_index: 0,
+            axis_line: Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 },
+            ticks: vec![major_tick(25.0, label)],
+            minor_ticks: vec![],
+            title: Some(AxisTitleLayout { text: "title".into(), anchor_x: 5.0, anchor_y: 5.0, angle: 0.0 }),
+            tick_size: None,
+            show_labels: true,
+            show_ticks: true,
+            show_domain: true,
+            show_grid: false,
+            title_font_size: None,
+            title_color_rgba: None,
+            label_padding: None,
+            label_color_rgba: None,
+            label_font_size: None,
+            grid_color_rgba: None,
+            grid_dash: None,
+            grid_width: None,
+            domain_color_rgba: None,
+            domain_width: None,
+            grid_opacity: None,
+            translate: None,
+            zindex: None,
+            offset: None,
+            label_flush: None,
+        };
+        let theme = ThemeInputs::default();
+        for (orient, want, label) in [
+            (AxisOrient::Bottom, TickAxis::X, "a"),
+            (AxisOrient::Top, TickAxis::X, "a"),
+            (AxisOrient::Left, TickAxis::Y, "a"),
+            (AxisOrient::Right, TickAxis::Y, "a"),
+            (AxisOrient::Bottom, TickAxis::X, "two\nlines"),
+            (AxisOrient::Top, TickAxis::X, "two\nlines"),
+        ] {
+            let nodes = build_axis(&layout(orient, label), &theme, None).into_nodes();
+            let tags: Vec<(String, Option<TickAxis>)> = nodes
+                .iter()
+                .filter_map(|n| match n {
+                    SceneNode::Text { content, tick_axis, .. } => Some((content.clone(), *tick_axis)),
+                    _ => None,
+                })
+                .collect();
+            let (title, ticks) = tags.split_last().expect("title and labels");
+            assert_eq!(title, &("title".to_string(), None), "{orient:?}: the title is not a tick");
+            assert!(!ticks.is_empty(), "{orient:?}: fixture draws a label");
+            assert!(
+                ticks.iter().all(|(_, t)| *t == Some(want)),
+                "{orient:?} {label:?}: labels must be tagged {want:?}, got {ticks:?}"
+            );
         }
     }
 

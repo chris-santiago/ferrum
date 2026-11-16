@@ -411,6 +411,10 @@
     "honored": true,
     "reason": "chart-level: AxisConfigSpec::effective_label_format_type() -> apply_axis_config_to_axis_input -> AxisStyleOverrides.labels.format.format_type, read by apply_label_format_to_axis (render/config_apply/mod.rs, in the resync_ticks_after_axis_merge tier) to pick chrono-strftime vs d3-numeric formatting, for axis/axis_x/axis_y; disposed separately for axis_y2 \u2014 see AxisConfigSpec.axis_y2.label_format_type. Per-channel fm.Axis(label_format_type=) is honored separately via resolve_axis_label_format/apply_axis_format_or_thread (unchanged by Task 4). Closes D8's chart-level format_type gap (F-L07-05): configure_axis(label_format=\"date_iso\") now renders real dates instead of misparsing the resolved strftime pattern as a d3 numeric spec."
   },
+  "AxisStyleSpec.label_map": {
+    "honored": true,
+    "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.display_text (an empty map writes nothing; the per-channel map wins whole over a chart-level one), read only by AxisInput::display_labels (layout/axis.rs), which measurement, the collision cascade, the y overlap policy and tick emission all go through; applies to the formatted tick text on categorical, numeric and temporal axes, for axis/axis_x/axis_y/axis_y2"
+  },
   "AxisStyleSpec.label_overlap": {
     "honored": true,
     "reason": "axis_style_fill_from -> AxisStyleOverrides.labels.overlap, consumed by layout_x_axis's collision cascade AND, as of Task 8 (D12, spec \u00a74.9), by layout_y_axis via layout::axis::resolve_y_overlap \u2014 the y transpose of the same four LabelOverlap primitives, reading the same policy object. `None` still means 'no policy' on y (byte-identical), which is why Greedy and None differ there and not on x."
@@ -737,7 +741,7 @@
   },
   "StructuralSpec.BreakAxis.axis": {
     "honored": true,
-    "reason": "render/scene_build.rs::build_panel_breaks's BreakAxis arm, selects which resolved scale (x or y) apply_break_to_scale remaps"
+    "reason": "render/scene_build.rs::merge_break_specs exchanges the caller's axis once under the caller's flip (drawn_break_axis), and the merged break's drawn axis selects which resolved scale (x or y) build_panel_breaks hands to apply_break_to_scale"
   },
   "StructuralSpec.BreakAxis.break_size": {
     "honored": true,

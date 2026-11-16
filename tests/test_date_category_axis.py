@@ -1420,21 +1420,21 @@ def _digest16(drawn: Any) -> str:
 # Measured on the v0.25.0 release build (its python and extension, PYTHONPATH on a v0.25.0 copy).
 _THIRD_AT_V025: dict[tuple[str, str, str], tuple] = {
     ("duration", "+", "static"): ("230f8a2223a2e55e", ()),
-    ("duration", "+", "interactive"): ("7729831c518bd515", ()),
+    ("duration", "+", "interactive"): ("470bc5bdb1ce39f2", ()),
     ("duration", "Chart.layer", "static"): ("230f8a2223a2e55e", ()),
-    ("duration", "Chart.layer", "interactive"): ("7729831c518bd515", ()),
+    ("duration", "Chart.layer", "interactive"): ("470bc5bdb1ce39f2", ()),
     ("duration", "fm.layer", "static"): ("c802dcfc4754ef24", ()),
-    ("duration", "fm.layer", "interactive"): ("7729831c518bd515", ()),
+    ("duration", "fm.layer", "interactive"): ("470bc5bdb1ce39f2", ()),
     ("duration", "LayerChart", "static"): ("c802dcfc4754ef24", ()),
-    ("duration", "LayerChart", "interactive"): ("7729831c518bd515", ()),
+    ("duration", "LayerChart", "interactive"): ("470bc5bdb1ce39f2", ()),
     ("collision", "+", "static"): ("230f8a2223a2e55e", ()),
-    ("collision", "+", "interactive"): ("7729831c518bd515", ()),
+    ("collision", "+", "interactive"): ("470bc5bdb1ce39f2", ()),
     ("collision", "Chart.layer", "static"): ("230f8a2223a2e55e", ()),
-    ("collision", "Chart.layer", "interactive"): ("7729831c518bd515", ()),
+    ("collision", "Chart.layer", "interactive"): ("470bc5bdb1ce39f2", ()),
     ("collision", "fm.layer", "static"): ("95da813b9a805a6f", ()),
-    ("collision", "fm.layer", "interactive"): ("7729831c518bd515", ()),
+    ("collision", "fm.layer", "interactive"): ("470bc5bdb1ce39f2", ()),
     ("collision", "LayerChart", "static"): ("95da813b9a805a6f", ()),
-    ("collision", "LayerChart", "interactive"): ("7729831c518bd515", ()),
+    ("collision", "LayerChart", "interactive"): ("470bc5bdb1ce39f2", ()),
 }
 
 

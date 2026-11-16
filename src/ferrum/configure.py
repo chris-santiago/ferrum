@@ -17,7 +17,7 @@ from ferrum._validate import (
     coerce_finite_real,
     coerce_pixel_value,
 )
-from ferrum.axis import validate_label_overlap
+from ferrum.axis import validate_label_map, validate_label_overlap
 from ferrum.legend import validate_legend_direction, validate_legend_orient
 
 
@@ -260,6 +260,12 @@ class AxisConfig:
     label_flush : bool, optional
         Align the first and last tick labels flush with the axis ends
         instead of letting them overhang the plot bounds.
+    label_map : dict[str, str], optional
+        Mapping from tick text to display text, with the meaning of
+        :attr:`ferrum.axis.Axis.label_map`; a per-channel ``Axis(label_map=...)``
+        wins over this (the whole map, never key by key). Keys and values must be
+        strings: a non-string key or value raises ``ValueError`` and a map that is
+        not a dict raises ``TypeError``, both at construction.
     """
 
     x: bool = True
@@ -303,6 +309,7 @@ class AxisConfig:
     title: TitleParam = _UNSET
     offset: float | None = None
     label_flush: bool | None = None
+    label_map: dict[str, str] | None = None
     # Deprecated aliases — accepted with a DeprecationWarning, resolved in
     # __post_init__ into min_band/max_band. InitVar so the generated __init__
     # accepts them as constructor kwargs without them becoming real fields
@@ -365,6 +372,8 @@ class AxisConfig:
 
         if self.label_overlap is not None:
             validate_label_overlap("AxisConfig.label_overlap", self.label_overlap)
+        if self.label_map is not None:
+            object.__setattr__(self, "label_map", validate_label_map("AxisConfig", self.label_map))
 
         _validate_config_color("AxisConfig", "label_color", self.label_color)
         _validate_config_color("AxisConfig", "title_color", self.title_color)

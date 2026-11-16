@@ -532,15 +532,15 @@ def _populated_pivots() -> dict[str, fm.Chart]:
 _POPULATED_PIVOT_DIGESTS = {
     "x_y": (
         "17598a74093638d6487d2e8b466619f927cae45e41293d62eb535f86e0164f7b",
-        "816a114c63029a9d24ef7e855e573a55a5743d4ba37b9090c0c768425d012b0c",
+        "e432389901d33780142b3721fcd1ec4d04080665ad25e113b853eaecbe9f0597",
     ),
     "color": (
         "310c379ef93e961efccf25234c8020f9c56244dc8cb415447c7e231d622258b4",
-        "032e78b51d5409b915e0fe19cfd3a5c7df0325e9d05a645a199a818e1ced363a",
+        "ac7cfdb9eb38221a7197252ee26e729aad84bd13742dbda3bc30557e6e1004b6",
     ),
     "calculate": (
         "c8fbb75f14388a0c85a940e9f3ef09fc2e75cf4c24663106e51288e3fdd7be11",
-        "9670b68f1eacbaff4f51ec2b4d9ff99aa7d0eeeed9a584348105de8de7ab23ac",
+        "123192427a5d5a256b68951f08277170b23be345cc2d599e2e1306b217b27259",
     ),
 }
 

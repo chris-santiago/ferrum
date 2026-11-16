@@ -77,12 +77,6 @@ pub(crate) fn build_overlay_json(data: &crate::scene_load::SceneData) -> String 
     .to_string()
 }
 
-/// Build the text-element JSON array from a slice of text elements.
-pub(crate) fn build_text_json_from(all_text: &[TextElementData]) -> String {
-    let elements: Vec<serde_json::Value> = all_text.iter().map(text_element_to_json).collect();
-    serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
-}
-
 /// Look up the composed `panel ∘ slot-rescale` affine for a right-axis tick's
 /// y-slot (secondary-y-axis, GH #52/#60/#63/#73).
 ///
@@ -111,12 +105,17 @@ fn secondary_affine_for_slot(
 
 /// Build text-element JSON for a zoomed panel.
 ///
-/// Axis tick labels are identified by clustering text elements that share the
-/// same y coordinate (x-axis row) or same x coordinate (y-axis column) and
-/// whose content appears in the known tick-label set.  Each identified tick
-/// label is repositioned by applying the affine zoom transform to its varying
-/// coordinate (x for x-axis ticks, y for y-axis ticks).  All other text
-/// (chart title, axis title, legend) is emitted at its original position.
+/// Axis tick labels are recognised by the structural tag the scene carries on
+/// them (`SceneNode::Text::tick_axis`, the PHYSICAL axis the label sits on),
+/// never by matching their text, so a relabelled, custom-formatted or
+/// categorical tick follows its axis exactly like a default one, and a mark's
+/// text label that happens to equal a tick string is left alone. A tick
+/// belongs to the panel it was collected from: only labels of `panel_id` are
+/// repositioned, so another panel's ticks are emitted untouched rather than
+/// moved and clipped by this panel's transform. Each recognised label is
+/// repositioned by applying the affine to its varying coordinate (x for x-axis
+/// ticks, y for y-axis ticks). All other text (chart title, axis title,
+/// legend, marks' labels) is emitted at its original position.
 ///
 /// Labels whose transformed position falls outside the panel's `plot_area`
 /// are filtered out to prevent tick labels from extending past the plot
@@ -135,89 +134,31 @@ fn secondary_affine_for_slot(
 /// [`secondary_affine_for_slot`], which owns the all-slot-to-rank translation.
 pub(crate) fn build_zoomed_text_json(
     all_text: &[TextElementData],
-    interaction: &ferrum_scene::InteractionConfig,
     panel_id: usize,
     transform: &crate::zoom_pan::Affine2,
     secondary_affines: &[crate::zoom_pan::Affine2],
     plot_area: Option<(f64, f64, f64, f64)>,
 ) -> String {
-    use std::collections::{HashMap, HashSet};
+    use ferrum_scene::TickAxis;
 
-    let Some(ptl) = interaction
-        .tick_levels
-        .iter()
-        .find(|p| p.panel_id == panel_id)
-    else {
-        return build_text_json_from(all_text);
-    };
-
-    // Union of tick label strings across all zoom levels.
-    let x_tick_labels: HashSet<&str> = ptl
-        .x_levels
-        .iter()
-        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
-        .collect();
-    let y_tick_labels: HashSet<&str> = ptl
-        .y_levels
-        .iter()
-        .flat_map(|lvl| lvl.ticks.iter().map(|t| t.label.as_str()))
-        .collect();
-    // --- Identify x-axis tick row ------------------------------------------
-    // All x-axis tick labels share the same y coordinate.  Find the most
-    // common rounded-y among elements whose content is a known x-tick label.
-    let mut x_y_freq: HashMap<i64, usize> = HashMap::new();
-    for te in all_text
-        .iter()
-        .filter(|te| x_tick_labels.contains(te.content.as_str()))
-    {
-        *x_y_freq.entry((te.y * 10.0) as i64).or_insert(0) += 1;
-    }
-    let x_axis_y: Option<f64> = x_y_freq
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(k, _)| k as f64 / 10.0);
-
-    // --- Identify y-axis tick column ----------------------------------------
-    // All y-axis tick labels share the same x coordinate.
-    let mut y_x_freq: HashMap<i64, usize> = HashMap::new();
-    for te in all_text
-        .iter()
-        .filter(|te| y_tick_labels.contains(te.content.as_str()))
-    {
-        *y_x_freq.entry((te.x * 10.0) as i64).or_insert(0) += 1;
-    }
-    let y_axis_x: Option<f64> = y_x_freq
-        .into_iter()
-        .max_by_key(|(_, c)| *c)
-        .map(|(k, _)| k as f64 / 10.0);
-
-    // 1 px tolerance covers label_font_size / 3.0 baseline offset and rounding.
-    const COORD_TOL: f64 = 1.5;
-
-    let is_x_tick = |te: &TextElementData| {
-        x_tick_labels.contains(te.content.as_str())
-            && x_axis_y
-                .map(|ay| (te.y - ay).abs() < COORD_TOL)
-                .unwrap_or(false)
-    };
+    let on_this_panel = |te: &TextElementData| te.panel == Some(panel_id);
+    let is_x_tick =
+        |te: &TextElementData| te.tick_axis == Some(TickAxis::X) && on_this_panel(te);
+    // Slot 0 (or no slot: the byte-stable single-slot default) is the primary
+    // y axis; a right axis carries `slot >= 1`.
     let is_y_tick = |te: &TextElementData| {
-        y_tick_labels.contains(te.content.as_str())
-            && y_axis_x
-                .map(|ax| (te.x - ax).abs() < COORD_TOL)
-                .unwrap_or(false)
+        te.tick_axis == Some(TickAxis::Y) && on_this_panel(te) && te.slot.unwrap_or(0) == 0
     };
-    // Secondary-y (#52/#60/#73): a right-axis tick is identified by its
-    // explicit `slot` tag (`Some(k)`, k >= 1 — slot 0 is the primary axis,
-    // per the `MarkBatch::y_slot` convention `route_y_axis_slotted` mirrors),
-    // not by column-frequency inference. This retires the `c >= 2` column
-    // heuristic: untagged text (`slot: None`) — titles, legends, or a stray
-    // label that happens to match a tick string — is *never* treated as an
-    // axis label, which is a STRONGER structural guarantee than the
-    // frequency filter it replaces (spec §7). A single-tick right axis
-    // (degenerate/constant secondary domain) now relabels exactly like a
-    // multi-tick one, since recognition no longer depends on counting
-    // repeated column occupants.
-    let is_secondary_y_tick = |te: &TextElementData| matches!(te.slot, Some(slot) if slot >= 1);
+    // Secondary-y (#52/#60/#73): a right-axis tick is a y tick with an explicit
+    // slot `k >= 1` (slot 0 is the primary axis, per the `MarkBatch::y_slot`
+    // convention `route_y_axis_slotted` mirrors). A single-tick right axis
+    // (degenerate/constant secondary domain) relabels exactly like a
+    // multi-tick one.
+    let is_secondary_y_tick = |te: &TextElementData| {
+        te.tick_axis == Some(TickAxis::Y)
+            && on_this_panel(te)
+            && matches!(te.slot, Some(slot) if slot >= 1)
+    };
 
     let mut elements: Vec<serde_json::Value> = Vec::new();
     for te in all_text {
@@ -420,7 +361,17 @@ mod bug_hunt_interactive_slots {
             content: content.to_string(),
             style: style(),
             slot: None,
+            tick_axis: None,
+            panel: Some(0),
             blend_batch: None,
+        }
+    }
+
+    /// A primary-axis y tick label (no slot: the single-slot default path).
+    fn y_tick(x: f64, y: f64, content: &str) -> TextElementData {
+        TextElementData {
+            tick_axis: Some(ferrum_scene::TickAxis::Y),
+            ..text(x, y, content)
         }
     }
 
@@ -429,49 +380,8 @@ mod bug_hunt_interactive_slots {
     /// panel: slot 0 = primary, slot `k >= 1` = the k-th stacked right axis.
     fn text_slot(x: f64, y: f64, content: &str, slot: usize) -> TextElementData {
         TextElementData {
-            x,
-            y,
-            content: content.to_string(),
-            style: style(),
             slot: Some(slot),
-            blend_batch: None,
-        }
-    }
-
-    fn tick(label: &str, pixel: f64) -> ferrum_scene::Tick {
-        ferrum_scene::Tick {
-            value: pixel,
-            label: label.to_string(),
-            pixel,
-        }
-    }
-
-    fn level(labels: &[(&str, f64)]) -> ferrum_scene::TickLevel {
-        ferrum_scene::TickLevel {
-            min_zoom: 1.0,
-            max_zoom: 10.0,
-            ticks: labels.iter().map(|(l, p)| tick(l, *p)).collect(),
-        }
-    }
-
-    fn interaction(
-        y_labels: &[(&str, f64)],
-        slot_levels: Vec<Vec<ferrum_scene::TickLevel>>,
-    ) -> ferrum_scene::InteractionConfig {
-        ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![],
-                y_levels: vec![level(y_labels)],
-                y_slot_levels: slot_levels,
-            }],
+            ..y_tick(x, y, content)
         }
     }
 
@@ -496,8 +406,7 @@ mod bug_hunt_interactive_slots {
     /// a domainParam/brush rescale.
     #[test]
     fn bug_hunt_single_tick_secondary_axis_relabels_under_slot_rescale() {
-        let cfg = interaction(&[("L", 100.0)], vec![vec![level(&[("R99", 120.0)])]]);
-        let all_text = vec![text(40.0, 100.0, "L"), text_slot(460.0, 120.0, "R99", 1)];
+        let all_text = vec![y_tick(40.0, 100.0, "L"), text_slot(460.0, 120.0, "R99", 1)];
         let panel = crate::zoom_pan::Affine2::identity();
         let secondary = [crate::zoom_pan::compose_panel_slot(
             panel,
@@ -509,7 +418,7 @@ mod bug_hunt_interactive_slots {
             },
         )];
         let parsed = parse(&build_zoomed_text_json(
-            &all_text, &cfg, 0, &panel, &secondary, None,
+            &all_text, 0, &panel, &secondary, None,
         ));
         assert_eq!(
             y_of(&parsed, "R99"),
@@ -530,9 +439,8 @@ mod bug_hunt_interactive_slots {
     /// tempting shortcut) would have relabeled it; this pins that it does not.
     #[test]
     fn untagged_node_matching_a_secondary_tick_string_is_not_rescaled() {
-        let cfg = interaction(&[("L", 100.0)], vec![vec![level(&[("R99", 120.0)])]]);
         let all_text = vec![
-            text(40.0, 100.0, "L"),
+            y_tick(40.0, 100.0, "L"),
             text_slot(460.0, 120.0, "R99", 1),
             // A stray, UNtagged data label that collides with the slot-1 tick
             // string "R99" and sits in the same right-hand column x=460.
@@ -549,7 +457,7 @@ mod bug_hunt_interactive_slots {
             },
         )];
         let parsed = parse(&build_zoomed_text_json(
-            &all_text, &cfg, 0, &panel, &secondary, None,
+            &all_text, 0, &panel, &secondary, None,
         ));
         // The genuine tagged tick rescales (120 * 2 = 240); the untagged stray,
         // sharing content "R99", must remain at its original y=300, never 600.
@@ -573,12 +481,8 @@ mod bug_hunt_interactive_slots {
     /// identity, not tick count, drives recognition.
     #[test]
     fn bug_hunt_two_tick_secondary_axis_relabels_under_slot_rescale() {
-        let cfg = interaction(
-            &[("L", 100.0)],
-            vec![vec![level(&[("R1", 120.0), ("R2", 200.0)])]],
-        );
         let all_text = vec![
-            text(40.0, 100.0, "L"),
+            y_tick(40.0, 100.0, "L"),
             text_slot(460.0, 120.0, "R1", 1),
             text_slot(460.0, 200.0, "R2", 1),
         ];
@@ -593,7 +497,7 @@ mod bug_hunt_interactive_slots {
             },
         )];
         let parsed = parse(&build_zoomed_text_json(
-            &all_text, &cfg, 0, &panel, &secondary, None,
+            &all_text, 0, &panel, &secondary, None,
         ));
         assert_eq!(y_of(&parsed, "R1"), 240.0);
         assert_eq!(y_of(&parsed, "R2"), 400.0);
@@ -609,12 +513,8 @@ mod bug_hunt_interactive_slots {
     /// pile up in the margin below/above the panel.
     #[test]
     fn bug_hunt_secondary_labels_clipped_when_slot_rescale_pushes_them_out() {
-        let cfg = interaction(
-            &[("L", 100.0)],
-            vec![vec![level(&[("R1", 100.0), ("R2", 200.0)])]],
-        );
         let all_text = vec![
-            text(40.0, 100.0, "L"),
+            y_tick(40.0, 100.0, "L"),
             text_slot(460.0, 100.0, "R1", 1),
             text_slot(460.0, 200.0, "R2", 1),
         ];
@@ -631,7 +531,6 @@ mod bug_hunt_interactive_slots {
         )];
         let parsed = parse(&build_zoomed_text_json(
             &all_text,
-            &cfg,
             0,
             &panel,
             &secondary,
@@ -657,15 +556,8 @@ mod bug_hunt_interactive_slots {
     /// documented degradation — not to the panel affine and not panic.
     #[test]
     fn bug_hunt_more_columns_than_affines_falls_back_to_last() {
-        let cfg = interaction(
-            &[("L", 100.0)],
-            vec![
-                vec![level(&[("A1", 100.0), ("A2", 200.0)])],
-                vec![level(&[("B1", 100.0), ("B2", 200.0)])],
-            ],
-        );
         let all_text = vec![
-            text(40.0, 100.0, "L"),
+            y_tick(40.0, 100.0, "L"),
             text_slot(460.0, 100.0, "A1", 1),
             text_slot(460.0, 200.0, "A2", 1),
             text_slot(500.0, 100.0, "B1", 2),
@@ -683,7 +575,6 @@ mod bug_hunt_interactive_slots {
         );
         let parsed = parse(&build_zoomed_text_json(
             &all_text,
-            &cfg,
             0,
             &panel,
             &[only],
@@ -705,15 +596,8 @@ mod bug_hunt_interactive_slots {
     /// tag, not a string-set/column mapping, disambiguates them.
     #[test]
     fn bug_hunt_shared_tick_string_across_two_right_axes_uses_column_position() {
-        let cfg = interaction(
-            &[("L", 100.0)],
-            vec![
-                vec![level(&[("5", 100.0), ("7", 200.0)])],
-                vec![level(&[("5", 100.0), ("9", 200.0)])],
-            ],
-        );
         let all_text = vec![
-            text(40.0, 100.0, "L"),
+            y_tick(40.0, 100.0, "L"),
             text_slot(460.0, 100.0, "5", 1), // inner axis, slot 1
             text_slot(460.0, 200.0, "7", 1),
             text_slot(500.0, 100.0, "5", 2), // outer axis, slot 2 — same label string
@@ -741,7 +625,7 @@ mod bug_hunt_interactive_slots {
             ),
         ];
         let parsed = parse(&build_zoomed_text_json(
-            &all_text, &cfg, 0, &panel, &secondary, None,
+            &all_text, 0, &panel, &secondary, None,
         ));
         let ys_of_5: Vec<f64> = parsed
             .iter()
@@ -761,8 +645,7 @@ mod bug_hunt_interactive_slots {
     /// right-side labels untouched.
     #[test]
     fn bug_hunt_empty_slot_level_vec_is_safe() {
-        let cfg = interaction(&[("L", 100.0)], vec![vec![]]);
-        let all_text = vec![text(40.0, 100.0, "L"), text(460.0, 100.0, "R1")];
+        let all_text = vec![y_tick(40.0, 100.0, "L"), text(460.0, 100.0, "R1")];
         let panel = crate::zoom_pan::Affine2 {
             sx: 1.0,
             sy: 2.0,
@@ -771,7 +654,6 @@ mod bug_hunt_interactive_slots {
         };
         let parsed = parse(&build_zoomed_text_json(
             &all_text,
-            &cfg,
             0,
             &panel,
             &[],
@@ -816,7 +698,17 @@ mod tests {
             content: content.to_string(),
             style: make_style(),
             slot: None,
+            tick_axis: None,
+            panel: Some(0),
             blend_batch: None,
+        }
+    }
+
+    /// A tick label on `axis` of panel 0 (no slot: the primary axis).
+    fn make_tick(x: f64, y: f64, content: &str, axis: ferrum_scene::TickAxis) -> TextElementData {
+        TextElementData {
+            tick_axis: Some(axis),
+            ..make_text(x, y, content)
         }
     }
 
@@ -824,13 +716,15 @@ mod tests {
     /// #60/#73): slot 0 = primary, slot `k >= 1` = the k-th stacked right axis.
     fn make_text_slot(x: f64, y: f64, content: &str, slot: usize) -> TextElementData {
         TextElementData {
-            x,
-            y,
-            content: content.to_string(),
-            style: make_style(),
             slot: Some(slot),
-            blend_batch: None,
+            ..make_tick(x, y, content, ferrum_scene::TickAxis::Y)
         }
+    }
+
+    /// The text-element JSON array of a slice of elements, as the overlay reads it.
+    fn build_text_json_from(all_text: &[TextElementData]) -> String {
+        let elements: Vec<serde_json::Value> = all_text.iter().map(text_element_to_json).collect();
+        serde_json::to_string(&elements).unwrap_or_else(|_| "[]".to_string())
     }
 
     // ── font_weight_string / text_anchor_str / text_baseline_string ────
@@ -883,49 +777,11 @@ mod tests {
         //
         // The y-tick label at x=40, y=200 transforms y to: 200*1.0 + 0.0 = 200 (inside).
 
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![
-                        ferrum_scene::Tick {
-                            value: 100.0,
-                            label: "100".to_string(),
-                            pixel: 100.0,
-                        },
-                        ferrum_scene::Tick {
-                            value: 400.0,
-                            label: "400".to_string(),
-                            pixel: 400.0,
-                        },
-                    ],
-                }],
-                y_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 200.0,
-                        label: "200".to_string(),
-                        pixel: 200.0,
-                    }],
-                }],
-                y_slot_levels: vec![],
-            }],
-        };
 
         let all_text = vec![
-            make_text(100.0, 360.0, "100"),  // x-tick label
-            make_text(400.0, 360.0, "400"),  // x-tick label
-            make_text(40.0, 200.0, "200"),   // y-tick label
+            make_tick(100.0, 360.0, "100", ferrum_scene::TickAxis::X), // x-tick label
+            make_tick(400.0, 360.0, "400", ferrum_scene::TickAxis::X), // x-tick label
+            make_tick(40.0, 200.0, "200", ferrum_scene::TickAxis::Y), // y-tick label
             make_text(250.0, 20.0, "Title"), // non-tick (title)
         ];
 
@@ -939,7 +795,7 @@ mod tests {
         let plot_area = Some((50.0, 50.0, 400.0, 300.0));
 
         let json_str =
-            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
+            build_zoomed_text_json(&all_text, 0, &transform, &[], plot_area);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         // The two x-tick labels should be clipped out (transformed to 0 and 600,
@@ -972,40 +828,10 @@ mod tests {
     #[test]
     fn test_zoomed_tick_labels_inside_plot_area_kept() {
         // All tick labels transform to positions inside the plot area.
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![
-                        ferrum_scene::Tick {
-                            value: 100.0,
-                            label: "A".to_string(),
-                            pixel: 100.0,
-                        },
-                        ferrum_scene::Tick {
-                            value: 200.0,
-                            label: "B".to_string(),
-                            pixel: 200.0,
-                        },
-                    ],
-                }],
-                y_levels: vec![],
-                y_slot_levels: vec![],
-            }],
-        };
 
         let all_text = vec![
-            make_text(100.0, 360.0, "A"), // x-tick
-            make_text(200.0, 360.0, "B"), // x-tick
+            make_tick(100.0, 360.0, "A", ferrum_scene::TickAxis::X), // x-tick
+            make_tick(200.0, 360.0, "B", ferrum_scene::TickAxis::X), // x-tick
         ];
 
         // Identity-ish transform that keeps labels inside.
@@ -1019,7 +845,7 @@ mod tests {
         let plot_area = Some((0.0, 0.0, 500.0, 500.0));
 
         let json_str =
-            build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], plot_area);
+            build_zoomed_text_json(&all_text, 0, &transform, &[], plot_area);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         let contents: Vec<&str> = parsed
@@ -1038,29 +864,6 @@ mod tests {
     /// mis-anchor it even though the pre-zoom SVG got it right.
     #[test]
     fn zoomed_x_tick_forwards_its_own_anchor_not_hardcoded_center() {
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 100.0,
-                        label: "Rotated".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                y_levels: vec![],
-                y_slot_levels: vec![],
-            }],
-        };
         // Simulate a rotated (label_angle override) x tick: End-anchored,
         // non-zero angle — exactly what `render/marks/axis.rs`'s Bottom
         // rotation fixup produces.
@@ -1075,6 +878,8 @@ mod tests {
             content: "Rotated".to_string(),
             style: rotated_style,
             slot: None,
+            tick_axis: Some(ferrum_scene::TickAxis::X),
+            panel: Some(0),
             blend_batch: None,
         }];
         let transform = crate::zoom_pan::Affine2 {
@@ -1083,7 +888,7 @@ mod tests {
             tx: 0.0,
             ty: 0.0,
         };
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let json_str = build_zoomed_text_json(&all_text, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
         assert_eq!(
             parsed[0]["anchor"], "end",
@@ -1097,29 +902,6 @@ mod tests {
     /// Right-oriented primary y-axis, whose ticks are Start-anchored).
     #[test]
     fn zoomed_y_tick_forwards_its_own_anchor_not_hardcoded_end() {
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![],
-                y_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 10.0,
-                        label: "R".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                y_slot_levels: vec![],
-            }],
-        };
         // Simulate a Right-oriented primary y-axis tick: Start-anchored.
         let right_style = TextStyle {
             anchor: TextAnchor::Start,
@@ -1131,6 +913,8 @@ mod tests {
             content: "R".to_string(),
             style: right_style,
             slot: None,
+            tick_axis: Some(ferrum_scene::TickAxis::Y),
+            panel: Some(0),
             blend_batch: None,
         }];
         let transform = crate::zoom_pan::Affine2 {
@@ -1139,7 +923,7 @@ mod tests {
             tx: 0.0,
             ty: 0.0,
         };
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let json_str = build_zoomed_text_json(&all_text, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
         assert_eq!(
             parsed[0]["anchor"], "start",
@@ -1154,37 +938,6 @@ mod tests {
     /// `End` anchor are exactly what the old hardcoded strings encoded.
     #[test]
     fn zoomed_tick_anchor_forwarding_is_byte_identical_for_default_orients() {
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 100.0,
-                        label: "X".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                y_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 10.0,
-                        label: "Y".to_string(),
-                        pixel: 200.0,
-                    }],
-                }],
-                y_slot_levels: vec![],
-            }],
-        };
         let x_style = TextStyle {
             anchor: TextAnchor::Middle,
             ..make_style()
@@ -1200,6 +953,8 @@ mod tests {
                 content: "X".to_string(),
                 style: x_style,
                 slot: None,
+                tick_axis: Some(ferrum_scene::TickAxis::X),
+                panel: Some(0),
                 blend_batch: None,
             },
             TextElementData {
@@ -1208,6 +963,8 @@ mod tests {
                 content: "Y".to_string(),
                 style: y_style,
                 slot: None,
+                tick_axis: Some(ferrum_scene::TickAxis::Y),
+                panel: Some(0),
                 blend_batch: None,
             },
         ];
@@ -1217,7 +974,7 @@ mod tests {
             tx: 0.0,
             ty: 0.0,
         };
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let json_str = build_zoomed_text_json(&all_text, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
         let anchor_of = |content: &str| -> String {
             parsed
@@ -1244,49 +1001,9 @@ mod tests {
         // Secondary-y (#52): right-axis labels (in `y_slot_levels`, sitting at
         // their own right-side column) reposition their y under the panel affine
         // exactly as the left axis does — criterion 7.
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![],
-                // Primary (left) axis tick.
-                y_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 10.0,
-                        label: "L".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                // One right axis with two ticks.
-                y_slot_levels: vec![vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![
-                        ferrum_scene::Tick {
-                            value: 1.0,
-                            label: "R1".to_string(),
-                            pixel: 100.0,
-                        },
-                        ferrum_scene::Tick {
-                            value: 2.0,
-                            label: "R2".to_string(),
-                            pixel: 200.0,
-                        },
-                    ],
-                }]],
-            }],
-        };
 
         let all_text = vec![
-            make_text(40.0, 100.0, "L"),           // left-axis tick (column x=40)
+            make_tick(40.0, 100.0, "L", ferrum_scene::TickAxis::Y), // left-axis tick (column x=40)
             make_text_slot(460.0, 100.0, "R1", 1), // right-axis tick, slot 1 (x=460)
             make_text_slot(460.0, 200.0, "R2", 1), // right-axis tick, slot 1 (x=460)
         ];
@@ -1310,7 +1027,6 @@ mod tests {
         )];
         let json_str = build_zoomed_text_json(
             &all_text,
-            &interaction,
             0,
             &transform,
             &secondary,
@@ -1346,30 +1062,7 @@ mod tests {
         // Byte-stability: with `y_slot_levels` empty, a right-column label that
         // happens to match no primary tick string is left untouched (emitted at
         // its original position), identical to pre-#52 behavior.
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![],
-                y_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 10.0,
-                        label: "L".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                y_slot_levels: vec![],
-            }],
-        };
-        let all_text = vec![make_text(40.0, 100.0, "L"), make_text(460.0, 100.0, "R1")];
+        let all_text = vec![make_tick(40.0, 100.0, "L", ferrum_scene::TickAxis::Y), make_text(460.0, 100.0, "R1")];
         let transform = crate::zoom_pan::Affine2 {
             sx: 1.0,
             sy: 2.0,
@@ -1378,7 +1071,6 @@ mod tests {
         };
         let json_str = build_zoomed_text_json(
             &all_text,
-            &interaction,
             0,
             &transform,
             &[],
@@ -1401,81 +1093,16 @@ mod tests {
     /// tests below exercise: left axis "L" at column x=40, an inner right axis
     /// (slot 1) at x=460 with ticks A1/A2, an outer right axis (slot 2) at x=500
     /// with ticks B1/B2, and one x-tick "X".
-    fn dual_axis_fixture() -> (ferrum_scene::InteractionConfig, Vec<TextElementData>) {
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 1.0,
-                        label: "X".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                y_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 10.0,
-                        label: "L".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                // Two right axes in slot order: inner (slot 1) then outer (slot 2).
-                y_slot_levels: vec![
-                    vec![ferrum_scene::TickLevel {
-                        min_zoom: 1.0,
-                        max_zoom: 10.0,
-                        ticks: vec![
-                            ferrum_scene::Tick {
-                                value: 1.0,
-                                label: "A1".to_string(),
-                                pixel: 100.0,
-                            },
-                            ferrum_scene::Tick {
-                                value: 2.0,
-                                label: "A2".to_string(),
-                                pixel: 200.0,
-                            },
-                        ],
-                    }],
-                    vec![ferrum_scene::TickLevel {
-                        min_zoom: 1.0,
-                        max_zoom: 10.0,
-                        ticks: vec![
-                            ferrum_scene::Tick {
-                                value: 1.0,
-                                label: "B1".to_string(),
-                                pixel: 100.0,
-                            },
-                            ferrum_scene::Tick {
-                                value: 2.0,
-                                label: "B2".to_string(),
-                                pixel: 200.0,
-                            },
-                        ],
-                    }],
-                ],
-            }],
-        };
+    fn dual_axis_fixture() -> Vec<TextElementData> {
         let all_text = vec![
-            make_text(40.0, 100.0, "L"),           // left axis (column x=40)
-            make_text(100.0, 360.0, "X"),          // x-axis tick (row y=360)
+            make_tick(40.0, 100.0, "L", ferrum_scene::TickAxis::Y), // left axis (column x=40)
+            make_tick(100.0, 360.0, "X", ferrum_scene::TickAxis::X), // x-axis tick (row y=360)
             make_text_slot(460.0, 100.0, "A1", 1), // inner right axis, slot 1 (x=460)
             make_text_slot(460.0, 200.0, "A2", 1),
             make_text_slot(500.0, 100.0, "B1", 2), // outer right axis, slot 2 (x=500)
             make_text_slot(500.0, 200.0, "B2", 2),
         ];
-        (interaction, all_text)
+        all_text
     }
 
     #[test]
@@ -1485,7 +1112,7 @@ mod tests {
         // identity. Only that layer's axis labels move; the primary (left) axis
         // and the x axis are untouched. The two right axes carry DIFFERENT
         // rescales, discriminating the per-column slot mapping.
-        let (interaction, all_text) = dual_axis_fixture();
+        let all_text = dual_axis_fixture();
         let panel = crate::zoom_pan::Affine2::identity();
         // Slot 1 (inner, x=460): sy=2, ty=0. Slot 2 (outer, x=500): sy=1, ty=50.
         let secondary = [
@@ -1508,7 +1135,7 @@ mod tests {
                 },
             ),
         ];
-        let json = build_zoomed_text_json(&all_text, &interaction, 0, &panel, &secondary, None);
+        let json = build_zoomed_text_json(&all_text, 0, &panel, &secondary, None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("valid JSON");
         let pos = |content: &str| -> (f64, f64) {
             let v = parsed
@@ -1542,7 +1169,7 @@ mod tests {
         // inner right axis relabels through `panel ∘ slot`, the outer through
         // the panel affine alone (identity slot), and the primary axes through
         // the panel affine — proving the composition is per column.
-        let (interaction, all_text) = dual_axis_fixture();
+        let all_text = dual_axis_fixture();
         let panel = crate::zoom_pan::Affine2 {
             sx: 1.0,
             sy: 2.0,
@@ -1559,7 +1186,7 @@ mod tests {
             crate::zoom_pan::compose_panel_slot(panel, slot1),
             crate::zoom_pan::compose_panel_slot(panel, crate::zoom_pan::Affine2::identity()),
         ];
-        let json = build_zoomed_text_json(&all_text, &interaction, 0, &panel, &secondary, None);
+        let json = build_zoomed_text_json(&all_text, 0, &panel, &secondary, None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("valid JSON");
         let y_of = |content: &str| -> f64 {
             parsed
@@ -1581,31 +1208,8 @@ mod tests {
     #[test]
     fn test_zoomed_text_no_plot_area_keeps_all() {
         // When plot_area is None, no clipping should occur.
-        let interaction = ferrum_scene::InteractionConfig {
-            zoom_enabled: false,
-            pan_enabled: false,
-            conditionals: vec![],
-            linked_panels: vec![],
-            toolbar: true,
-            params: vec![],
-            param_bindings: vec![],
-            tick_levels: vec![ferrum_scene::PanelTickLevels {
-                panel_id: 0,
-                x_levels: vec![ferrum_scene::TickLevel {
-                    min_zoom: 1.0,
-                    max_zoom: 10.0,
-                    ticks: vec![ferrum_scene::Tick {
-                        value: 100.0,
-                        label: "X".to_string(),
-                        pixel: 100.0,
-                    }],
-                }],
-                y_levels: vec![],
-                y_slot_levels: vec![],
-            }],
-        };
 
-        let all_text = vec![make_text(100.0, 360.0, "X")];
+        let all_text = vec![make_tick(100.0, 360.0, "X", ferrum_scene::TickAxis::X)];
 
         // Transform that would push label far off-screen.
         let transform = crate::zoom_pan::Affine2 {
@@ -1615,7 +1219,7 @@ mod tests {
             ty: 0.0,
         };
 
-        let json_str = build_zoomed_text_json(&all_text, &interaction, 0, &transform, &[], None);
+        let json_str = build_zoomed_text_json(&all_text, 0, &transform, &[], None);
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).expect("valid JSON");
 
         let contents: Vec<&str> = parsed
@@ -1647,6 +1251,8 @@ mod tests {
             content: r#"say "hello" \ world"#.to_string(),
             style: make_style(),
             slot: None,
+            tick_axis: None,
+            panel: Some(0),
             blend_batch: None,
         };
         let json_str = build_text_json_from(&[te]);
@@ -1665,6 +1271,8 @@ mod tests {
             content: "NaN test".to_string(),
             style: make_style(),
             slot: None,
+            tick_axis: None,
+            panel: Some(0),
             blend_batch: None,
         };
         let json_str = build_text_json_from(&[te]);
@@ -1684,6 +1292,8 @@ mod tests {
             content: "inf test".to_string(),
             style: make_style(),
             slot: None,
+            tick_axis: None,
+            panel: Some(0),
             blend_batch: None,
         };
         let json_str = build_text_json_from(&[te]);
@@ -1760,22 +1370,95 @@ mod tests {
         assert_eq!(color_string(&TextStyle { color: None, ..style }), "none");
     }
 
-    #[test]
-    fn bug_hunt_zoomed_text_panel_id_mismatch_falls_back() {
-        // When panel_id doesn't match any tick_level entry, must fall back
-        // to the non-zoomed text JSON (all elements at original positions).
-        let interaction = ferrum_scene::InteractionConfig::default();
-        let texts = vec![make_text(100.0, 200.0, "hello")];
-        let transform = crate::zoom_pan::Affine2 {
-            sx: 2.0,
+    fn zoom_y_by_two() -> crate::zoom_pan::Affine2 {
+        crate::zoom_pan::Affine2 {
+            sx: 1.0,
             sy: 2.0,
             tx: 0.0,
             ty: 0.0,
-        };
-        let result = build_zoomed_text_json(&texts, &interaction, 99, &transform, &[], None);
-        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
-        // Must contain all text elements (no zoom-specific filtering).
+        }
+    }
+
+    fn zoomed(all_text: &[TextElementData], panel_id: usize, plot_area: Option<(f64, f64, f64, f64)>) -> Vec<serde_json::Value> {
+        let json = build_zoomed_text_json(all_text, panel_id, &zoom_y_by_two(), &[], plot_area);
+        serde_json::from_str(&json).expect("valid JSON")
+    }
+
+    fn y_by_content(parsed: &[serde_json::Value], content: &str) -> Option<f64> {
+        parsed.iter().find(|v| v["content"] == content).and_then(|v| v["y"].as_f64())
+    }
+
+    /// A tick is recognised by its tag, not by its text: a label no tick
+    /// ladder would regenerate (a relabelled or custom-formatted tick) still
+    /// follows its axis.
+    #[test]
+    fn a_tagged_y_tick_moves_with_the_zoom_whatever_its_text() {
+        let all_text = vec![make_tick(40.0, 100.0, "two (custom text)", ferrum_scene::TickAxis::Y)];
+        let parsed = zoomed(&all_text, 0, None);
+        assert_eq!(y_by_content(&parsed, "two (custom text)"), Some(200.0));
+    }
+
+    /// The x counterpart: a tagged x tick follows the x zoom whatever its text.
+    #[test]
+    fn a_tagged_x_tick_moves_with_the_zoom_whatever_its_text() {
+        let all_text = vec![make_tick(100.0, 360.0, "Bee", ferrum_scene::TickAxis::X)];
+        let transform = crate::zoom_pan::Affine2 { sx: 2.0, sy: 1.0, tx: 10.0, ty: 0.0 };
+        let json = build_zoomed_text_json(&all_text, 0, &transform, &[], None);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed[0]["x"].as_f64(), Some(210.0));
+        assert_eq!(parsed[0]["y"].as_f64(), Some(360.0));
+    }
+
+    /// An untagged text (a mark's label, an annotation) never moves with the
+    /// axis, even when its string equals a tick's and it sits on the tick row.
+    #[test]
+    fn an_untagged_text_equal_to_a_tick_label_stays_put() {
+        let all_text = vec![
+            make_tick(40.0, 100.0, "2", ferrum_scene::TickAxis::Y),
+            make_text(40.0, 100.0, "2"),
+        ];
+        let parsed = zoomed(&all_text, 0, None);
+        let ys: Vec<f64> = parsed.iter().filter_map(|v| v["y"].as_f64()).collect();
+        assert_eq!(ys, vec![200.0, 100.0], "only the tagged tick moves");
+    }
+
+    /// Another panel's tick is emitted exactly where the scene put it: the
+    /// focus panel's transform neither moves it nor clips it against the
+    /// focus panel's plot area.
+    #[test]
+    fn a_tick_of_another_panel_stays_put_under_this_panels_zoom() {
+        let mut other = make_tick(40.0, 300.0, "other", ferrum_scene::TickAxis::Y);
+        other.panel = Some(1);
+        let mut other_x = make_tick(900.0, 360.0, "other-x", ferrum_scene::TickAxis::X);
+        other_x.panel = Some(1);
+        let mut other_secondary = make_text_slot(460.0, 300.0, "other-r", 1);
+        other_secondary.panel = Some(1);
+        let own = make_tick(40.0, 100.0, "own", ferrum_scene::TickAxis::Y);
+        let all_text = vec![own, other, other_x, other_secondary];
+        // y=300 would transform to 600, outside the plot area (0..400).
+        let parsed = zoomed(&all_text, 0, Some((0.0, 0.0, 500.0, 400.0)));
+        assert_eq!(y_by_content(&parsed, "own"), Some(200.0));
+        assert_eq!(y_by_content(&parsed, "other"), Some(300.0));
+        assert_eq!(y_by_content(&parsed, "other-x"), Some(360.0));
+        assert_eq!(y_by_content(&parsed, "other-r"), Some(300.0));
+    }
+
+    /// A text the scene-level collector gave no panel (title, legend,
+    /// decorations) is never a tick of any panel, tagged or not.
+    #[test]
+    fn a_text_without_a_panel_is_never_repositioned() {
+        let mut orphan = make_tick(40.0, 100.0, "orphan", ferrum_scene::TickAxis::Y);
+        orphan.panel = None;
+        let parsed = zoomed(&[orphan], 0, None);
+        assert_eq!(y_by_content(&parsed, "orphan"), Some(100.0));
+    }
+
+    /// A panel id no text belongs to moves nothing.
+    #[test]
+    fn bug_hunt_zoomed_text_panel_id_mismatch_falls_back() {
+        let all_text = vec![make_tick(40.0, 100.0, "t", ferrum_scene::TickAxis::Y)];
+        let parsed = zoomed(&all_text, 99, None);
         assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0]["content"], "hello");
+        assert_eq!(y_by_content(&parsed, "t"), Some(100.0));
     }
 }

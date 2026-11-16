@@ -694,6 +694,7 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
                             Some("central"),
                             1.0,
                         ),
+                        tick_axis: None,
                     }, i);
                 }
             }
