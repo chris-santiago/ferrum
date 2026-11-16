@@ -5803,6 +5803,7 @@ fn refuse_format_temporality_mismatch_field_keys_on_the_resolved_field_type() {
             Some("time"),
             "color",
             FormatSurface::Legend,
+            false,
         )
     };
     // Quantitative by dtype: both time-typed kinds refuse, naming the surface.
@@ -5837,6 +5838,7 @@ fn refuse_format_temporality_mismatch_field_keys_on_the_resolved_field_type() {
             None,
             "text",
             FormatSurface::Channel,
+            false,
         ),
         Ok(())
     );
@@ -5859,14 +5861,27 @@ fn a_date_category_legend_answers_a_format_as_its_text_twin_does() {
     .unwrap();
     let text = RecordBatch::try_new(schema(DataType::Utf8), vec![Arc::new(StringArray::from(vec!["a", "b"]))]).unwrap();
     let binding = EncodingSpec { field: "d".into(), ..Default::default() };
-    let answer = |batch: &RecordBatch, channel: &'static str, fmt: &str| {
-        refuse_format_temporality_mismatch_field(&binding, batch, Some(fmt), Some("time"), channel, crate::render::FormatSurface::Legend)
+    let answer = |batch: &RecordBatch, channel: &'static str, fmt: &str, reads_categories: bool| {
+        refuse_format_temporality_mismatch_field(
+            &binding,
+            batch,
+            Some(fmt),
+            Some("time"),
+            channel,
+            crate::render::FormatSurface::Legend,
+            reads_categories,
+        )
     };
     for channel in ["shape", "stroke_dash"] {
-        assert_eq!(answer(&dates, channel, "%Y"), answer(&text, channel, "%Y"), "{channel}: a time format");
-        assert!(answer(&dates, channel, "%Y").is_err(), "{channel}: refuses like its text twin");
+        assert_eq!(answer(&dates, channel, "%Y", true), answer(&text, channel, "%Y", true), "{channel}: a time format");
+        assert!(answer(&dates, channel, "%Y", true).is_err(), "{channel}: refuses like its text twin");
     }
-    assert_eq!(answer(&dates, "color", "%Y"), Ok(()), "an undeclared colour over a date stays temporal");
+    assert_eq!(answer(&dates, "color", "%Y", false), Ok(()), "an undeclared colour over a date stays temporal");
+    // A colour the engine resolved categorical (an area groups it) lists date labels: it
+    // answers a time format as its text twin does, and a number format is not refused as temporal.
+    assert_eq!(answer(&dates, "color", "%Y", true), answer(&text, "color", "%Y", true), "a grouped colour: a time format");
+    assert!(answer(&dates, "color", "%Y", true).is_err(), "a grouped colour refuses like its text twin");
+    assert_eq!(answer(&dates, "color", ".2f", true), answer(&text, "color", ".2f", true), "a grouped colour: a number format");
 }
 
 /// `#147` close (wave 6A T22): the two cells the second intent re-check
@@ -5968,6 +5983,7 @@ fn refuse_ordinal_format_on_a_temporal_field() {
                 format_type,
                 "text",
                 FormatSurface::Channel,
+                false,
             ),
             Err(RenderError::OrdinalFormatOnTemporalScale {
                 channel: "text",
@@ -5984,6 +6000,7 @@ fn refuse_ordinal_format_on_a_temporal_field() {
                 format_type,
                 "text",
                 FormatSurface::Channel,
+                false,
             ),
             Ok(()),
             "{format_type:?}"
@@ -6043,6 +6060,7 @@ fn untyped_specs_on_a_temporal_field_get_one_answer() {
             format_type,
             "color",
             FormatSurface::Legend,
+            false,
         )
     };
     for (fmt, format_type) in

@@ -15,7 +15,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use pyo3::exceptions::PyValueError;
-use crate::transform::pair_arg::extract_range_quad;
+use crate::transform::pair_arg::{extract_range_quad, refuse_malformed_range};
 use pyo3::PyResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -433,21 +433,12 @@ fn apply_one_group(
 
 /// Refuse a reversed, zero-width or non-finite extent on either axis in this
 /// transform's voice: `PyKde2D::new` checks it for the Python constructor, and
-/// a spec read from the wire reaches the transform unchecked.
+/// a spec read from the wire reaches the transform unchecked. Each axis's pair
+/// is read in the one range sentence, the refused pair named.
 fn refuse_malformed_extent(extent: Option<(f64, f64, f64, f64)>) -> PyResult<()> {
-    match extent {
-        Some((xmin, xmax, ymin, ymax))
-            if !(xmin.is_finite() && xmax.is_finite() && ymin.is_finite() && ymax.is_finite())
-                || xmin >= xmax
-                || ymin >= ymax =>
-        {
-            Err(PyValueError::new_err(format!(
-                "stat_kde_2d: extent must satisfy xmin < xmax and ymin < ymax with all finite; \
-                 got ({xmin}, {xmax}, {ymin}, {ymax})"
-            )))
-        }
-        _ => Ok(()),
-    }
+    let Some((xmin, xmax, ymin, ymax)) = extent else { return Ok(()) };
+    refuse_malformed_range("stat_kde_2d", "extent x pair", Some((xmin, xmax)))?;
+    refuse_malformed_range("stat_kde_2d", "extent y pair", Some((ymin, ymax)))
 }
 
 /// The reason a 2-D group of two or more points cannot be estimated, read per
@@ -1759,7 +1750,7 @@ pub(crate) mod tests {
             for b in [batch_xy(vec![0.0, 1.0, 3.0], vec![0.0, 2.0, 1.0]), batch_xy(vec![1.0], vec![1.0])] {
                 let err = apply(&spec, &b).expect_err("refuses").to_string();
                 assert!(
-                    err.contains("stat_kde_2d: extent must satisfy xmin < xmax and ymin < ymax with all finite"),
+                    err.contains("stat_kde_2d: extent ") && err.contains(" pair must be (lo, hi) with lo < hi and both finite; got ("),
                     "{extent:?}: {err}"
                 );
             }

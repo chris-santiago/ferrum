@@ -278,8 +278,8 @@ enum CountScaleBins {
 }
 
 /// Refuse a malformed [`KdeSpec::count_scale_extent`] at its consumption
-/// boundary, phrased like its `Bin` sibling (`stat_bin: extent must satisfy
-/// lo < hi; got (…)`) so the two read as one rule with two slots.
+/// boundary, in the one range sentence every statistic speaks
+/// ([`crate::transform::pair_arg::refuse_malformed_range`]).
 /// Unlike [`KdeSpec::extent`], this slot has no constructor parameter,
 /// so `PyKde::new`'s validation never sees it — the wire is its only route,
 /// and `deny_unknown_fields` happily accepts the key from a hand-authored or
@@ -292,7 +292,7 @@ enum CountScaleBins {
 /// constructor checks it for `extent`, and this slot has no constructor to
 /// check it anywhere else.
 fn validate_count_scale_extent(spec: &KdeSpec) -> PyResult<()> {
-    refuse_malformed_extent(LABEL, "count_scale_extent", spec.count_scale_extent)
+    crate::transform::pair_arg::refuse_malformed_range(LABEL, "count_scale_extent", spec.count_scale_extent)
 }
 
 /// Refuse a malformed [`KdeSpec::extent`] at the same boundary, in the same
@@ -301,22 +301,7 @@ fn validate_count_scale_extent(spec: &KdeSpec) -> PyResult<()> {
 /// zero-width grid is not a fit the data could not support: it is a request
 /// the transform cannot honor.
 fn validate_extent(spec: &KdeSpec) -> PyResult<()> {
-    refuse_malformed_extent(LABEL, "extent", spec.extent)
-}
-
-/// Refuse a reversed, zero-width or non-finite 1-D extent in `voice`, the
-/// refusing transform's own prefix. Read by `Kde` for its two extent slots, by
-/// `Violin` and by `DensityData` for their own, so every statistic that reads a caller extent
-/// refuses it by what it is, at its own entry, whatever the data.
-pub(crate) fn refuse_malformed_extent(voice: &str, slot: &str, extent: Option<(f64, f64)>) -> PyResult<()> {
-    match extent {
-        Some((lo, hi)) if !lo.is_finite() || !hi.is_finite() || lo >= hi => {
-            Err(PyValueError::new_err(format!(
-                "{voice}: {slot} must satisfy lo < hi with both finite; got ({lo}, {hi})"
-            )))
-        }
-        _ => Ok(()),
-    }
+    crate::transform::pair_arg::refuse_malformed_range(LABEL, "extent", spec.extent)
 }
 
 pub(crate) fn apply(spec: &KdeSpec, batch: &RecordBatch) -> PyResult<RecordBatch> {

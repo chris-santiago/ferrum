@@ -981,9 +981,9 @@ impl<'a> AuxRead<'a> {
 
     /// How this read's binding reads a `Timestamp` column on `channel`
     /// ([`timestamp_read`]); a raster image's cells are numbers, never dates.
-    pub(in crate::render) fn timestamp_read(&self, channel: &str, of_dates: bool) -> TimestampRead {
+    pub(in crate::render) fn timestamp_read(&self, channel: &str, groups_by_category: bool, of_dates: bool) -> TimestampRead {
         match self.kind {
-            AuxReadKind::Column { binding } => timestamp_read(channel, Some(binding), self.mark, of_dates),
+            AuxReadKind::Column { binding } => timestamp_read(channel, Some(binding), groups_by_category, of_dates),
             AuxReadKind::RasterCells { .. } => TimestampRead::Temporal,
         }
     }
@@ -994,13 +994,14 @@ impl<'a> AuxRead<'a> {
     fn reads_categorical_on(
         &self,
         channel: &str,
+        groups_by_category: bool,
         of_dates: bool,
         primary_batch: &RecordBatch,
         transform_outputs: &HashMap<String, RecordBatch>,
     ) -> bool {
         self.reads_categorical(primary_batch, transform_outputs)
             || (self.is_timestamp_column(primary_batch, transform_outputs)
-                && self.timestamp_read(channel, of_dates) == TimestampRead::Categories)
+                && self.timestamp_read(channel, groups_by_category, of_dates) == TimestampRead::Categories)
     }
 
     /// Whether this read's values read as categories: a column by its
@@ -1092,6 +1093,34 @@ struct ReadExtent {
     has_values: bool,
 }
 
+/// The binding `layer` draws on the auxiliary `channel`, with the cell field
+/// of a raster image it drew it through, or `None` when it draws none: its
+/// own binding, or, when its mark takes an inherited binding of the channel
+/// ([`Mark::draws_inherited`]), the one Python listed on it or the chart's
+/// (`chart_encoding`), kept only when the layer's mark draws the channel
+/// ([`crate::render::drawn::DrawFacts::draws`]). A text yields no read for a
+/// color it does not own (declined); a contrast-ink text's own color reads
+/// the scale without painting a hue from it; a yielding line's inherited
+/// width and an arrowless segment's `fill_opacity` are no read either: all
+/// judged by the one rule, so none of them establishes the scale, widens its
+/// domain, or contributes to its legend (`undrawn_channel_warnings`
+/// separately counts each as bound-but-undrawn). Reads no batch except
+/// through `cells_of`, which is asked only once a binding exists, so
+/// [`aux_reads`] and the published category-read set
+/// ([`crate::render::category_read::category_read_fields`], which has no rows
+/// and passes `|| None`) decide which layers draw a channel in one place.
+pub(in crate::render) fn layer_drawn_binding<'a>(
+    layer: &'a Layer,
+    chart_encoding: &'a crate::spec::encoding::Encoding,
+    channel: crate::spec::encoding::AuxiliaryScaleChannel,
+    cells_of: impl FnOnce() -> Option<&'a str>,
+) -> Option<(&'a crate::spec::encoding::EncodingSpec, Option<&'a str>)> {
+    let binding = channel.binding(&layer.encoding).as_ref().or(channel.binding(chart_encoding).as_ref())?;
+    let cells = cells_of();
+    let facts = crate::render::drawn::DrawFacts::of_layer(layer, chart_encoding, cells);
+    facts.draws(channel.drawn_as()).is_ok().then_some((binding, cells))
+}
+
 /// The reads that make up a layered spec's non-positional `channel` domain,
 /// in layer order, one per layer: every layer that draws the channel,
 /// reading the field it draws from the batch it draws ([`LayerSource::of`]).
@@ -1132,33 +1161,17 @@ pub(in crate::render) fn aux_reads<'a>(
     let mut reads: Vec<AuxRead<'a>> = Vec::new();
     for (index, layer) in layers.iter().enumerate() {
         let drawn = channel.drawn_as();
-        // A layer's own binding, or, when its mark takes an inherited
-        // binding of the channel ([`Mark::draws_inherited`]), the one Python
-        // listed on it or the chart's.
-        let Some(binding) = channel.binding(&layer.encoding).as_ref().or(channel.binding(chart_encoding).as_ref())
-        else {
-            continue;
-        };
-        let field = binding.field.as_str();
         let source = LayerSource::of(layer);
         // A raster image's cells, read only for `color`: the one field
         // [`crate::render::drawn::DrawFacts::draws`] needs to tell a
         // drawing raster image from one whose binding names another field.
-        let cells = (drawn == InheritedChannel::Color)
-            .then(|| source.batch(primary_batch, transform_outputs).and_then(crate::render::marks::image::raster_value_field))
-            .flatten();
-        let facts = crate::render::drawn::DrawFacts::of_layer(layer, chart_encoding, cells);
-        // A text yields no read for a color it does not own (declined); a
-        // contrast-ink text's own color reads the scale without painting a
-        // hue from it; a yielding line's inherited width and an arrowless
-        // segment's `fill_opacity` are no read either — all judged by the
-        // one rule, so none of them establishes the scale, widens its
-        // domain, or contributes to its legend
-        // (`undrawn_channel_warnings` separately counts each as
-        // bound-but-undrawn).
-        if facts.draws(drawn).is_err() {
-            continue;
-        }
+        let cells_of = || {
+            (drawn == InheritedChannel::Color)
+                .then(|| source.batch(primary_batch, transform_outputs).and_then(crate::render::marks::image::raster_value_field))
+                .flatten()
+        };
+        let Some((binding, cells)) = layer_drawn_binding(layer, chart_encoding, channel, cells_of) else { continue };
+        let field = binding.field.as_str();
         if drawn == InheritedChannel::Color {
             if let Some(cmap) = raster_cells_drawn(layer, chart_encoding, cells) {
                 let kind = AuxReadKind::RasterCells { cmap, entry: layer.entry.as_deref() };
@@ -1318,27 +1331,60 @@ pub(in crate::render) fn overlay_raster_cell_reads<'a>(members: &[super::LeafRes
 /// reads. Only an area that draws color groups it, so an area beside the
 /// layers that do changes nothing, in whatever order they are layered.
 pub(in crate::render) fn color_grouping_area(chart_mark: Mark, reads: &[AuxRead<'_>]) -> Option<usize> {
-    match reads {
-        [] => (chart_mark == Mark::Area).then_some(0),
-        reads => reads.iter().find(|read| read.mark == Mark::Area).map(|read| read.layer),
+    grouping_layer(chart_mark, reads.iter().map(|read| (read.layer, read.mark)))
+}
+
+/// [`color_grouping_area`] over `(layer, mark)` pairs, the one rule the
+/// engine's reads and the published category-read set
+/// ([`crate::render::category_read::category_read_fields`], which has no
+/// batches to build reads from) both decide a color scale's grouping by.
+pub(in crate::render) fn grouping_layer(chart_mark: Mark, drawing: impl Iterator<Item = (usize, Mark)>) -> Option<usize> {
+    let mut drawing = drawing.peekable();
+    if drawing.peek().is_none() {
+        return (chart_mark == Mark::Area).then_some(0);
     }
+    drawing.find(|(_, mark)| *mark == Mark::Area).map(|(layer, _)| layer)
 }
 
 /// Whether the establishing (first) read of a chart-level `channel` scale is a
 /// date its binding reads as categories, which makes the scale one of dates:
-/// a later layer's date on it reads as categories too.
+/// a later layer's date on it reads as categories too. `groups_by_category`
+/// is the scale's own fact ([`timestamp_read`]).
 fn lead_reads_dates_as_categories(
     reads: &[AuxRead<'_>],
     channel: &str,
+    groups_by_category: bool,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
 ) -> bool {
     reads.first().is_some_and(|lead| match lead.kind {
         AuxReadKind::Column { binding } => {
-            establishes_dates(channel, binding, lead.mark, lead.is_timestamp_column(primary_batch, transform_outputs))
+            establishes_dates(channel, binding, groups_by_category, lead.is_timestamp_column(primary_batch, transform_outputs))
         }
         AuxReadKind::RasterCells { .. } => false,
     })
+}
+
+/// The layers whose `Timestamp` column the engine reads as categories on the
+/// `channel` scale resolved over `reads`, the answer the published
+/// category-read set is held to.
+#[cfg(test)]
+pub(in crate::render) fn timestamp_reads_as_categories(
+    reads: &[AuxRead<'_>],
+    channel: &str,
+    groups_by_category: bool,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> Vec<usize> {
+    let of_dates = lead_reads_dates_as_categories(reads, channel, groups_by_category, primary_batch, transform_outputs);
+    reads
+        .iter()
+        .filter(|read| {
+            read.is_timestamp_column(primary_batch, transform_outputs)
+                && read.timestamp_read(channel, groups_by_category, of_dates) == TimestampRead::Categories
+        })
+        .map(|read| read.layer)
+        .collect()
 }
 
 /// The reads a chart-level `channel` scale admits into its domain: those whose
@@ -1362,8 +1408,9 @@ pub(in crate::render) fn admitted_aux_reads<'a>(
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
-    let of_dates = lead_reads_dates_as_categories(reads, channel, primary_batch, transform_outputs);
-    let reads_categorical = |read: &AuxRead<'a>| read.reads_categorical_on(channel, of_dates, primary_batch, transform_outputs);
+    // Grouping is a colour scale's fact: no other channel has one.
+    let of_dates = lead_reads_dates_as_categories(reads, channel, false, primary_batch, transform_outputs);
+    let reads_categorical = |read: &AuxRead<'a>| read.reads_categorical_on(channel, false, of_dates, primary_batch, transform_outputs);
     let reads_kind = ReadsKind { scale_reads_categorical, reads_categorical: &reads_categorical };
     admit_reads(reads, channel, reads_kind, None, primary_batch, transform_outputs, warnings)
 }
@@ -1404,8 +1451,12 @@ pub(in crate::render) fn admitted_color_reads<'a>(
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
-    let of_dates = lead_reads_dates_as_categories(reads, "color", primary_batch, transform_outputs);
-    let column_kind = |read: &AuxRead<'a>| read.reads_categorical_on("color", of_dates, primary_batch, transform_outputs);
+    // Only a grouped colour scale reads a sibling's date as categories by
+    // grouping; a binned or kind-decided one has no area drawing it.
+    let groups_by_category = matches!(kind, ColorReads::Grouped);
+    let of_dates = lead_reads_dates_as_categories(reads, "color", groups_by_category, primary_batch, transform_outputs);
+    let column_kind =
+        |read: &AuxRead<'a>| read.reads_categorical_on("color", groups_by_category, of_dates, primary_batch, transform_outputs);
     let dtype_kind = |read: &AuxRead<'a>| {
         read.locate(primary_batch, transform_outputs)
             .is_some_and(|located| dtype_reads_categorical(located.col.data_type()))
@@ -1557,9 +1608,9 @@ pub(in crate::render) fn sided_aux_numeric_union(
 /// layered spec: each read's distinct values, unioned in layer order, as
 /// [`positional_category_union`] unions an axis's categories (dates in time
 /// order whichever frame holds them). Each read's dates read as its own
-/// binding reads them on `channel` ([`timestamp_read`]); the establishing read
-/// being a date category makes the scale one of dates, so a later read's dates
-/// join it. A read of the chart's data takes the all-panels batch on a faceted
+/// binding reads them on `channel` ([`timestamp_read`], with the scale's own
+/// `groups_by_category`); the establishing read being a date category makes
+/// the scale one of dates, so a later read's dates join it. A read of the chart's data takes the all-panels batch on a faceted
 /// chart ([`super::shared_categorical_batch`]). Returns the domain, the first
 /// contributing batch and that batch's read, whose own pre-statistic rows a
 /// data-aware `sort=` reads instead of aggregating over the domain batch
@@ -1569,6 +1620,7 @@ pub(in crate::render) fn sided_aux_numeric_union(
 pub(in crate::render) fn aux_category_union<'b>(
     reads: &[AuxRead<'b>],
     channel: &str,
+    groups_by_category: bool,
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     facet_shared: bool,
@@ -1577,7 +1629,7 @@ pub(in crate::render) fn aux_category_union<'b>(
     for read in reads {
         let Some(batch) = read.column_batch(primary_batch, transform_outputs, facet_shared) else { continue };
         let of_dates = union.as_ref().is_some_and(|(domain, ..)| domain.of_dates());
-        let domain = CategoryDomain::from_column(batch, read.field, read.timestamp_read(channel, of_dates))?;
+        let domain = CategoryDomain::from_column(batch, read.field, read.timestamp_read(channel, groups_by_category, of_dates))?;
         match union.as_mut() {
             Some((united, ..)) => united.join(&domain),
             None => union = Some((domain, batch, *read)),
@@ -3671,7 +3723,6 @@ pub(in crate::render) fn establishing_categories(
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
     let establisher = spec.layers.as_deref().and_then(|layers| establishing_axis_layer(spec, layers, channel));
     let source = establisher.map(|(_, layer)| LayerSource::of(layer));
-    let mark = establisher.map_or(spec.mark, |(_, layer)| layer.mark);
     let reads_chart_rows = source.is_none_or(LayerSource::is_chart);
     distinct_positional_categories_shared(
         seed.batch,
@@ -3679,7 +3730,7 @@ pub(in crate::render) fn establishing_categories(
         transform_outputs,
         include_final && reads_chart_rows,
         source.map_or(FINAL_OUTPUT_KEY, LayerSource::all_panel_key),
-        timestamp_read(channel, Some(binding), mark, false),
+        timestamp_read(channel, Some(binding), false, false),
     )
 }
 
@@ -3723,11 +3774,11 @@ pub(in crate::render) fn axis_of_dates(
     transform_outputs: &HashMap<String, RecordBatch>,
 ) -> bool {
     let Some(seed) = locate_seed_field(channel, &binding.field, spec, primary_batch, transform_outputs) else { return false };
-    let (establishing, mark, _) = establishing_axis_read(spec, channel).unwrap_or((binding, spec.mark, None));
+    let (establishing, _, _) = establishing_axis_read(spec, channel).unwrap_or((binding, spec.mark, None));
     establishes_dates(
         channel,
         establishing,
-        mark,
+        false,
         matches!(seed.col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)),
     )
 }
@@ -3822,14 +3873,9 @@ pub(in crate::render) fn positional_category_union(
     let seeds = seed_reads(spec, layers, channel, (field, None), &AxisReads::unstacked(layers));
     for (position, seed) in seeds.iter().enumerate() {
         let Some(located) = seed.source.locate(seed.field, primary_batch, transform_outputs) else { continue };
-        // The establishing seed reads as the rendering binding does; a later
-        // layer's inherited field reads as the chart's binding does on that
-        // layer's mark, on a scale of dates once dates established it.
-        let mark = match seed.inheritor {
-            Some(layer) => layers.get(layer).map_or(spec.mark, |layer| layer.mark),
-            None => establishing_axis_layer(spec, layers, channel).map_or(spec.mark, |(_, layer)| layer.mark),
-        };
-        let read = timestamp_read(channel, Some(binding), mark, position > 0 && domain.of_dates());
+        // Every seed reads as the rendering binding does (a position has no
+        // grouping), on a scale of dates once dates established it.
+        let read = timestamp_read(channel, Some(binding), false, position > 0 && domain.of_dates());
         if seed.inheritor.is_some()
             && crate::render::arrow_cast::ensure_category_keyable(seed.field, located.col.data_type(), read).is_err()
         {
@@ -3935,7 +3981,7 @@ pub(in crate::render) fn positional_category_union(
         // column (`x="yr"` over `Int64`, which infers Quantitative) is the same
         // shape — both would silently lose every mark, which is the defect this
         // function exists to prevent.
-        let read = timestamp_read(channel, Some(layer_enc), layer.mark, domain.of_dates());
+        let read = timestamp_read(channel, Some(layer_enc), false, domain.of_dates());
         if crate::render::arrow_cast::ensure_category_keyable(layer_field, located.col.data_type(), read).is_err() {
             continue;
         }
@@ -6830,9 +6876,56 @@ mod tests {
         assert_eq!(admitted.len(), 2);
         assert!(warnings.is_empty(), "{warnings:?}");
         // Its dates join the domain in time order beside the lead's.
-        let union = aux_category_union(&admitted, "color", &rows, &outputs, false).unwrap().expect("two reads");
+        let union = aux_category_union(&admitted, "color", false, &rows, &outputs, false).unwrap().expect("two reads");
         assert!(union.0.of_dates());
         assert_eq!(union.0.labels(), ["2024-01-01"]);
+    }
+
+    /// Under an area that draws colour the scale groups by category, so a
+    /// sibling layer's undeclared date joins it as its label text, whichever
+    /// layer is written first. Read without the scale's grouping fact the
+    /// same date reads as time and the union fails with the internal text, the
+    /// answer before the fact was passed.
+    #[test]
+    fn a_later_layers_date_colour_joins_an_area_grouped_scale_in_either_order() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use arrow::array::{StringArray, TimestampMillisecondArray};
+        let color = |field: &str| Encoding {
+            color: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("s", DataType::Utf8, true),
+                Field::new("d", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["a"])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_704_067_200_000_i64])),
+            ],
+        )
+        .unwrap();
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
+        let (chart, outputs) = (Encoding::default(), HashMap::new());
+        for (marks, labels) in [
+            ([(Mark::Point, "d"), (Mark::Area, "s")], vec!["2024-01-01", "a"]),
+            ([(Mark::Area, "s"), (Mark::Point, "d")], vec!["a", "2024-01-01"]),
+            ([(Mark::Area, "d"), (Mark::Point, "d")], vec!["2024-01-01"]),
+        ] {
+            let layers: Vec<Layer> =
+                marks.iter().map(|(mark, field)| Layer { mark: *mark, encoding: color(field), ..Default::default() }).collect();
+            let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+            let groups = color_grouping_area(Mark::Point, &reads).is_some();
+            assert!(groups, "{marks:?}");
+            let establishing = layers[0].encoding.color.clone().expect("a colour lead");
+            let admitted = admitted_color_reads(&reads, &establishing, ColorReads::Grouped, &rows, &outputs, &mut Vec::new()).unwrap();
+            assert_eq!(admitted.len(), 2, "{marks:?}");
+            let union = aux_category_union(&admitted, "color", groups, &rows, &outputs, false).unwrap().expect("two reads");
+            assert_eq!(union.0.labels(), labels, "{marks:?}");
+            let without = aux_category_union(&admitted, "color", false, &rows, &outputs, false);
+            let refused = without.is_err() || marks[0].1 == marks[1].1;
+            assert!(refused, "{marks:?}: without the grouping fact a sibling date reads as time");
+        }
     }
 
     /// The ladder an axis of dates establishes is in time order across frames

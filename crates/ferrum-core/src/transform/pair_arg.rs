@@ -195,6 +195,25 @@ pub(crate) fn extract_scale_values(
     read_scale_items(voice, param, expected, obj)?.iter().map(|item| item.extract::<f64>()).collect()
 }
 
+/// A statistic range read off the wire (a spec field no constructor has
+/// checked): `None` and a finite `lo < hi` pass, anything else is refused in
+/// the constructor's sentence, in the refusing transform's own `voice`, the
+/// slot it read as `param`, and each end spelled as a caller would write it.
+pub(crate) fn refuse_malformed_range(voice: &str, param: &str, range: Option<(f64, f64)>) -> PyResult<()> {
+    match range {
+        Some((lo, hi)) if !(lo.is_finite() && hi.is_finite() && lo < hi) => Err(malformed_range(voice, param, lo, hi)),
+        _ => Ok(()),
+    }
+}
+
+/// The refusal [`refuse_malformed_range`] raises for the ends `lo`, `hi`.
+pub(crate) fn malformed_range(voice: &str, param: &str, lo: f64, hi: f64) -> PyErr {
+    Python::attach(|py| {
+        let end = |v: f64| End { obj: PyFloat::new(py, v).into_any(), value: Some(v) };
+        range_refusal(voice, param, &end(lo), &end(hi)).unwrap_or_else(|err| err)
+    })
+}
+
 /// `obj` as the four values of two statistic ranges, `(xmin, xmax, ymin,
 /// ymax)`. A refused pair is named in the refusal (`<param> x pair`,
 /// `<param> y pair`).
@@ -397,6 +416,28 @@ mod tests {
             let gen_ = eval(py, c_str!("iter([1, 9])"));
             assert!(extract_scale_values("LinearScale", "domain", PAIR, &gen_).is_err());
             assert_eq!(gen_.call_method0("__next__").unwrap().extract::<i64>().unwrap(), 1);
+        });
+    }
+
+    #[test]
+    fn a_wire_range_refusal_spells_its_ends_as_the_constructor_does() {
+        with_py(|py| {
+            for (range, shown) in [
+                ((9.0, 1.0), "(9, 1)"),
+                ((3.0, 3.0), "(3, 3)"),
+                ((f64::NAN, 9.0), "(nan, 9)"),
+                ((1.0, f64::INFINITY), "(1, inf)"),
+                ((1e-7, 1e-8), "(1e-07, 1e-08)"),
+                ((0.5, 0.25), "(0.5, 0.25)"),
+            ] {
+                let err = refuse_malformed_range("stat_bin", "extent", Some(range)).unwrap_err();
+                assert_eq!(
+                    err.value(py).to_string(),
+                    format!("stat_bin: extent must be (lo, hi) with lo < hi and both finite; got {shown}")
+                );
+            }
+            assert!(refuse_malformed_range("stat_bin", "extent", None).is_ok());
+            assert!(refuse_malformed_range("stat_bin", "extent", Some((1.0, 2.0))).is_ok());
         });
     }
 

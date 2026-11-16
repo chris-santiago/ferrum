@@ -40,6 +40,32 @@ fn col(b: &RecordBatch, name: &str) -> Vec<f64> {
 }
 
 #[test]
+fn a_reversed_or_equal_wire_x_range_is_refused_in_the_constructor_sentence() {
+    pyo3::Python::initialize();
+    let batch = xy_batch(vec![1.0, 2.0, 3.0, 4.0], vec![1.0, 2.0, 3.0, 5.0]);
+    for (x_range, shown) in [([9.0, 1.0], "(9, 1)"), ([3.0, 3.0], "(3, 3)")] {
+        let spec = SmoothSpec {
+            residual_columns: Default::default(),
+            x: "x".into(), y: "y".into(),
+            method: SmoothMethod::Lm,
+            ci: None,
+            bandwidth: 0.0, degree: 1, k: gam::DEFAULT_BASIS_DIM, n: 5, seed: 0,
+            x_bins: None, x_estimator: None, output: SmoothOutput::Fitted,
+            inject_zero_ref: false,
+            inject_metrics: false,
+            x_range: Some(x_range), x_range_pad: None,
+            groupby: vec![],
+            name: None,
+        };
+        let err = apply(&spec, &batch).expect_err("a malformed x_range refuses");
+        assert_eq!(
+            err.to_string(),
+            format!("ValueError: stat_smooth: x_range must be (lo, hi) with lo < hi and both finite; got {shown}")
+        );
+    }
+}
+
+#[test]
 fn test_lm_recovers_slope_and_intercept_exactly() {
     let xs: Vec<f64> = (0..10).map(|i| i as f64).collect();
     let ys: Vec<f64> = xs.iter().map(|x| 3.0 + 2.0 * x).collect();

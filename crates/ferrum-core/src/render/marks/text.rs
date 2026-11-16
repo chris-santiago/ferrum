@@ -107,6 +107,7 @@ pub(in crate::render) fn text_glyphs(
             text_format_type,
             "text",
             crate::render::FormatSurface::Channel,
+            false,
         )?;
     }
     let texts: Option<Vec<Option<String>>> = match text_field {

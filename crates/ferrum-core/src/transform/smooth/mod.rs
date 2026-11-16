@@ -313,6 +313,7 @@ pub(crate) fn apply_with_context(
     if matches!(spec.output, SmoothOutput::Residuals) {
         spec.residual_columns.check("stat_smooth")?;
     }
+    crate::transform::pair_arg::refuse_malformed_range("stat_smooth", "x_range", spec.x_range.map(|[a, b]| (a, b)))?;
     let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
     let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
     if x_slot.is_none() && y_slot.is_none() {

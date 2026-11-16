@@ -102,7 +102,7 @@ pub(crate) fn apply_with_context(
         "kernel",
         &spec.kernel,
     )?;
-    crate::transform::kde::refuse_malformed_extent("data_density", "extent", spec.extent)?;
+    crate::transform::pair_arg::refuse_malformed_range("data_density", "extent", spec.extent)?;
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("data_density: column '{}' not found", spec.field))
@@ -793,7 +793,7 @@ mod tests {
         for (extent, shown) in [
             ((9.0, 1.0), "(9, 1)"),
             ((3.0, 3.0), "(3, 3)"),
-            ((f64::NAN, 9.0), "(NaN, 9)"),
+            ((f64::NAN, 9.0), "(nan, 9)"),
             ((1.0, f64::INFINITY), "(1, inf)"),
         ] {
             let spec = DensityDataSpec { extent: Some(extent), ..base_spec() };
@@ -801,7 +801,7 @@ mod tests {
             assert_eq!(
                 err.to_string(),
                 format!(
-                    "ValueError: data_density: extent must satisfy lo < hi with both finite; got {shown}"
+                    "ValueError: data_density: extent must be (lo, hi) with lo < hi and both finite; got {shown}"
                 )
             );
         }

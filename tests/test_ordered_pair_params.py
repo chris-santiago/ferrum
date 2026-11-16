@@ -357,7 +357,8 @@ _DENSITY_DATA_EXTENTS = [
     ("equal", [3, 3], "(3, 3)"),
 ]
 _DENSITY_DATA_STAT = (
-    "transform failed: ValueError: data_density: extent must satisfy lo < hi with both finite; got "
+    "transform failed: ValueError: data_density: extent must be (lo, hi) with lo < hi and both "
+    "finite; got "
 )
 _COMPOSITE_LEAF = "failed to render composite leaf leaf #0: "
 
@@ -469,6 +470,98 @@ def test_density_data_dict_refuses_a_non_finite_extent(output, extent):
     token = "NaN" if extent[0] != extent[0] else "Infinity"
     expected = f"transforms_json: expected value at line 1 column {payload.index(token) + 1}"
     assert _render_refusal(_density_data_chart(extent), output) == expected
+
+
+def _wire_step(kind: str, **fields: Any) -> dict[str, Any]:
+    """The wire dict of a default ``kind`` transform (the dict the engine reads), with *fields*
+    set over it, so the step is as complete as the constructor writes it."""
+    from ferrum._layer_transforms import _transforms_to_json_list_named
+
+    builders = {
+        "kde": lambda: fm.Kde("v"),
+        "violin": lambda: fm.Violin("v"),
+        "bin": lambda: fm.Bin("v"),
+        "bin_2d": lambda: fm.Bin2D("v", "w"),
+        "kde2_d": lambda: fm.Kde2D("v", "w"),
+        "robust": lambda: fm.Robust("v", "w"),
+        "smooth": lambda: fm.Smooth("v", "w"),
+    }
+    return {**_transforms_to_json_list_named([builders[kind]()])[0], **fields}
+
+
+def _wire_range(voice: str, param: str, shown: str) -> str:
+    return (
+        f"transform failed: ValueError: {voice}: {param} must be (lo, hi) with lo < hi and "
+        f"both finite; got {shown}"
+    )
+
+
+# (id, wire step, the refusal): every wire door reads a malformed range in the sentence the
+# constructors give, in the statistic's own voice, with each end spelled as Python spells it.
+_WIRE_RANGES: list[tuple[str, dict[str, Any], str]] = [
+    ("kde-extent", _wire_step("kde", extent=[9, 1]), _wire_range("stat_kde", "extent", "(9, 1)")),
+    (
+        "kde-count_scale_extent",
+        _wire_step("kde", count_scale_extent=[10, 0]),
+        _wire_range("stat_kde", "count_scale_extent", "(10, 0)"),
+    ),
+    (
+        "violin-extent",
+        _wire_step("violin", extent=[9, 1]),
+        _wire_range("stat_violin", "extent", "(9, 1)"),
+    ),
+    ("bin-extent", _wire_step("bin", extent=[9, 1]), _wire_range("stat_bin", "extent", "(9, 1)")),
+    ("bin-equal", _wire_step("bin", extent=[3, 3]), _wire_range("stat_bin", "extent", "(3, 3)")),
+    (
+        "bin-exponent",
+        _wire_step("bin", extent=[1e-7, 1e-8]),
+        _wire_range("stat_bin", "extent", "(1e-07, 1e-08)"),
+    ),
+    (
+        "bin_2d-x",
+        _wire_step("bin_2d", extent_x=[9, 1]),
+        _wire_range("Bin2D", "extent_x", "(9, 1)"),
+    ),
+    (
+        "kde2_d-x",
+        _wire_step("kde2_d", extent=[9, 1, -3, 3]),
+        _wire_range("stat_kde_2d", "extent x pair", "(9, 1)"),
+    ),
+    (
+        "kde2_d-y",
+        _wire_step("kde2_d", extent=[0, 1, 3, -3]),
+        _wire_range("stat_kde_2d", "extent y pair", "(3, -3)"),
+    ),
+    (
+        "robust-x_range",
+        _wire_step("robust", x_range=[9, 1]),
+        _wire_range("Robust", "x_range", "(9, 1)"),
+    ),
+    (
+        "robust-equal",
+        _wire_step("robust", x_range=[3, 3]),
+        _wire_range("Robust", "x_range", "(3, 3)"),
+    ),
+    (
+        "smooth-x_range",
+        _wire_step("smooth", x_range=[9, 1]),
+        _wire_range("stat_smooth", "x_range", "(9, 1)"),
+    ),
+    (
+        "smooth-equal",
+        _wire_step("smooth", x_range=[3, 3]),
+        _wire_range("stat_smooth", "x_range", "(3, 3)"),
+    ),
+]
+
+
+@pytest.mark.parametrize("output", ["svg", "interactive"])
+@pytest.mark.parametrize(
+    ("step", "refusal"), [(s, r) for _, s, r in _WIRE_RANGES], ids=[i for i, _, _ in _WIRE_RANGES]
+)
+def test_a_wire_range_is_refused_in_the_family_sentence(output, step, refusal):
+    chart = fm.Chart(_frame()).transform(step).mark_line().encode(x="v:Q", y="w:Q")
+    assert _render_refusal(chart, output) == refusal
 
 
 def test_density_data_dict_keeps_an_ordered_extent():

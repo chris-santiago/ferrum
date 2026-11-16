@@ -59,12 +59,14 @@ from ferrum._validate import (
 )
 from ferrum._warn import user_stacklevel
 from ferrum._encode_lowering import (
+    _generic_aggregate_remedy,
     _rebind_positional,
+    _refuse_bin_or_aggregate,
     _refuse_categorical_input,
-    _refuse_histogram_bin_aggregate,
+    _unbound_input_refusal,
 )
 from ferrum.encoding._resolve import channel_for_value
-from ferrum.encoding.base import ChannelBase
+from ferrum.encoding.base import ChannelBase, _unset_statistic
 from ferrum.marks._desugar_helpers import _unique_col_name, nominal_color_channel
 from ferrum.marks.base import _is_paint_sentinel
 from ferrum.plots._helpers import (
@@ -1722,6 +1724,45 @@ def _time_type_reads(channel: str, field: str, type_: str) -> str:
     )
 
 
+def _refuse_bin2d_bin_aggregate(x_ch: Any, y_ch: Any) -> None:
+    """Refuse an x/y channel the hist centre's ``Bin2D`` cannot honor.
+
+    ``Bin2D`` bins both axes by its own rule, so each axis is a binned
+    axis (neither is a value axis). A fieldless axis names no variable to
+    bin; a ``bin=`` that states a rule is a second, conflicting rule
+    (``bin=True`` asks for what the centre already does and stays
+    honored); an ``aggregate=`` folds into nothing.
+    """
+    channels = {"x": x_ch, "y": y_ch}
+    unbound = tuple(axis for axis, ch in channels.items() if _field_name(ch) is None)
+    if unbound:
+        raise _unbound_input_refusal("jointplot", unbound, "the histogram bins")
+    for axis, ch in channels.items():
+        if not isinstance(ch, ChannelBase):
+            continue
+        if not _unset_statistic("bin", ch._kwargs.get("bin")) and ch._kwargs.get("bin") is not True:
+            _refuse_bin_or_aggregate(
+                "jointplot",
+                axis,
+                ch,
+                "bin",
+                reason=f"the histogram bins {axis} by its own rule",
+                remedy=(
+                    f"State the rule with joint_kws={{'bins_{axis}': ...}} and "
+                    "marginal_kws={'bins': ...}, or drop bin=."
+                ),
+            )
+        if not _unset_statistic("aggregate", ch._kwargs.get("aggregate")):
+            _refuse_bin_or_aggregate(
+                "jointplot",
+                axis,
+                ch,
+                "aggregate",
+                reason=f"the histogram bins {axis} rather than aggregating it",
+                remedy=_generic_aggregate_remedy(ch),
+            )
+
+
 def _axis_channel(name: str, value: Any) -> Any:
     """Return *value* as the channel ``encode()`` reads it as; any other value unchanged.
 
@@ -1858,20 +1899,16 @@ def _jointplot_build(
         }
         # x/y are read the way `encode()` reads them (a shorthand string is
         # the channel it spells) and a channel names the column it bins by its
-        # field. Bin2D computes both axes itself, so a bin=/aggregate= on
-        # either is refused the way a histogram's value axis refuses it (each
-        # axis is the value axis of one orientation). A declared time type is
-        # refused as the categorical types are: the bins are numbers. The
-        # channel keeps its options on the bin column that is drawn (titled
-        # by its field), and a limit becomes the domain of its scale.
+        # field. Bin2D bins both axes itself, so each axis is a binned axis: a
+        # fieldless one, a bin= that states a rule and an aggregate= are
+        # refused in the centre's own words (`bin=True` asks for what the
+        # centre already does and draws as the bare call does). A declared
+        # time type is refused as the categorical types are: the bins are
+        # numbers. The channel keeps its options on the bin column that is
+        # drawn (titled by its field), and a limit becomes the domain of its
+        # scale.
         x_ch, y_ch = _axis_channel("x", x), _axis_channel("y", y)
-        for horizontal, encoding in (
-            (False, {"x": _field_name(x_ch), "y": y_ch}),
-            (True, {"x": x_ch, "y": _field_name(y_ch)}),
-        ):
-            _refuse_histogram_bin_aggregate(
-                "mark_histogram", encoding, horizontal=horizontal, density=False, share=None
-            )
+        _refuse_bin2d_bin_aggregate(x_ch, y_ch)
         for axis in ("x", "y"):
             _refuse_categorical_input(
                 "jointplot",

@@ -10,6 +10,7 @@ is installed; otherwise it falls back to returning a clone (SVG path).
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import pathlib
 from typing import TYPE_CHECKING, Any, Callable
@@ -108,6 +109,10 @@ class InteractiveChart:
         self._chart = chart
         self._toolbar = toolbar
         self._scene_json, self._packed_data = _render_scene(chart)
+        # The theme and ``ferrum.config`` scope in force now: every later render this object
+        # makes (a save, a zoom rebuild) runs in a copy of it. Taken after the render so the
+        # warn-once record that render filled is shared.
+        self._context = contextvars.copy_context()
         self._selection_callbacks: list[Callable] = []
         self._widget: Any = None
         self._output_widget: Any = None  # ipywidgets.Output, created lazily by on_selection_change
@@ -150,7 +155,7 @@ class InteractiveChart:
         try:
             # Apply per-panel xlim/ylim overrides from JS zoom state.
             new_chart = self._apply_zoom_domains(zoom)
-            new_json, new_packed = _render_scene(new_chart)
+            new_json, new_packed = self._context.copy().run(_render_scene, new_chart)
             if self._widget is not None:
                 with self._widget.hold_sync():
                     self._widget.scene_json = new_json
@@ -242,12 +247,15 @@ class InteractiveChart:
 
         Routes through the save-format router shared with ``Chart.save`` and
         the composition ``save`` methods, so the path extension is honored
-        (``.html`` / ``.svg`` / ``.png`` / ``.json`` / ``.pdf``).  The HTML
-        and JSON outputs are built from the scene rendered at construction;
-        SVG, PNG and PDF render their own output at call time, so a change to the
-        chart's data or the default theme after construction shows in those
-        three and not in the HTML and JSON.  The interactive ``toolbar`` flag captured at construction time
-        is carried into HTML output.
+        (``.html`` / ``.svg`` / ``.png`` / ``.json`` / ``.pdf``).  Every
+        format draws the chart as it stood in the theme and ``ferrum.config``
+        scope where ``.interactive()`` was called; ``.svg``, ``.png`` and
+        ``.pdf`` each render their own kind once, and ``.html`` and ``.json``
+        write the scene rendered at construction.  The chart reads its data
+        when it renders, so an in-place edit of a mutable frame after
+        ``.interactive()`` reaches the ``.svg``, ``.png`` and ``.pdf`` saves
+        and not the ``.html`` and ``.json``.  The interactive ``toolbar`` flag
+        captured at construction time is carried into HTML output.
 
         Parameters
         ----------
@@ -277,15 +285,17 @@ class InteractiveChart:
         """
         from ferrum.display import _save_chart
 
-        _save_chart(
-            self._chart,
-            path,
-            scene=(self._scene_json, self._packed_data),
-            format=format,
-            embed_wasm=embed_wasm,
-            csp_nonce=csp_nonce,
-            scale=scale,
-            toolbar=self._toolbar,
+        self._context.copy().run(
+            lambda: _save_chart(
+                self._chart,
+                path,
+                scene=(self._scene_json, self._packed_data),
+                format=format,
+                embed_wasm=embed_wasm,
+                csp_nonce=csp_nonce,
+                scale=scale,
+                toolbar=self._toolbar,
+            )
         )
 
     def to_html(

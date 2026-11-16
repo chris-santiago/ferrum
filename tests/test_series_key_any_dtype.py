@@ -2463,3 +2463,84 @@ def test_a_chart_with_a_date_axis_and_no_temporal_key_draws_as_it_did(mark: str)
     )
     svg, messages = _render_capturing(_by_detail(mark, frame).to_svg)
     assert (hashlib.sha256(svg.encode()).hexdigest(), tuple(messages)) == _DATE_AXIS_DIGESTS[mark]
+
+
+# ---------------------------------------------------------------------------
+# A date colour joins an area-grouped colour scale as categories, in either layer order
+# ---------------------------------------------------------------------------
+
+_AREA_GROUPED_DOORS = ["plus", "chart-layer", "layer-chart", "layer-chart-independent-y"]
+_AREA_GROUPED_ORDERS = ["area_first", "point_first"]
+
+
+def _area_grouped(door: str, order: str, mark: str, text: pl.DataFrame, date: pl.DataFrame) -> Any:
+    """An area layer coloured by the text column and a ``mark`` layer coloured by the date column,
+    the area first or last, drawn through ``door``."""
+    encoding = {"x": "t", "y": "v", "color": "d"}
+    area = fm.Chart(text).mark_area().encode(**encoding)
+    other = getattr(fm.Chart(date), f"mark_{mark}")().encode(**encoding)
+    lead, later = (area, other) if order == "area_first" else (other, area)
+    if door == "plus":
+        return lead + later
+    if door == "chart-layer":
+        layer = fm.Layer(
+            mark="area" if order == "point_first" else mark,
+            data=text if order == "point_first" else date,
+            encoding=encoding,
+        )
+        return lead.layer(layer)
+    resolve = {"y": "independent"} if door.endswith("independent-y") else None
+    return fm.LayerChart(lead, later, **({"resolve": resolve} if resolve else {}))
+
+
+@pytest.mark.parametrize("output", _OUTPUTS)
+@pytest.mark.parametrize("kind", _ROUTE_KINDS)
+@pytest.mark.parametrize("mark", ["point", "line"])
+@pytest.mark.parametrize("order", _AREA_GROUPED_ORDERS)
+@pytest.mark.parametrize("door", _AREA_GROUPED_DOORS)
+def test_a_later_layers_date_colour_joins_an_area_grouped_colour_scale_as_its_label_text_does(
+    door: str, order: str, mark: str, kind: str, output: _Output
+):
+    """An area reads its colour as categories, so a sibling layer's date colour joins that scale
+    in either layer order and draws what the same layer over the dates' label text draws."""
+    millis = _two_keys(kind)
+    text = _frame(pl.Series("d", ["a", "b"]))
+
+    def draw(key: pl.Series) -> tuple[Any, list[str]]:
+        return _route_draw(_area_grouped(door, order, mark, text, _frame(key)), output)
+
+    drawn, messages = draw(_temporal(kind, millis))
+    twin, twin_messages = draw(_text_of_the_keys(millis))
+    assert drawn == twin
+    assert messages == twin_messages == []
+
+
+@pytest.mark.parametrize("output", _OUTPUTS)
+@pytest.mark.parametrize("kind", _ROUTE_KINDS)
+def test_an_area_inheriting_a_date_colour_draws_as_its_label_text_does(kind: str, output: _Output):
+    """A layer that inherits the chart's colour on an area reads it as categories too."""
+    millis = _two_keys(kind)
+    encoding = {"x": "t", "y": "v", "color": "d"}
+
+    def draw(key: pl.Series) -> tuple[Any, list[str]]:
+        chart = fm.Chart(_frame(key)).mark_point().encode(**encoding).layer(fm.Layer(mark="area"))
+        return _route_draw(chart, output)
+
+    drawn, messages = draw(_temporal(kind, millis))
+    twin, twin_messages = draw(_text_of_the_keys(millis))
+    assert drawn == twin
+    assert messages == twin_messages == []
+
+
+@pytest.mark.parametrize("output", _OUTPUTS)
+@pytest.mark.parametrize("door", _ROUTE_DOORS)
+@pytest.mark.parametrize("dtype", ["Decimal", "Time"])
+def test_a_later_layers_unreadable_colour_on_an_area_grouped_scale_is_refused(
+    dtype: str, door: str, output: _Output
+):
+    key, arrow_type = _UNREADABLE_KEYS[dtype]
+    text = _frame(_text_of_the_keys(_MIDNIGHTS))
+    encoding = {"x": "t", "y": "v", "color": "d"}
+    lead = fm.Chart(text).mark_area().encode(**encoding)
+    chart = _later_point_layer(door, lead, _frame(key), encoding)
+    assert _refused(chart, output) == _sibling_refusal(door, arrow_type, output)

@@ -1854,7 +1854,7 @@ pub fn prepare_render_inputs(
     } = match legend_source {
         Some((legend_encoding, legend_layers, legend_scales)) => {
             let legend_bindings = legend::LegendBindings::new(spec, &legend_encoding);
-            legend::refuse_format_temporality_mismatch_legend_fields(&legend_bindings, &transformed, chart_config)?;
+            legend::refuse_format_temporality_mismatch_legend_fields(&legend_bindings, &transformed, legend_scales.color.as_ref(), chart_config)?;
             // The colorbar shows the scale the marks are drawn from, so it is
             // built from the color scale with `configure_color(domain=,
             // range=)` applied, which the pipeline applies to
@@ -4822,14 +4822,17 @@ pub(crate) fn refuse_format_temporality_mismatch_field(
     format_type: Option<&str>,
     channel: &'static str,
     surface: crate::render::FormatSurface,
+    reads_categories: bool,
 ) -> Result<(), RenderError> {
-    // A legend whose field the owner reads as categories (a date on a shape, a
-    // dash, or a nominal colour) lists labels, one per category, which no
-    // time format applies to: it answers a format as its text twin does.
-    let reads_dates_as_categories = matches!(surface, crate::render::FormatSurface::Legend)
-        && batch.column_by_name(&enc.field).is_some_and(|col| matches!(col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)))
-        && crate::render::category_read::timestamp_read(channel, Some(enc), crate::spec::mark::Mark::Point, false)
-            == crate::render::category_read::TimestampRead::Categories;
+    // A legend whose field the engine reads as categories (`reads_categories`:
+    // a date on a shape or a dash, a nominal colour, a colour an area groups)
+    // lists labels, one per category, which no time format applies to: it
+    // answers a format as its text twin does. The caller states the fact it
+    // read off the resolved scale of the channel; a surface that is not a
+    // legend never has one.
+    let reads_dates_as_categories = reads_categories
+        && matches!(surface, crate::render::FormatSurface::Legend)
+        && batch.column_by_name(&enc.field).is_some_and(|col| matches!(col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)));
     let Some(field) = (if reads_dates_as_categories {
         Some(crate::render::format::Temporality::NonTemporal)
     } else {

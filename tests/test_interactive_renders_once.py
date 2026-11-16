@@ -6,8 +6,12 @@ wrapping them, so a second render anywhere on the path is seen whatever Python l
 
 from __future__ import annotations
 
+import contextlib
+import json
+import re
 import warnings
 
+import pandas as pd
 import polars as pl
 import pytest
 
@@ -153,3 +157,109 @@ def test_a_render_warning_is_raised_once_through_interactive_to_html():
         chart.to_html()
     assert single
     assert [str(w.message) for w in caught] == [str(w.message) for w in single]
+
+
+# ---------------------------------------------------------------------------
+# One object, one snapshot: every output reads the defaults in force at construction
+# ---------------------------------------------------------------------------
+
+_DARK_BACKGROUND = 'fill="#1a1a2e"'
+_LIGHT_BACKGROUND = 'fill="#faf7f2"'
+
+
+def _first_fill(svg: str) -> str:
+    match = re.search(r'fill="#[0-9a-f]{6}"', svg)
+    assert match is not None
+    return match.group(0)
+
+
+def _subject(kind: str):
+    chart = _chart()
+    return chart if kind == "chart" else fm.hconcat(chart, chart)
+
+
+@pytest.mark.parametrize("kind", ["chart", "composition"])
+def test_every_save_draws_the_default_theme_of_construction_svg(tmp_path, kind):
+    subject = _subject(kind)
+    with fm.set_default_theme(fm.themes.dark):
+        ic = subject.interactive()
+        expected = subject.to_svg()
+    path = tmp_path / "a.svg"
+    ic.save(str(path))
+    saved = path.read_text()
+    assert saved == expected
+    assert _first_fill(saved) == _DARK_BACKGROUND
+    assert _first_fill(subject.to_svg()) == _LIGHT_BACKGROUND
+
+
+def test_every_save_draws_the_default_theme_of_construction_png_and_pdf(tmp_path):
+    chart = _chart()
+    with fm.set_default_theme(fm.themes.dark):
+        ic = chart.interactive()
+        expected_png = chart.to_png()
+        chart.save(str(tmp_path / "expected.pdf"))
+    ic.save(str(tmp_path / "a.png"))
+    ic.save(str(tmp_path / "a.pdf"))
+    assert (tmp_path / "a.png").read_bytes() == expected_png
+    assert (tmp_path / "a.pdf").read_bytes() == (tmp_path / "expected.pdf").read_bytes()
+    assert (tmp_path / "a.png").read_bytes() != chart.to_png()
+
+
+def test_a_save_inside_another_theme_scope_keeps_the_construction_theme(tmp_path):
+    chart = _chart()
+    ic = chart.interactive()
+    with fm.set_default_theme(fm.themes.dark):
+        ic.save(str(tmp_path / "a.svg"))
+    saved = (tmp_path / "a.svg").read_text()
+    assert saved == chart.to_svg()
+    assert _first_fill(saved) == _LIGHT_BACKGROUND
+
+
+def test_config_defaults_of_construction_reach_every_save(tmp_path):
+    chart = _chart()
+    with fm.config.defaults(width=300, height=200):
+        ic = chart.interactive()
+    ic.save(str(tmp_path / "a.svg"))
+    assert 'width="300" height="200"' in (tmp_path / "a.svg").read_text()
+    assert 'width="640"' in chart.to_svg()
+
+
+class _FakeWidget:
+    """What ``_on_zoom_change`` writes a rebuilt scene to."""
+
+    scene_json = ""
+    packed_data = b""
+    interaction_config = ""
+
+    @contextlib.contextmanager
+    def hold_sync(self):
+        yield
+
+
+@pytest.mark.filterwarnings("ignore:.*explicit domain")
+def test_a_zoom_rebuild_keeps_the_construction_theme():
+    chart = _chart()
+    with fm.set_default_theme(fm.themes.dark):
+        ic = chart.interactive()
+    ic._widget = _FakeWidget()
+    ic._on_zoom_change({"new": '{"0": {"x_domain": [1.5, 2.5], "y_domain": [1.0, 3.0]}}'})
+    background = json.loads(ic._widget.scene_json)["background"]
+    assert background == {"r": 26, "g": 26, "b": 46, "a": 255}
+
+
+def test_an_svg_save_equals_the_chart_svg_when_no_scope_differs(tmp_path):
+    chart = _chart()
+    chart.interactive().save(str(tmp_path / "a.svg"))
+    assert (tmp_path / "a.svg").read_text() == chart.to_svg()
+
+
+def test_an_in_place_frame_edit_after_construction_reaches_only_the_static_saves(tmp_path):
+    frame = pd.DataFrame({"x": [1.0, 2.0, 3.0], "y": [2.0, 1.0, 3.0]})
+    chart = fm.Chart(frame).mark_point().encode(x="x", y="y")
+    ic = chart.interactive()
+    frame.loc[0, "y"] = 30.0
+    ic.save(str(tmp_path / "a.svg"))
+    ic.save(str(tmp_path / "a.json"))
+    assert (tmp_path / "a.svg").read_text() == chart.to_svg()
+    assert (tmp_path / "a.json").read_text() == ic.scene_json
+    assert json.loads(ic.scene_json) != json.loads(chart.interactive().scene_json)

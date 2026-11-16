@@ -1502,3 +1502,161 @@ def test_a_date_joining_a_band_domain_that_omits_it_warns_as_its_label_text_twin
         return _compose(door, lead, mark, encoding, frame)
 
     _assert_twin(chart(False), chart(True), output)
+
+
+# ---------------------------------------------------------------------------
+# A static LayerChart whose merge refuses is checked as the one merged chart
+# ---------------------------------------------------------------------------
+#
+# Two members carrying conditionals on one wire channel are drawn by the static overlay and
+# refused by the merge the interactive route builds. The category check reads bindings and
+# facets, never a conditional, so it reads that one merged reading all the same.
+
+
+def _conditional(name: str) -> Any:
+    return (
+        fm.selection_point(fields=["c"], name=name)
+        .when(fm.Color("c"))
+        .otherwise(fm.value("#cccccc"))
+    )
+
+
+def _merge_refusing_pair(later_frame: pl.DataFrame) -> fm.LayerChart:
+    """A date-axis bar lead and a later point layer over ``later_frame``'s ``u`` column, each
+    carrying a conditional on colour."""
+    days = [dt.date(2020, 1, d) for d in (1, 2, 3)]
+    lead_frame = pl.DataFrame({"k": days, "v": [1.0, 2.0, 3.0], "c": ["a", "b", "c"]})
+    lead = (
+        fm.Chart(lead_frame)
+        .mark_bar()
+        .encode(x=fm.X("k", type_="N"), y="v", color=_conditional("p1"))
+    )
+    later = fm.Chart(later_frame).mark_point().encode(x="u", y="v", color=_conditional("p2"))
+    return fm.LayerChart(lead, later)
+
+
+def _later_frame(*, colliding: bool) -> pl.DataFrame:
+    if colliding:
+        base = dt.datetime(2020, 1, 1, 12)
+        values = [base, base + dt.timedelta(microseconds=100), dt.datetime(2020, 1, 2)]
+        column = pl.Series("u", values, dtype=pl.Datetime("us"))
+    else:
+        column = pl.Series("u", [1000, 2000, 3000]).cast(pl.Duration("ms"))
+    return pl.DataFrame({"v": [1.0, 2.0, 3.0], "c": ["a", "b", "c"]}).with_columns(column)
+
+
+def test_a_layerchart_whose_merge_refuses_refuses_a_duration_joining_another_members_date_axis():
+    chart = _merge_refusing_pair(_later_frame(colliding=False))
+    assert _refusal_of(chart, "static") == _duration_refusal("x", column="u")
+
+
+def test_a_layerchart_whose_merge_refuses_warns_for_a_colliding_member_on_another_members_date_axis():
+    chart = _merge_refusing_pair(_later_frame(colliding=True))
+    _, messages = _captured(chart, "static")
+    assert messages == [_COLLISION_WARNING.replace("'k'", "'u'")]
+
+
+def test_a_layerchart_whose_merge_refuses_warns_once_for_a_column_both_members_read():
+    frame = (
+        _colliding()
+        .with_columns(pl.col("v").cast(pl.Float64))
+        .with_columns(pl.Series("c", ["a", "b", "c", "a", "b"] * 3))
+    )
+
+    def member(name: str) -> fm.Chart:
+        return (
+            fm.Chart(frame).mark_point().encode(x="w", y="v", color=_conditional(name), shape="k")
+        )
+
+    _, messages = _captured(fm.LayerChart(member("s1"), member("s2")), "static")
+    assert messages == [_COLLISION_WARNING]
+
+
+def test_a_layerchart_whose_merge_refuses_keeps_its_interactive_conditional_refusal():
+    chart = _merge_refusing_pair(_later_frame(colliding=False))
+    with pytest.raises(ValueError, match="conditional"):
+        chart.interactive()
+
+
+# ---------------------------------------------------------------------------
+# A layer the engine reads as categories is checked as the engine reads it
+# ---------------------------------------------------------------------------
+#
+# The engine decides per scale whether a layer's colour reads categories (an area that draws
+# colour groups by category, a box or violin layer declares its colour nominal), so the check
+# reads the same layers the engine does: a Duration is refused and a same-millisecond
+# collision warned wherever a layer reads categories, not only on the chart-level binding.
+
+
+def _layered_colour_frame() -> pl.DataFrame:
+    """Text ``s``, a value ``b``, a date-time ``d``, a Duration ``dur`` and a column ``us`` whose
+    first two values share a millisecond."""
+    base = dt.datetime(2020, 1, 1, 12)
+    return pl.DataFrame(
+        {
+            "s": ["a", "b", "c", "a", "b", "c"],
+            "b": [1.0, 2.0, 3.0, 2.0, 3.0, 4.0],
+            "d": [dt.datetime(2020, 1, 1 + i % 3) for i in range(6)],
+            "dur": [1000, 2000, 3000, 1000, 2000, 3000],
+            "us": [
+                base,
+                base + dt.timedelta(microseconds=100),
+                dt.datetime(2020, 1, 2),
+                base,
+                base + dt.timedelta(microseconds=100),
+                dt.datetime(2020, 1, 2),
+            ],
+        }
+    ).with_columns(pl.col("dur").cast(pl.Duration("ms")), pl.col("us").cast(pl.Datetime("us")))
+
+
+def _point(**channel: Any) -> fm.Chart:
+    return fm.Chart(_layered_colour_frame()).mark_point().encode(x="s", y="b", **channel)
+
+
+def _area_chart(**channel: Any) -> fm.Chart:
+    return fm.Chart(_layered_colour_frame()).mark_area().encode(x="s", y="b", **channel)
+
+
+def _figure_layer(mark: str, column: str) -> fm.Chart:
+    box = getattr(fm.Chart(_layered_colour_frame()), f"mark_{mark}")()
+    return box.encode(x="s", y="b", color="d").layer(
+        fm.Layer(mark="point", encoding={"x": "s", "y": "b", "color": column})
+    )
+
+
+_LAYERED_DURATION_DOORS: dict[str, Callable[[], Any]] = {
+    "boxplot_layer": lambda: _figure_layer("boxplot", "dur"),
+    "violin_layer": lambda: _figure_layer("violin", "dur"),
+    "point_lead_area_plus": lambda: _point(color="dur") + _area_chart(color="s"),
+    "point_lead_area_layerchart": lambda: fm.LayerChart(
+        _point(color="dur"), _area_chart(color="s")
+    ),
+    "inherited_area": lambda: _point(color="dur").layer(fm.Layer(mark="area")),
+    "area_lead_point": lambda: _area_chart(color="s") + _point(color="dur"),
+}
+
+
+@pytest.mark.parametrize("output", _OUTPUTS)
+@pytest.mark.parametrize("door", list(_LAYERED_DURATION_DOORS))
+def test_a_duration_the_engine_reads_as_categories_is_refused_on_every_layered_door(
+    door: str, output: str
+):
+    chart = _LAYERED_DURATION_DOORS[door]()
+    assert _refusal_of(chart, output) == _duration_refusal("color", column="dur")
+
+
+_LAYERED_COLLISION_DOORS: dict[str, Callable[[], Any]] = {
+    "boxplot_layer": lambda: _figure_layer("boxplot", "us"),
+    "area_sibling": lambda: _point(color="us") + _area_chart(color="s"),
+}
+
+
+@pytest.mark.parametrize("output", _OUTPUTS)
+@pytest.mark.parametrize("door", list(_LAYERED_COLLISION_DOORS))
+def test_datetimes_sharing_a_millisecond_on_a_layer_the_engine_reads_as_categories_warn_once(
+    door: str, output: str
+):
+    _, messages = _captured(_LAYERED_COLLISION_DOORS[door](), output)
+    # The column holds three distinct microsecond values, two of them within one millisecond.
+    assert messages == [_COLLISION_WARNING.replace("'k'", "'us'")]

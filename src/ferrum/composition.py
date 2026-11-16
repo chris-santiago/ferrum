@@ -3857,7 +3857,7 @@ class LayerChart(_ChartLike):
             )
             for layer in layers
         ]
-        self._check_category_bindings_once(layers)
+        self._check_category_bindings_once()
 
         tree = _composite_node(
             "overlay",
@@ -3877,23 +3877,28 @@ class LayerChart(_ChartLike):
             chart_config=chart_config or None,
         )
 
-    def _check_category_bindings_once(self, layers: list) -> None:
-        """Check the columns a category binding reads, once, as the merged chart a single render
-        (the interactive route) would see them.
+    def _check_category_bindings_once(self) -> None:
+        """Check the columns a category binding reads, once, as the one merged chart a render sees.
 
         The members lower with the check off; this runs it on the merged chart so the static
         overlay checks exactly the bindings the interactive route checks, and a column bound in
-        two members warns once. A merge that itself refuses (its own wording, raised by the
-        interactive route) leaves each member to be checked on its own.
+        two members warns once. The check reads encoding bindings and facets, never a selection
+        or a conditional, so the merge is built from members whose selections and conditionals
+        are cleared: two members carrying conditionals on one wire channel, which the static
+        overlay draws through and the merge refuses, are checked as the one merged reading all
+        the same, and a selection two members define differently is left to the overlay's own
+        refusal of it.
         """
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                merged = self._build_merged()
-        except ValueError:
-            for layer in layers:
-                layer._check_category_bindings()
-            return
+
+        def without_interactivity(member):
+            clone = member._clone()
+            clone._conditionals = []
+            clone._selections = []
+            return clone
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            merged = self._rebuild_with_charts(without_interactivity)._build_merged()
         merged._check_category_bindings()
 
     def _render_interactive(self) -> tuple[str, bytes]:

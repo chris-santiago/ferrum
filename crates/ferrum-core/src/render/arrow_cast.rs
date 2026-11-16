@@ -150,7 +150,7 @@ pub(in crate::render) fn require_exchanged_column_servable(
 ) -> Result<(), RenderError> {
     let servable = match axis {
         PanelAxisKind::Categorical { of_dates } => {
-            let read = timestamp_read(channel, Some(binding), mark, of_dates);
+            let read = timestamp_read(channel, Some(binding), false, of_dates);
             ensure_category_keyable(field, dtype, read).is_ok()
         }
         PanelAxisKind::Continuous => supported_numeric_dtype(dtype),

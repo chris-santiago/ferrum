@@ -52,7 +52,10 @@ impl DrawCtx<'_> {
     }
 
     /// How the layer's own binding on `channel` reads a `Timestamp` column on
-    /// this panel ([`super::category_read::timestamp_read`]).
+    /// this panel ([`super::category_read::timestamp_read`]). Only the
+    /// positional channels, which the mark builders place by category, are
+    /// asked here: a colour, shape or dash is keyed per row through
+    /// [`super::arrow_cast::col_as_identity_key_str`] and has no read to ask.
     pub(crate) fn timestamp_read(&self, channel: &str) -> super::category_read::TimestampRead {
         let primary = match channel {
             "x2" => "x",
@@ -63,12 +66,9 @@ impl DrawCtx<'_> {
         let binding = match primary {
             "x" => encoding.x.as_ref().or(encoding.x2.as_ref()),
             "y" => encoding.y.as_ref().or(encoding.y2.as_ref()),
-            "color" => encoding.color.as_ref(),
-            "shape" => encoding.shape.as_ref(),
-            "stroke_dash" => encoding.stroke_dash.as_ref(),
             _ => None,
         };
-        super::category_read::timestamp_read(primary, binding, self.spec.mark, self.scale_of_dates(primary))
+        super::category_read::timestamp_read(primary, binding, false, self.scale_of_dates(primary))
     }
 
     /// Whether this chart's coordinate system is flipped (`fm.CoordFlip()`).

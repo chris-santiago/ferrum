@@ -165,9 +165,10 @@ ALLOWED: dict[tuple[str, str], str] = {
         "_jointplot_build",
     ): "jointplot(kind='hist') re-points a caller's x/y channel object that "
     "carries options (title, axis, format) onto the Bin2D output column the "
-    "center draws. The refusal for a bin=/aggregate= on either axis runs "
-    "immediately above it (_refuse_histogram_bin_aggregate, once per value "
-    "axis), so nothing the rebind drops was unconsumed.",
+    "center draws. The refusal for a fieldless axis, a bin= that states a "
+    "rule and an aggregate= on either axis runs immediately above it "
+    "(_refuse_bin2d_bin_aggregate; bin=True is honored and redundant), so "
+    "nothing the rebind drops was unconsumed.",
     (
         "src/ferrum/_encode_lowering.py",
         "_rebind_positional",

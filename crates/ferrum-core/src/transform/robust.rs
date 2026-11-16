@@ -129,6 +129,7 @@ pub(crate) fn apply_with_context(
     if matches!(spec.output, SmoothOutput::Residuals) {
         spec.residual_columns.check("Robust")?;
     }
+    crate::transform::pair_arg::refuse_malformed_range("Robust", "x_range", spec.x_range.map(|[a, b]| (a, b)))?;
     let x_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::X));
     let y_slot = ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Y));
     if x_slot.is_none() && y_slot.is_none() {
@@ -957,6 +958,22 @@ mod tests {
             x_range: None, x_range_pad: None,
             name: None,
         }
+    }
+
+    #[test]
+    fn a_reversed_or_equal_wire_x_range_is_refused_in_the_constructor_sentence() {
+        pyo3::Python::initialize();
+        let batch = xy_batch(vec![1.0, 2.0, 3.0, 4.0], vec![1.0, 2.0, 3.0, 5.0]);
+        for (x_range, shown) in [([9.0, 1.0], "(9, 1)"), ([3.0, 3.0], "(3, 3)")] {
+            let s = RobustSpec { x_range: Some(x_range), ..spec(10, None, 1.345, SmoothOutput::Fitted) };
+            let err = apply(&s, &batch).expect_err("a malformed x_range refuses");
+            assert_eq!(
+                err.to_string(),
+                format!("ValueError: Robust: x_range must be (lo, hi) with lo < hi and both finite; got {shown}")
+            );
+        }
+        let ok = RobustSpec { x_range: Some([1.0, 4.0]), ..spec(10, None, 1.345, SmoothOutput::Fitted) };
+        assert!(apply(&ok, &batch).is_ok());
     }
 
     #[test]

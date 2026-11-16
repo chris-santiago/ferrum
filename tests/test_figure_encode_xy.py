@@ -540,24 +540,10 @@ def test_the_interactive_page_of_the_encode_call_is_the_keyword_calls(name: str)
 
 
 _HIST_REFUSALS = {
-    "x_bin": (
-        {"x": X("v", bin=True)},
-        "jointplot(x=X('v', bin=True)) is not supported: the histogram computes x itself, "
-        "so bin= would be ignored. Count rows over both fields with "
-        "fm.Chart(data).mark_hex().encode(y='w', x='v'), or drop x=.",
-    ),
-    "y_bin": (
-        {"y": Y("w", bin=True)},
-        "jointplot(y=Y('w', bin=True)) is not supported: the histogram computes y itself, "
-        "so bin= would be ignored. Count rows over both fields with "
-        "fm.Chart(data).mark_hex().encode(x='v', y='w'), or drop y=.",
-    ),
     "y_aggregate": (
         {"y": Y("w", aggregate="mean")},
-        "jointplot(y=Y('w', aggregate='mean')) is not supported: the histogram computes y "
-        "itself, so aggregate= would be ignored. Draw the aggregate per bin with a bar mark, "
-        "fm.Chart(data).mark_bar().encode(x=fm.X('v', bin=True), y=fm.Y('w', aggregate='mean')), "
-        "or drop y=.",
+        "jointplot(y=Y('w', aggregate='mean')) is not supported: the histogram bins y rather "
+        "than aggregating it, so aggregate= would be ignored. Drop aggregate=.",
     ),
 }
 
@@ -572,6 +558,113 @@ def test_jointplot_hist_binned_channel_keeps_the_typed_refusal(name: str):
     with pytest.raises(EntryRefusal) as through_keyword:
         _svg(fm.jointplot(df, **{"x": "v", "y": "w", **binding}, kind="hist"))
     assert str(through_keyword.value) == text
+
+
+_BIN_RULE_TEXT = (
+    "jointplot({axis}={cls}({column!r}, bin={{'maxbins': 5}})) is not supported: the histogram "
+    "bins {axis} by its own rule, so bin= would be ignored. State the rule with "
+    "joint_kws={{'bins_{axis}': ...}} and marginal_kws={{'bins': ...}}, or drop bin=."
+)
+_AGGREGATE_TEXT = (
+    "jointplot({axis}={cls}({column!r}, aggregate='mean')) is not supported: the histogram "
+    "bins {axis} rather than aggregating it, so aggregate= would be ignored. Drop aggregate=."
+)
+_AXIS_PARTS = {"x": (X, "v", "w"), "y": (Y, "w", "v")}
+
+
+def _hist_refusal_case(axis: str, rule: str) -> tuple[Any, str, dict[str, str]]:
+    cls, column, other = _AXIS_PARTS[axis]
+    kwargs = {"bin_rule": {"bin": {"maxbins": 5}}, "aggregate": {"aggregate": "mean"}}[rule]
+    template = _BIN_RULE_TEXT if rule == "bin_rule" else _AGGREGATE_TEXT
+    text = template.format(axis=axis, cls=cls.__name__, column=column)
+    return cls(column, **kwargs), text, {"x": "v", "y": "w"}
+
+
+def _remedy_followed(rule: str, axis: str, door: str) -> Any:
+    """The call the remedy of a refused ``rule`` on ``axis`` describes, written as the remedy says."""
+    keywords = {"x": "v", "y": "w"}
+    if rule == "aggregate":
+        # "Drop aggregate=.": the same call with the column bound plainly.
+        return _hist_jointplot(keywords[axis], axis=axis, door=door)
+    joint = {f"bins_{axis}": 4}
+    if door == "keyword":
+        return fm.jointplot(
+            _frame(), **keywords, kind="hist", joint_kws=joint, marginal_kws={"bins": 4}
+        )
+    return fm.jointplot(
+        _frame(), **keywords, kind="hist", joint_kws=joint, marginal_kws={"bins": 4}, encode={}
+    )
+
+
+@pytest.mark.parametrize("door", ["keyword", "encode"])
+@pytest.mark.parametrize("rule", ["bin_rule", "aggregate"])
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_every_remedy_a_jointplot_hist_refusal_names_renders_when_followed(
+    axis: str, rule: str, door: str
+):
+    channel, text, _ = _hist_refusal_case(axis, rule)
+    with pytest.raises(EntryRefusal) as refused:
+        _svg(_hist_jointplot(channel, axis=axis, door=door))
+    assert str(refused.value) == text
+    assert _svg(_remedy_followed(rule, axis, door)).startswith("<svg")
+
+
+@pytest.mark.parametrize("door", ["keyword", "encode"])
+@pytest.mark.parametrize("axis", ["x", "y"])
+def test_jointplot_hist_bin_true_draws_the_bare_calls_chart(axis: str, door: str):
+    cls, column, _ = _AXIS_PARTS[axis]
+    bare = _svg(fm.jointplot(_frame(), x="v", y="w", kind="hist"))
+    assert _svg(_hist_jointplot(cls(column, bin=True), axis=axis, door=door)) == bare
+
+
+def _fieldless_text(axis: str) -> str:
+    return (
+        f"jointplot needs {axis} bound to a column -- the histogram bins the variable {axis} "
+        f"names, and this {axis} binding names none. Bind {axis} to a column: "
+        f"{axis}='<column>', or fm.{axis.upper()}('<column>', ...) to keep the channel's options."
+    )
+
+
+_FIELDLESS = {
+    "title": lambda cls: cls(title="T"),
+    "count": lambda cls: cls(aggregate="count"),
+    "none": lambda cls: None,
+}
+
+
+_FIELDLESS_ROWS = [
+    (axis, name, door)
+    for axis in ("x", "y")
+    for name in sorted(_FIELDLESS)
+    for door in ("keyword", "encode")
+    # encode={axis: None} leaves the keyword binding in place, so it is no fieldless axis.
+    if not (door == "encode" and name == "none")
+]
+
+
+@pytest.mark.parametrize(("axis", "name", "door"), _FIELDLESS_ROWS)
+def test_a_fieldless_jointplot_hist_axis_is_refused_with_the_bind_a_column_remedy(
+    axis: str, name: str, door: str
+):
+    cls, column, _ = _AXIS_PARTS[axis]
+    binding = _FIELDLESS[name](cls)
+    with pytest.raises(EntryRefusal) as refused:
+        _svg(_hist_jointplot(binding, axis=axis, door=door))
+    if door == "encode" and name == "count":
+        # The encode door reaches the marginal's own count aggregate first, in the family's
+        # aggregate words; its remedy (drop aggregate=) renders too.
+        expected = (
+            f"jointplot({axis}={cls.__name__}(aggregate='count')) is not supported: the "
+            f"histogram bins {axis} rather than aggregating it, so aggregate= would be "
+            "ignored. Drop aggregate=."
+        )
+    else:
+        expected = _fieldless_text(axis)
+    assert str(refused.value) == expected
+    # Every remedy renders: the column bound plainly, and the channel keeping its options.
+    assert _svg(fm.jointplot(_frame(), x="v", y="w", kind="hist")).startswith("<svg")
+    kept = _hist_jointplot(cls(column, title="T"), axis=axis, door=door)
+    assert ">T</text>" in _svg(kept)
 
 
 def test_jointplot_hist_encode_channel_with_title_draws_the_keyword_calls_chart():
@@ -604,7 +697,7 @@ def test_jointplot_hist_refuses_a_shorthand_as_it_refuses_the_channel_it_spells(
     by_channel = _refusal(lambda: _hist_jointplot(channel, axis=axis, door=door))
     by_shorthand = _refusal(lambda: _hist_jointplot(shorthand, axis=axis, door=door))
     assert by_channel[0] is EntryRefusal
-    assert "computes" in by_channel[1]
+    assert "rather than aggregating" in by_channel[1]
     assert by_shorthand == by_channel
 
 

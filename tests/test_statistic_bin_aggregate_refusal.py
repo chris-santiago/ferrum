@@ -1324,6 +1324,47 @@ def _revoiced_figure_cases() -> list[_Case]:
         )
     )
 
+    # jointplot(kind="hist"): the centre's Bin2D bins both axes, so each axis
+    # is a binned axis, reached as a keyword and through encode= alike.
+    for label, build_kwargs in (
+        ("keyword", {"x": X("v", bin={"bin_count": 3}), "y": "w"}),
+        ("encode", {"x": "v", "y": "w", "encode": {"x": X("v", bin={"bin_count": 3})}}),
+    ):
+
+        def build_centre(build_kwargs=build_kwargs):
+            def run() -> None:
+                fm.jointplot(_XY_ROWS, kind="hist", **build_kwargs).to_svg()
+
+            return run
+
+        cases.append(
+            (
+                f"jointplot_hist_centre_x_bin_rule_{label}",
+                build_centre(),
+                _message(
+                    "jointplot",
+                    _written("x", "X", "v", "bin", {"bin_count": 3}),
+                    "bin",
+                    "the histogram bins x by its own rule",
+                    "State the rule with joint_kws={'bins_x': ...} and "
+                    "marginal_kws={'bins': ...}, or drop bin=.",
+                ),
+            )
+        )
+    cases.append(
+        (
+            "jointplot_hist_centre_y_aggregate",
+            lambda: fm.jointplot(_XY_ROWS, x="v", y=Y("w", aggregate="mean"), kind="hist").to_svg(),
+            _message(
+                "jointplot",
+                _written("y", "Y", "w", "aggregate", "mean"),
+                "aggregate",
+                "the histogram bins y rather than aggregating it",
+                "Drop aggregate=.",
+            ),
+        )
+    )
+
     # jointplot: the top marginal's fieldless count under each value mode,
     # spelled through marginal_kws= (density) or marginal_kws=/the channel's
     # own stack= (the three share modes) -- every one falls back to "Drop
@@ -1820,11 +1861,12 @@ _docstring_drift = load_script(
 #: table has no entry for fails the membership assertion below --
 #: deliberately, since the only way to pass is to add the row here, next
 #: to the mark it actually forwards to.
-_KWS_FORWARDS_TO: dict[tuple[str, str], Callable[..., fm.Chart]] = {
-    ("jointplot", "marginal_kws"): fm.Chart.mark_histogram,
-    # jointplot forwards joint_kws to the center mark verbatim; only the hex
-    # center's refusal (kind="hex") ever names a joint_kws key.
-    ("jointplot", "joint_kws"): fm.Chart.mark_hex,
+_KWS_FORWARDS_TO: dict[tuple[str, str], tuple[Callable[..., Any], ...]] = {
+    ("jointplot", "marginal_kws"): (fm.Chart.mark_histogram,),
+    # jointplot forwards joint_kws to the center mark verbatim (the hex
+    # center's refusal names a mark_hex key) and the hist center takes its
+    # per-axis bin counts through Bin2D (bins_x, bins_y).
+    ("jointplot", "joint_kws"): (fm.Chart.mark_hex, fm.Bin2D),
 }
 
 #: A call token: an identifier immediately before ``(`` (pushed onto the
@@ -1880,8 +1922,11 @@ def _assert_the_remedy_is_typeable_at_the_voice(message: str) -> None:
 
     for kws_name, dict_body in _KWS_DICT.findall(rest):
         assert (voice, kws_name) in _KWS_FORWARDS_TO, (voice, kws_name, message)
-        target = _KWS_FORWARDS_TO[(voice, kws_name)]
-        documented = _docstring_drift._doc_params(inspect.getdoc(target)) or []
+        documented = [
+            name
+            for target in _KWS_FORWARDS_TO[(voice, kws_name)]
+            for name in _docstring_drift._doc_params(inspect.getdoc(target)) or []
+        ]
         for key in _DICT_KEY.findall(dict_body):
             assert key in documented, (voice, kws_name, key, message)
 

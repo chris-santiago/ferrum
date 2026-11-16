@@ -414,13 +414,15 @@ fn sorted_categorical_domain(
     };
     // Whether a date reads as categories here is the owner's answer: a shape or
     // dash always does.
-    let read = timestamp_read(channel, Some(binding), crate::spec::mark::Mark::Point, false);
+    // `false, false`: grouping is a colour fact, and the establishing binding
+    // never reads through a scale of dates (it is what makes one).
+    let read = timestamp_read(channel, Some(binding), false, false);
     if let (true, Some((name, col))) = (establishing_draws, establishing) {
         crate::render::arrow_cast::ensure_category_keyable(name, col.data_type(), read)?;
     }
     // A layered spec's every read draws its field, so the union is `None`
     // only for an unlayered spec, which reads its one batch.
-    let (layer_categories, domain_batch, lead) = match aux_category_union(layer_reads, channel, batch, transform_outputs, facet_shared)? {
+    let (layer_categories, domain_batch, lead) = match aux_category_union(layer_reads, channel, false, batch, transform_outputs, facet_shared)? {
         Some((categories, first_batch, read)) => (Some(categories), first_batch, Some(read)),
         None => (None, shared_categorical_batch(batch, field, transform_outputs, facet_shared), None),
     };

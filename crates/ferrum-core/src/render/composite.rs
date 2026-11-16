@@ -55,7 +55,6 @@ use crate::render::{prepare, ExcludedLayerPlacement, RenderError, RenderWarning}
 use crate::spec::chart::ChartSpec;
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 use crate::spec::encoding::DataType as SpecDataType;
-use crate::spec::mark::Mark;
 use crate::layout::facet::ResolveMode;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
@@ -702,7 +701,7 @@ fn promote_dates_to_the_groups_date_axis(
         return Ok(());
     };
     let is_date = matches!(located.col.data_type(), arrow::datatypes::DataType::Timestamp(_, _));
-    if !establishes_dates(channel.as_str(), enc, leaf.spec.mark, is_date) {
+    if !establishes_dates(channel.as_str(), enc, false, is_date) {
         return Ok(());
     }
     for (idx, domain) in domains.iter_mut() {
@@ -716,7 +715,7 @@ fn promote_dates_to_the_groups_date_axis(
             continue;
         };
         let is_date = matches!(located.col.data_type(), arrow::datatypes::DataType::Timestamp(_, _));
-        let read = timestamp_read(channel.as_str(), Some(enc), leaf.spec.mark, true);
+        let read = timestamp_read(channel.as_str(), Some(enc), false, true);
         if is_date && read == TimestampRead::Categories {
             let dates = CategoryDomain::from_column(located.batch, &enc.field, read).map_err(|source| {
                 CompositeResolveError::DomainResolve {
@@ -1048,7 +1047,7 @@ fn establishing_categories(
     let Some(located) = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs) else {
         return Ok(None);
     };
-    let read = timestamp_read(channel.as_str(), Some(enc), leaf.spec.mark, false);
+    let read = timestamp_read(channel.as_str(), Some(enc), false, false);
     let domain = CategoryDomain::from_column(located.batch, &enc.field, read).map_err(|source| {
         CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: leaf.names_unflipped() }
     })?;
@@ -1831,13 +1830,12 @@ fn leaf_color_domain(
             Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }))
         }
         (false, None) => {
-            let mark = if force_categorical { Mark::Area } else { leaf.spec.mark };
-            let read = timestamp_read("color", Some(enc), mark, false);
+            let read = timestamp_read("color", Some(enc), force_categorical, false);
             let cats = CategoryDomain::from_column(located.batch, &enc.field, read).map_err(resolve_error)?;
             Ok(Some(SharedDomain::Ordinal(cats)))
         }
         (false, Some(reads)) => {
-            let union = aux_category_union(&reads, "color", leaf.final_batch, leaf.transform_outputs, false).map_err(resolve_error)?;
+            let union = aux_category_union(&reads, "color", force_categorical, leaf.final_batch, leaf.transform_outputs, false).map_err(resolve_error)?;
             Ok(union.map(|(cats, ..)| SharedDomain::Ordinal(cats)))
         }
     }

@@ -80,14 +80,7 @@ pub(crate) fn global_extent(
 /// warning. `None` (auto-derived extent) is always valid. The `axis` label
 /// (`"extent_x"` / `"extent_y"`) names the offending parameter in the message.
 fn validate_extent(extent: Option<(f64, f64)>, axis: &str) -> PyResult<()> {
-    if let Some((lo, hi)) = extent {
-        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
-            return Err(PyValueError::new_err(format!(
-                "Bin2D: {axis} must be (lo, hi) with lo < hi and both finite; got ({lo}, {hi})"
-            )));
-        }
-    }
-    Ok(())
+    crate::transform::pair_arg::refuse_malformed_range("Bin2D", axis, extent)
 }
 
 // ---------------------------------------------------------------------------

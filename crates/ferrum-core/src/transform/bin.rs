@@ -493,6 +493,7 @@ pub(crate) fn apply_with_context(
     // A wire-built spec meets the parameter checks only here; the PyO3 door
     // runs them at construction.
     check_options(spec).map_err(|e| PyValueError::new_err(format!("stat_bin: {e}")))?;
+    crate::transform::pair_arg::refuse_malformed_range("stat_bin", "extent", spec.extent)?;
     match ctx.log_space.as_deref().and_then(|s| s.of(SpaceSlot::Field)) {
         Some(slot) => apply_in_log_space(spec, batch, ctx, slot),
         None => apply_in_data_space(spec, batch, ctx),
@@ -836,9 +837,7 @@ fn group_edges(
     }
     let (lo, hi) = match spec.extent {
         Some((a, b)) if a < b => (a, b),
-        Some((a, b)) => return Err(PyValueError::new_err(format!(
-            "stat_bin: extent must satisfy lo < hi; got ({a}, {b})"
-        ))),
+        Some((a, b)) => return Err(crate::transform::pair_arg::malformed_range("stat_bin", "extent", a, b)),
         None => {
             let (lo, hi) = clean.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &v| {
                 (a.min(v), b.max(v))
@@ -2622,6 +2621,22 @@ mod tests {
         };
         let err = apply(&spec, &batch).unwrap_err();
         assert!(err.to_string().contains("lo < hi"), "reversed extent must error: {err}");
+    }
+
+    /// A reversed, equal or non-finite wire extent is refused in the constructor's sentence,
+    /// the finiteness clause included.
+    #[test]
+    fn a_malformed_wire_extent_is_refused_in_the_constructor_sentence() {
+        pyo3::Python::initialize();
+        let batch = batch_with(vec![1.0, 2.0, 3.0]);
+        for (extent, shown) in [((10.0, 1.0), "(10, 1)"), ((2.0, 2.0), "(2, 2)"), ((0.0, f64::INFINITY), "(0, inf)")] {
+            let spec = BinSpec { field: "x".into(), mode: BinMode::Fixed { n: 4 }, extent: Some(extent), ..sturges_spec() };
+            let err = apply(&spec, &batch).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!("ValueError: stat_bin: extent must be (lo, hi) with lo < hi and both finite; got {shown}")
+            );
+        }
     }
 
     /// An explicit extent where `lo == hi` must also error (not slip into the

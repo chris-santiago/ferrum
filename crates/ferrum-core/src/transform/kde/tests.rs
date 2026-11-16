@@ -2598,7 +2598,7 @@ fn a_malformed_extent_is_refused() {
         )
         .expect_err("a malformed extent refuses")
         .to_string();
-        assert!(err.contains("stat_kde: extent must satisfy lo < hi with both finite"), "{extent:?}: {err}");
+        assert!(err.contains("stat_kde: extent must be (lo, hi) with lo < hi and both finite; got ("), "{extent:?}: {err}");
     }
 }
 

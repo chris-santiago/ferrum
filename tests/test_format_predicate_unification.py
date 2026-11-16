@@ -600,6 +600,13 @@ def _date_legend_chart(frame: pl.DataFrame, channel: str, field: str, fmt, fmt_t
         return base.mark_point().encode(
             x="n:Q", y="n:Q", color=fm.Color(field, type_="N", legend=legend)
         )
+    if channel == "color_area":
+        return base.mark_area().encode(x="n:Q", y="n:Q", color=fm.Color(field, legend=legend))
+    if channel == "color_area_point_lead":
+        lead = base.mark_point().encode(x="n:Q", y="n:Q", color=fm.Color(field))
+        return lead + base.mark_area().encode(
+            x="n:Q", y="n:Q", color=fm.Color(field, legend=legend)
+        )
     if channel == "shape":
         return base.mark_point().encode(x="n:Q", y="n:Q", shape=fm.Shape(field, legend=legend))
     return base.mark_line().encode(
@@ -631,6 +638,8 @@ _DATE_LEGEND_FORMATS = [
     "channel,field",
     [
         pytest.param("color", "d", id="colour_nominal"),
+        pytest.param("color_area", "d", id="colour_area_untyped"),
+        pytest.param("color_area_point_lead", "d", id="colour_area_beside_a_point_lead"),
         pytest.param("shape", "d", id="shape_untyped"),
         pytest.param("shape", "d:T", id="shape_declared_temporal"),
         pytest.param("stroke_dash", "d", id="stroke_dash_untyped"),

@@ -16,6 +16,12 @@
 //! [`TimestampRead::Categories`] a date reads as its per-value label
 //! ([`super::arrow_cast::timestamp_category_label`]).
 //!
+//! Two facts the rule cannot see from a binding are decided where they are
+//! known and passed in as they are, never re-derived from the mark of the read
+//! that asks: whether the channel's scale groups by category (`groups_by_category`,
+//! a colour scale's: an area layer draws it and it is not binned) and whether
+//! the panel scale on the channel is one of dates (`scale_of_dates`).
+//!
 //! [`CategoryDomain`] is the ordered category list every union builds: each
 //! label carries its instant, so dates come out in time order however many
 //! frames contribute them.
@@ -54,8 +60,7 @@ fn carries_categorical_scale(binding: &EncodingSpec) -> bool {
     }) || super::scale_resolve::explicit_ordinal_domain(binding).is_some()
 }
 
-/// Whether `binding` on `channel` of a `mark` layer reads a `Timestamp` column
-/// as categories. `x2`/`y2` are read through their primary channel's binding
+/// Whether `binding` on `channel` reads a `Timestamp` column as categories. `x2`/`y2` are read through their primary channel's binding
 /// and scale (they share its axis), and `theta`/`radius` count as positional.
 ///
 /// Categories exactly when
@@ -64,16 +69,22 @@ fn carries_categorical_scale(binding: &EncodingSpec) -> bool {
 /// - (b) the binding declares nominal or ordinal, or
 /// - (c) the binding carries a categorical caller scale (a band, point or
 ///   ordinal scale, or a stated ordinal domain), or
-/// - (d) the channel is `color`, `fill` or `stroke` and the mark is an area
-///   (an area groups its colour by category), or
+/// - (d) the channel is `color`, `fill` or `stroke` and `groups_by_category`:
+///   its scale groups by category because an area layer draws the channel and
+///   the colour is not binned (a scale fact, decided once where the scale is
+///   built, never re-derived from the mark of the read that asks), or
 /// - (e) `scale_of_dates`: the panel scale on that channel is a date-category
 ///   scale, so an instant on it names a category whatever the binding says.
 ///
 /// Temporal otherwise.
+///
+/// The two facts are decided by the caller and passed as they are:
+/// `groups_by_category` by the colour scale (`false` for every other channel),
+/// `scale_of_dates` by the panel scale of the channel.
 pub(crate) fn timestamp_read(
     channel: &str,
     binding: Option<&EncodingSpec>,
-    mark: Mark,
+    groups_by_category: bool,
     scale_of_dates: bool,
 ) -> TimestampRead {
     let categories = channel_always_reads_categories(channel)
@@ -81,7 +92,7 @@ pub(crate) fn timestamp_read(
         || binding.is_some_and(|binding| {
             matches!(binding.type_, Some(Declared::Nominal | Declared::Ordinal))
                 || carries_categorical_scale(binding)
-                || (mark == Mark::Area && matches!(channel, "color" | "fill" | "stroke"))
+                || (groups_by_category && matches!(channel, "color" | "fill" | "stroke"))
         });
     if categories { TimestampRead::Categories } else { TimestampRead::Temporal }
 }
@@ -171,14 +182,19 @@ impl CategoryDomain {
     }
 }
 
-/// Whether a read of `binding` on `channel` of a `mark` layer, over a column
+/// Whether a read of `binding` on `channel`, over a column
 /// that is a `Timestamp` or not, makes the scale it establishes one of dates:
 /// the column is a date and the binding reads it as categories with no help
 /// from the scale (clause (e) never establishes itself). The one statement of
 /// the fact [`crate::scale::ordinal::OrdinalScale::of_dates`] records and the
 /// published binding set reads.
-pub(crate) fn establishes_dates(channel: &str, binding: &EncodingSpec, mark: Mark, column_is_timestamp: bool) -> bool {
-    column_is_timestamp && timestamp_read(channel, Some(binding), mark, false) == TimestampRead::Categories
+pub(crate) fn establishes_dates(
+    channel: &str,
+    binding: &EncodingSpec,
+    groups_by_category: bool,
+    column_is_timestamp: bool,
+) -> bool {
+    column_is_timestamp && timestamp_read(channel, Some(binding), groups_by_category, false) == TimestampRead::Categories
 }
 
 /// Every `(data_source, channel, field)` of a built chart on which
@@ -208,26 +224,27 @@ pub(crate) fn category_read_fields(spec: &ChartSpec, schema: pyo3_arrow::PySchem
     // The rendering channels' date fact, from the read that establishes each axis.
     let axis_dates = |channel: &str| {
         establishing_axis_read(spec, channel)
-            .is_some_and(|(binding, mark, source)| establishes_dates(channel, binding, mark, is_date(source, &binding.field)))
+            .is_some_and(|(binding, _, source)| establishes_dates(channel, binding, false, is_date(source, &binding.field)))
     };
     let (x_dates, y_dates) = (axis_dates("x"), axis_dates("y"));
-    // Every scope in layer order: (source, mark, encoding, flipped).
-    let mut scopes: Vec<(Option<&str>, Mark, &crate::spec::encoding::Encoding, bool)> =
-        vec![(None, spec.mark, &spec.encoding, crate::spec::coord::flips_positional_channels(spec.coord.as_ref()))];
+    let aux = auxiliary_reads(spec, &is_date);
+    // Every scope in layer order: (source, encoding, flipped).
+    let mut scopes: Vec<(Option<&str>, &crate::spec::encoding::Encoding, bool)> =
+        vec![(None, &spec.encoding, crate::spec::coord::flips_positional_channels(spec.coord.as_ref()))];
     for layer in spec.layers.iter().flatten() {
-        scopes.push((layer.data_source.as_deref(), layer.mark, &layer.encoding, layer_flips(layer, spec.coord.as_ref())));
+        scopes.push((layer.data_source.as_deref(), &layer.encoding, layer_flips(layer, spec.coord.as_ref())));
     }
     let mut found = Vec::new();
-    // A non-positional channel's date fact: its first binding's own.
+    // A polar channel's date fact: its first binding's own.
     let mut channel_dates: std::collections::HashMap<&'static str, bool> = std::collections::HashMap::new();
-    for (source, mark, encoding, flipped) in &scopes {
+    for (scope, (source, encoding, flipped)) in scopes.iter().enumerate() {
         for (channel, binding) in encoding.bindings() {
             let authored = match channel {
                 "x2" => "x",
                 "y2" => "y",
                 other => other,
             };
-            if !matches!(authored, "x" | "y" | "color" | "fill" | "stroke" | "shape" | "stroke_dash" | "size" | "opacity" | "theta" | "radius") {
+            if !matches!(authored, "x" | "y" | "theta" | "radius") {
                 continue;
             }
             let (primary, of_dates) = match (authored, flipped) {
@@ -236,12 +253,15 @@ pub(crate) fn category_read_fields(spec: &ChartSpec, schema: pyo3_arrow::PySchem
                 (other, _) => (other, channel_dates.get(other).copied().unwrap_or(false)),
             };
             if !matches!(primary, "x" | "y") && !channel_dates.contains_key(primary) {
-                channel_dates.insert(primary, establishes_dates(primary, binding, *mark, is_date(*source, &binding.field)));
+                channel_dates.insert(primary, establishes_dates(primary, binding, false, is_date(*source, &binding.field)));
             }
-            if timestamp_read(primary, Some(binding), *mark, of_dates) == TimestampRead::Categories {
+            if timestamp_read(primary, Some(binding), false, of_dates) == TimestampRead::Categories {
                 found.push((source.map(str::to_string), channel.to_string(), binding.field.clone()));
             }
         }
+        found.extend(aux.iter().filter(|read| read.scope == scope).map(|read| {
+            (source.map(str::to_string), read.channel.to_string(), read.field.to_string())
+        }));
     }
     if let Some(facet) = &spec.facet {
         for field in std::iter::once(&facet.field).chain(facet.row.iter()) {
@@ -249,6 +269,57 @@ pub(crate) fn category_read_fields(spec: &ChartSpec, schema: pyo3_arrow::PySchem
         }
     }
     found
+}
+
+/// One binding the engine reads on a non-positional channel's scale and reads
+/// as categories: the scope (0 the chart, `n` the layer `n - 1`) it is read in.
+struct AuxiliaryRead<'a> {
+    scope: usize,
+    channel: &'static str,
+    field: &'a str,
+}
+
+/// The non-positional bindings the engine reads as categories, from the same
+/// reads it resolves each channel's scale over. An unlayered spec has one read,
+/// the chart's own binding on the chart's mark. A layered spec reads each layer
+/// that draws the channel, with its own or inherited binding
+/// ([`layer_drawn_binding`], the step `aux_reads` takes, here with no rows so
+/// no raster cells): the chart-level binding of a layered spec is no read. The
+/// first read decides whether the scale is one of dates
+/// ([`establishes_dates`]); a colour groups by category when an area layer
+/// draws it and its establishing binding is not binned, the one rule
+/// `build_color_scale` is handed ([`grouping_layer`]).
+fn auxiliary_reads<'a>(spec: &'a ChartSpec, is_date: &dyn Fn(Option<&str>, &str) -> bool) -> Vec<AuxiliaryRead<'a>> {
+    use crate::render::scale_resolve::{grouping_layer, layer_drawn_binding};
+    use crate::spec::encoding::AUXILIARY_SCALE_CHANNELS;
+    let mut out = Vec::new();
+    for channel in AUXILIARY_SCALE_CHANNELS.into_iter().filter(|c| matches!(c.name, "color" | "size" | "shape" | "opacity" | "stroke_dash")) {
+        // (scope, source, binding, mark) per read, in layer order.
+        let layered = spec.layers.as_deref().is_some_and(|layers| !layers.is_empty());
+        let reads: Vec<(usize, Option<&str>, &EncodingSpec, Mark)> = match spec.layers.as_deref().filter(|layers| !layers.is_empty()) {
+            None => channel.binding(&spec.encoding).as_ref().map(|binding| (0, None, binding, spec.mark)).into_iter().collect(),
+            Some(layers) => layers
+                .iter()
+                .enumerate()
+                .filter_map(|(index, layer)| {
+                    let (binding, _) = layer_drawn_binding(layer, &spec.encoding, channel, || None)?;
+                    Some((index + 1, layer.data_source.as_deref(), binding, layer.mark))
+                })
+                .collect(),
+        };
+        let Some(&(_, lead_source, lead, _)) = reads.first() else { continue };
+        let groups_by_category = channel.name == "color"
+            && lead.color_bin().is_none()
+            // An unlayered spec has no reads of its own to group by: its chart mark decides.
+            && grouping_layer(spec.mark, reads.iter().filter(|_| layered).map(|&(scope, _, _, mark)| (scope - 1, mark))).is_some();
+        let of_dates = establishes_dates(channel.name, lead, groups_by_category, is_date(lead_source, &lead.field));
+        for (scope, _, binding, _) in reads {
+            if timestamp_read(channel.name, Some(binding), groups_by_category, of_dates) == TimestampRead::Categories {
+                out.push(AuxiliaryRead { scope, channel: channel.name, field: &binding.field });
+            }
+        }
+    }
+    out
 }
 
 fn branch_renames(spec: &ChartSpec) -> std::collections::HashMap<String, std::collections::BTreeMap<String, String>> {
@@ -287,18 +358,18 @@ mod tests {
         let plain = binding(None, None);
         // Otherwise: undeclared and declared temporal bindings on any channel.
         for channel in ["x", "y", "x2", "color", "fill", "size", "opacity", "theta"] {
-            assert_eq!(timestamp_read(channel, Some(&plain), Mark::Point, false), Temporal, "{channel}");
-            assert_eq!(timestamp_read(channel, Some(&binding(Some(Declared::Temporal), None)), Mark::Point, false), Temporal);
-            assert_eq!(timestamp_read(channel, None, Mark::Point, false), Temporal, "{channel} unbound");
+            assert_eq!(timestamp_read(channel, Some(&plain), false, false), Temporal, "{channel}");
+            assert_eq!(timestamp_read(channel, Some(&binding(Some(Declared::Temporal), None)), false, false), Temporal);
+            assert_eq!(timestamp_read(channel, None, false, false), Temporal, "{channel} unbound");
         }
         // (a) channels that always read categories.
         for channel in ["shape", "stroke_dash", "facet"] {
-            assert_eq!(timestamp_read(channel, Some(&plain), Mark::Point, false), Categories, "(a) {channel}");
-            assert_eq!(timestamp_read(channel, None, Mark::Line, false), Categories, "(a) {channel} unbound");
+            assert_eq!(timestamp_read(channel, Some(&plain), false, false), Categories, "(a) {channel}");
+            assert_eq!(timestamp_read(channel, None, false, false), Categories, "(a) {channel} unbound");
         }
         // (b) declared nominal or ordinal.
         for declared in [Declared::Nominal, Declared::Ordinal] {
-            assert_eq!(timestamp_read("x", Some(&binding(Some(declared), None)), Mark::Bar, false), Categories, "(b) {declared:?}");
+            assert_eq!(timestamp_read("x", Some(&binding(Some(declared), None)), false, false), Categories, "(b) {declared:?}");
         }
         // (c) a categorical caller scale, or a stated ordinal domain; a continuous one is not.
         let ordinal: ScaleSpec = serde_json::from_str(r#"{"type":"ordinal","domain":["a"]}"#).unwrap();
@@ -306,18 +377,19 @@ mod tests {
         let point: ScaleSpec = serde_json::from_str(r#"{"type":"point"}"#).unwrap();
         let linear: ScaleSpec = serde_json::from_str(r#"{"type":"linear"}"#).unwrap();
         for scale in [ordinal, band, point] {
-            assert_eq!(timestamp_read("x", Some(&binding(None, Some(scale))), Mark::Point, false), Categories, "(c)");
+            assert_eq!(timestamp_read("x", Some(&binding(None, Some(scale))), false, false), Categories, "(c)");
         }
-        assert_eq!(timestamp_read("x", Some(&binding(None, Some(linear))), Mark::Point, false), Temporal, "(c) linear");
-        // (d) an area groups its colour, fill and stroke; another mark does not, and position is unaffected.
+        assert_eq!(timestamp_read("x", Some(&binding(None, Some(linear))), false, false), Temporal, "(c) linear");
+        // (d) a scale that groups by category reads its colour, fill and stroke so; without grouping they are
+        // not, and position is unaffected by it.
         for channel in ["color", "fill", "stroke"] {
-            assert_eq!(timestamp_read(channel, Some(&plain), Mark::Area, false), Categories, "(d) {channel}");
-            assert_eq!(timestamp_read(channel, Some(&plain), Mark::Line, false), Temporal, "(d) {channel} on a line");
+            assert_eq!(timestamp_read(channel, Some(&plain), true, false), Categories, "(d) {channel}");
+            assert_eq!(timestamp_read(channel, Some(&plain), false, false), Temporal, "(d) {channel} without grouping");
         }
-        assert_eq!(timestamp_read("x", Some(&plain), Mark::Area, false), Temporal, "(d) x of an area");
+        assert_eq!(timestamp_read("x", Some(&plain), true, false), Temporal, "(d) x with grouping set");
         // (e) a scale of dates reads every binding on its channel as categories.
-        assert_eq!(timestamp_read("x", Some(&plain), Mark::Point, true), Categories, "(e)");
-        assert_eq!(timestamp_read("x", None, Mark::Point, true), Categories, "(e) unbound");
+        assert_eq!(timestamp_read("x", Some(&plain), false, true), Categories, "(e)");
+        assert_eq!(timestamp_read("x", None, false, true), Categories, "(e) unbound");
     }
 
     /// The published binding set: an area's colour, a band scale, a shape, a dash,
@@ -357,7 +429,6 @@ mod tests {
         let found = category_read_fields(&spec, pyo3_arrow::PySchema::new(Arc::new(schema)));
         let expected: Vec<(Option<String>, String, String)> = [
             (None, "x", "t"),      // declared nominal
-            (None, "color", "c"),  // an area groups its colour
             (None, "x", "t"),      // the layer that establishes the axis, declared nominal
             (Some("_b"), "x", "u"), // clause (e): the axis that layer established, `u` renamed in its branch
             (Some("_b"), "shape", "s"),
@@ -399,6 +470,135 @@ mod tests {
         );
         // The untyped point colour `c2` and the untyped `y` readings are absent: a time or value axis.
         assert!(!found.iter().any(|(_, channel, field)| (channel == "color" && field == "c2") || channel == "y"));
+    }
+
+    /// The published set lists a colour, shape or dash exactly where the engine
+    /// reads a date column of it as categories: each layer that draws the
+    /// channel reads its own or inherited binding (the chart-level binding of a
+    /// layered spec is no read), a colour groups by category when an area layer
+    /// draws it, and the first read decides whether the scale is one of dates.
+    /// Fails when the publisher and the engine's own per-layer reads
+    /// ([`crate::render::scale_resolve::aux_reads`] and its category rule)
+    /// disagree on a spec.
+    #[test]
+    fn category_read_fields_reads_colour_shape_and_dash_as_the_engine_does() {
+        use crate::render::scale_resolve::{aux_reads, color_grouping_area, timestamp_reads_as_categories};
+        use crate::spec::encoding::AUXILIARY_SCALE_CHANNELS;
+        use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+        let ts = DataType::Timestamp(TimeUnit::Millisecond, None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("v", DataType::Float64, true),
+            Field::new("s", DataType::Utf8, true),
+            Field::new("d", ts.clone(), true),
+            Field::new("e", ts.clone(), true),
+        ]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Float64Array::from(vec![1.0])),
+                Arc::new(StringArray::from(vec!["a"])),
+                Arc::new(TimestampMillisecondArray::from(vec![0_i64])),
+                Arc::new(TimestampMillisecondArray::from(vec![0_i64])),
+            ],
+        )
+        .unwrap();
+        let layer = |mark: &str, encoding: serde_json::Value| {
+            let mut enc = serde_json::json!({"x": {"field": "v"}, "y": {"field": "v"}});
+            enc.as_object_mut().unwrap().extend(encoding.as_object().unwrap().clone());
+            serde_json::json!({"mark": mark, "encoding": enc})
+        };
+        let colour = |field: &str, declared: Option<&str>| match declared {
+            Some(declared) => serde_json::json!({"color": {"field": field, "type": declared}}),
+            None => serde_json::json!({"color": {"field": field}}),
+        };
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "chart-level undeclared date against a nominal layer 0 and an undeclared later layer",
+                serde_json::json!({
+                    "mark": "bar",
+                    "encoding": {"x": {"field": "v"}, "y": {"field": "v"}, "color": {"field": "d"}},
+                    "layers": [layer("bar", colour("d", Some("nominal"))), layer("point", colour("e", None))]
+                }),
+            ),
+            (
+                "an area inheriting the chart's colour",
+                serde_json::json!({
+                    "mark": "point",
+                    "encoding": {"x": {"field": "v"}, "y": {"field": "v"}, "color": {"field": "d"}},
+                    "layers": [layer("point", serde_json::json!({})), layer("area", serde_json::json!({}))]
+                }),
+            ),
+            (
+                "a point lead with an area sibling over text",
+                serde_json::json!({
+                    "mark": "point",
+                    "encoding": {"x": {"field": "v"}, "y": {"field": "v"}},
+                    "layers": [layer("point", colour("d", None)), layer("area", colour("s", None))]
+                }),
+            ),
+            (
+                "an area lead with a later point date",
+                serde_json::json!({
+                    "mark": "point",
+                    "encoding": {"x": {"field": "v"}, "y": {"field": "v"}},
+                    "layers": [layer("area", colour("s", None)), layer("point", colour("d", None))]
+                }),
+            ),
+            (
+                "no area: two undeclared date colours",
+                serde_json::json!({
+                    "mark": "point",
+                    "encoding": {"x": {"field": "v"}, "y": {"field": "v"}},
+                    "layers": [layer("point", colour("d", None)), layer("line", colour("e", None))]
+                }),
+            ),
+            (
+                "shapes read categories whatever their layers",
+                serde_json::json!({
+                    "mark": "point",
+                    "encoding": {"x": {"field": "v"}, "y": {"field": "v"}, "shape": {"field": "d"}},
+                    "layers": [layer("point", serde_json::json!({"shape": {"field": "e"}})), layer("point", serde_json::json!({}))]
+                }),
+            ),
+            (
+                "dashes read categories whatever their layers",
+                serde_json::json!({
+                    "mark": "line",
+                    "encoding": {"x": {"field": "v"}, "y": {"field": "v"}},
+                    "layers": [layer("line", serde_json::json!({"stroke_dash": {"field": "d"}})), layer("line", serde_json::json!({"stroke_dash": {"field": "e"}}))]
+                }),
+            ),
+        ];
+        for (name, json) in cases {
+            let spec: ChartSpec = serde_json::from_value(
+                [serde_json::json!({"data": {"kind": "named", "name": "default"}}), json]
+                    .into_iter()
+                    .fold(serde_json::json!({}), |mut acc, part| {
+                        acc.as_object_mut().unwrap().extend(part.as_object().unwrap().clone());
+                        acc
+                    }),
+            )
+            .unwrap();
+            let layers = spec.layers.as_deref().unwrap();
+            let published = category_read_fields(&spec, pyo3_arrow::PySchema::new(schema.clone()));
+            for channel in AUXILIARY_SCALE_CHANNELS.into_iter().filter(|c| matches!(c.name, "color" | "shape" | "stroke_dash")) {
+                let outputs = Default::default();
+                let reads = aux_reads(layers, &spec.encoding, channel, &batch, &outputs);
+                let groups = channel.name == "color" && color_grouping_area(spec.mark, &reads).is_some();
+                let engine: Vec<&str> = timestamp_reads_as_categories(&reads, channel.name, groups, &batch, &outputs)
+                    .into_iter()
+                    .map(|layer| reads.iter().find(|read| read.layer() == layer).unwrap().field())
+                    .collect();
+                let listed: Vec<&str> = published
+                    .iter()
+                    .filter(|(_, listed, field)| listed == channel.name && matches!(field.as_str(), "d" | "e"))
+                    .map(|(_, _, field)| field.as_str())
+                    .collect();
+                assert_eq!(listed, engine, "{name}: {}", channel.name);
+            }
+        }
     }
 
     /// The published set reads clause (e) as the engine does: a channel is one of

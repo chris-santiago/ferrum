@@ -701,8 +701,11 @@ pub(crate) fn build_color_legend(
 pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
     bindings: &LegendBindings<'_>,
     transformed: &RecordBatch,
+    color_scale: Option<&crate::render::scale_resolve::ColorScale>,
     chart_config: &crate::render::chart_config::ChartConfig,
 ) -> Result<(), crate::render::RenderError> {
+    use crate::render::category_read::{timestamp_read, TimestampRead};
+    use crate::render::scale_resolve::ColorScale;
     use crate::render::FormatSurface;
     if crate::render::config_apply::chart_config_legend_disabled(chart_config) {
         return Ok(());
@@ -717,6 +720,9 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
                 pick(&legend_specs, |l| l.format_type.as_deref()),
                 "color",
                 FormatSurface::Legend,
+                // A date colour is read as categories exactly when the engine
+                // resolved its scale categorical, whichever clause decided it.
+                matches!(color_scale, Some(ColorScale::Categorical { .. })),
             )?;
         }
     }
@@ -733,6 +739,7 @@ pub(crate) fn refuse_format_temporality_mismatch_legend_fields(
             legend.and_then(|l| l.format_type.as_deref()),
             channel,
             FormatSurface::Legend,
+            timestamp_read(channel, Some(enc), false, false) == TimestampRead::Categories,
         )?;
     }
     Ok(())
@@ -2015,9 +2022,9 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         );
         let numeric = batch_of(DataType::Float64, Arc::new(Float64Array::from(vec![lo as f64, hi as f64])));
         let config = ChartConfig::default();
-        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&spec), &temporal, &config), Ok(()));
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&spec), &temporal, None, &config), Ok(()));
         assert!(
-            refuse_format_temporality_mismatch_legend_fields(&bindings(&spec), &numeric, &config).is_err(),
+            refuse_format_temporality_mismatch_legend_fields(&bindings(&spec), &numeric, None, &config).is_err(),
             "negative control: the same spec over a numeric column is refused"
         );
         let layers = vec![LayerPrepared::from_chart_only(&spec)];
@@ -2077,12 +2084,12 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         };
 
         let year = spec_with("%Y");
-        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&year), &temporal, &config), Ok(()));
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&year), &temporal, None, &config), Ok(()));
         assert_eq!(labels(&year, &temporal), ["2001", "2002", "2003", "2004", "2005"]);
 
         let number = spec_with(".2f");
         assert_eq!(
-            refuse_format_temporality_mismatch_legend_fields(&bindings(&number), &temporal, &config),
+            refuse_format_temporality_mismatch_legend_fields(&bindings(&number), &temporal, None, &config),
             Err(crate::render::RenderError::NumberFormatOnTemporalScale {
                 channel: "color",
                 surface: crate::render::FormatSurface::Legend,
@@ -2090,7 +2097,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
                 coord_flipped: false,
             })
         );
-        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&number), &numeric, &config), Ok(()));
+        assert_eq!(refuse_format_temporality_mismatch_legend_fields(&bindings(&number), &numeric, None, &config), Ok(()));
         // The fixture's scale domain is the epoch-ms span; over a numeric
         // field those are just numbers, formatted as the d3 spec says.
         assert_eq!(labels(&number, &numeric)[0], "978307200000.00");
@@ -2135,6 +2142,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
                 let err = refuse_format_temporality_mismatch_legend_fields(
                     &bindings(&spec_with(channel, pair.clone())),
                     &batch,
+                    None,
                     &config,
                 )
                 .expect_err("a time format over a string field must refuse");
@@ -2148,6 +2156,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
                         refuse_format_temporality_mismatch_legend_fields(
                             &bindings(&spec_with(channel, disabled)),
                             &batch,
+                            None,
                             &config,
                         ),
                         Ok(()),
@@ -2161,7 +2170,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
                     ..Default::default()
                 };
                 assert_eq!(
-                    refuse_format_temporality_mismatch_legend_fields(&bindings(&spec_with(channel, pair)), &batch, &chart_off),
+                    refuse_format_temporality_mismatch_legend_fields(&bindings(&spec_with(channel, pair)), &batch, None, &chart_off),
                     Ok(()),
                     "{channel}: a chart-level disabled legend is exempt"
                 );

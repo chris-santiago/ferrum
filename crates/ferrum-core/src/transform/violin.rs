@@ -148,7 +148,7 @@ pub(crate) fn apply_with_context(
     batch: &RecordBatch,
     ctx: &TransformContext,
 ) -> PyResult<RecordBatch> {
-    kde::refuse_malformed_extent("stat_violin", "extent", spec.extent)?;
+    crate::transform::pair_arg::refuse_malformed_range("stat_violin", "extent", spec.extent)?;
     let schema = batch.schema();
 
     let v_idx = schema.index_of(&spec.field).map_err(|_| {
@@ -2167,7 +2167,7 @@ mod tests {
             for values in [vec![1.0, 2.0, 4.0], vec![3.0], vec![]] {
                 let err = apply(&spec, &batch("v", values.clone())).expect_err("refuses").to_string();
                 assert!(
-                    err.contains("stat_violin: extent must satisfy lo < hi with both finite"),
+                    err.contains("stat_violin: extent must be (lo, hi) with lo < hi and both finite; got ("),
                     "{extent:?} over {values:?}: {err}"
                 );
             }
