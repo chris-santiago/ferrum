@@ -58,8 +58,8 @@ pub(crate) fn arrowhead_triangle(
 /// No stroke.
 ///
 /// `fill` is `Option` so a head inherits its shaft's *cleared* paint: a
-/// `mark_segment(stroke="none", arrow=True)` paints neither shaft nor head
-/// (`#110`).
+/// `mark_segment(stroke="none", arrow=True)` or an annotation arrow whose colour
+/// is `none` paints neither shaft nor head (`#110`).
 ///
 /// This is the general entry point — [`arrowhead_path`] is the convenience
 /// wrapper for callers with no per-row opacity to thread (`annotation.rs`'s
@@ -104,12 +104,13 @@ pub(crate) fn arrowhead_path_with_opacity(
 /// Fully opaque convenience wrapper over [`arrowhead_path_with_opacity`] —
 /// matches every arrowhead ferrum has ever drawn (`annotation::emit_arrow`'s
 /// shape, unchanged by this extraction). Used only where there is no
-/// per-row opacity to inherit.
+/// per-row opacity to inherit. The paint is optional so an annotation arrow
+/// whose colour is a paint word draws an unpainted head, as its shaft does.
 pub(crate) fn arrowhead_path(
     points: [(f64, f64); 3],
-    color: ferrum_scene::Color,
+    fill: Option<ferrum_scene::Color>,
 ) -> ferrum_scene::SceneNode {
-    arrowhead_path_with_opacity(points, Some(color), 1.0, 1.0, 1.0)
+    arrowhead_path_with_opacity(points, fill, 1.0, 1.0, 1.0)
 }
 
 #[cfg(test)]
@@ -180,7 +181,7 @@ mod tests {
     fn arrowhead_path_builds_closed_filled_triangle() {
         let points = arrowhead_triangle(0.0, 0.0, 10.0, 0.0, 4.0).unwrap();
         let color = ferrum_scene::Color { r: 0x12, g: 0x34, b: 0x56, a: 0xff };
-        let node = arrowhead_path(points, color);
+        let node = arrowhead_path(points, Some(color));
         let ferrum_scene::SceneNode::Path { commands, style, closed, widths: None } = node else {
             panic!("expected Path node");
         };
@@ -192,5 +193,23 @@ mod tests {
         assert_eq!(style.stroke, None);
         assert_eq!(style.stroke_width, 0.0);
         assert_eq!(style.opacity, 1.0);
+    }
+
+    /// With no paint the head is an unpainted triangle, as its shaft is.
+    #[test]
+    fn arrowhead_path_without_a_paint_builds_an_unpainted_triangle() {
+        let points = arrowhead_triangle(0.0, 0.0, 10.0, 0.0, 4.0).unwrap();
+        let ferrum_scene::SceneNode::Path { commands, style, closed, widths: None } =
+            arrowhead_path(points, None)
+        else {
+            panic!("expected Path node");
+        };
+        assert!(closed);
+        assert_eq!(commands.len(), 4);
+        assert_eq!(style.fill, None);
+        assert_eq!(style.stroke, None);
+        assert_eq!(style.opacity, 1.0);
+        assert_eq!(style.fill_opacity, 1.0);
+        assert_eq!(style.stroke_opacity, 1.0);
     }
 }

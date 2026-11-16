@@ -119,7 +119,7 @@ ann.text(
     text,                   # label string
     *,
     font_size=12,
-    color="#333",
+    color=None,             # None = the theme's text colour
     anchor="start",         # "start" | "middle" | "end"
     baseline="middle",      # "top" | "middle" | "bottom"
     angle=0,                # rotation in degrees
@@ -153,7 +153,7 @@ ann.arrow(
     x, y,                   # tail position
     x2, y2,                 # head position
     *,
-    stroke="#333",
+    stroke=None,            # None = the theme's text colour
     stroke_width=1.5,
     head_size=8,
 )
@@ -179,7 +179,7 @@ ann.rect(
     x1, y1,                 # top-left corner
     x2, y2,                 # bottom-right corner
     *,
-    fill,                   # required fill color
+    fill=None,              # None = the theme's text colour, at the opacity below
     opacity=0.1,
     stroke=None,            # border color; None = no border
     corner_radius=0,
@@ -208,7 +208,7 @@ ann.line(
     x1, y1,                 # start position
     x2, y2,                 # end position
     *,
-    stroke="#333",
+    stroke=None,            # None = the theme's text colour
     stroke_width=1,
     dash=None,              # e.g. [4, 4]
 )
@@ -238,7 +238,7 @@ ann.span(
     start,                  # band start (CoordValue)
     end,                    # band end (CoordValue)
     *,
-    fill,                   # required fill color
+    fill=None,              # None = the theme's text colour, at the opacity below
     opacity=0.3,
     label=None,             # optional text label in the band
     label_position="top",   # "top" | "middle" | "bottom"
@@ -296,7 +296,7 @@ ann.bracket(
     *,
     label,                  # required label text
     direction="above",      # "above" | "below"
-    stroke="#333",
+    stroke=None,            # None = the theme's text colour
     tip_length=6,           # length of end ticks in pixels
 )
 ```
@@ -329,8 +329,8 @@ ann.callout(
     text_y=None,
     arrow="curved",         # "curved" | "straight" | "none"
     padding=4,
-    background="#fff",
-    border_color="#ccc",
+    background=None,        # None = the theme's background colour
+    border_color=None,      # None = the theme's text colour; also colours the leader
     border_radius=3,
 )
 ```

@@ -1371,11 +1371,11 @@ Each `annotate_*` function in `ferrum` returns a small `Chart` that renders on i
 |---|---|
 | `annotation.text(x, y, text, *, font_size=12, color=None, anchor="start", baseline="middle", angle=0, dx=0, dy=0, z="above_marks")` | Text. `z` is `"above_marks"` or `"below_marks"`. |
 | `annotation.line(x1, y1, x2, y2, *, stroke=None, stroke_width=1, dash=None)` | A line segment. |
-| `annotation.rect(x1, y1, x2, y2, *, fill, opacity=0.1, stroke=None, corner_radius=0)` | A rectangle. |
-| `annotation.span(axis, start, end, *, fill, opacity=0.3, label=None, label_position="top")` | A full-height (`axis="x"`) or full-width (`axis="y"`) band between `start` and `end`. The two ends are both categories or both values; a span over categories shades whole bands (see **Categories**). |
+| `annotation.rect(x1, y1, x2, y2, *, fill=None, opacity=0.1, stroke=None, corner_radius=0)` | A rectangle. |
+| `annotation.span(axis, start, end, *, fill=None, opacity=0.3, label=None, label_position="top")` | A full-height (`axis="x"`) or full-width (`axis="y"`) band between `start` and `end`. The two ends are both categories or both values; a span over categories shades whole bands (see **Categories**). |
 | `annotation.arrow(x, y, x2, y2, *, stroke=None, stroke_width=1.5, head_size=8)` | An arrow with a triangle head at `(x2, y2)`. |
 | `annotation.bracket(x1, y1, x2, y2, *, label, direction="above", stroke=None, tip_length=6)` | A labelled bracket. `direction` is `"up"`, `"down"`, `"left"` or `"right"`, the side its tips and label point toward; `"above"` (the default) is a synonym for `"up"` and `"below"` for `"down"`, on every route. |
-| `annotation.callout(x, y, text, *, text_x=None, text_y=None, arrow="curved", padding=4, background="#fff", border_color="#ccc", border_radius=3)` | Boxed text with a leader to `(x, y)`. |
+| `annotation.callout(x, y, text, *, text_x=None, text_y=None, arrow="curved", padding=4, background=None, border_color=None, border_radius=3)` | Boxed text with a leader to `(x, y)`. |
 | `annotation.image(x, y, src, *, width=50, height=50, anchor="center")` | An image. |
 
 **Span labels.** A span's `label` is centered horizontally on the span. Its vertical place is the span's `label_position` keyword: `"top"` (the default) hangs the text 6 px below the span's top edge, `"bottom"` sits it 6 px above the bottom edge, and `"middle"` centers it. For an `axis="x"` span, which runs the full plot height, `"top"` is the top of the plot area. Any other value raises `ValueError` at construction.

@@ -786,7 +786,7 @@ _FIGURE_FLIP_DIGESTS: dict[str, str] = {
 _NO_FLIP_DIGESTS: dict[str, str] = {
     "abline": "0286023814c11f69c650289b57b0e0dd03466be3ab85be086d017fbf91a676c1",
     "bracket": "5bf0e565a6344966e8626b37bd04aaea5021b47c1d718a8f0f11a9e1a5a88aca",
-    "callout": "e56cf2204ccac52a336f070bf27389fda7d25f6782ea80497bb997396d8f1f9f",
+    "callout": "3da31f607e69540b344adb32876e91573c4d26d8737144867d3239174dc222d3",
     "hline": "77c822a873c7174355083e8a1bb3a4e1479ddc58445b03ee5817af4650077b94",
     "norm_and_pixel": "2493602171140a14b6b4fa168c43f0839e4053fc2afc1ff6cd83353315e76bb2",
     "rect": "d2740fc78bb402b15483480745c9fc4fb2b8279c863d1a258d83b3d263779547",
@@ -802,9 +802,15 @@ def test_a_figure_applied_flip_swaps_nothing(name):
     assert _digest(_FIGURE_FLIP[name]().to_svg()) == _FIGURE_FLIP_DIGESTS[name]
 
 
-@pytest.mark.parametrize("name", sorted(_NO_FLIP))
+@pytest.mark.parametrize("name", sorted(set(_NO_FLIP) - {"callout"}))
 def test_output_with_no_flip_draws_the_bytes_it_drew_before(name):
     assert _digest(_NO_FLIP[name]().to_svg()) == _NO_FLIP_DIGESTS[name]
+
+
+def test_a_callout_with_no_flip_draws_its_box_and_text_in_the_theme_colours():
+    """Only the box fill (theme background) and the text fill (theme text colour) differ from
+    the bytes the callout drew before it followed the theme; the border colour is the caller's."""
+    assert _digest(_NO_FLIP["callout"]().to_svg()) == _NO_FLIP_DIGESTS["callout"]
 
 
 def test_the_figure_applied_flip_is_not_a_caller_flip():

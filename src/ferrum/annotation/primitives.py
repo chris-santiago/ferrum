@@ -185,7 +185,7 @@ class AnnotationRect:
     y1: CoordValue
     x2: CoordValue
     y2: CoordValue
-    fill: str
+    fill: str | None
     opacity: float
     stroke: str | None
     corner_radius: float
@@ -202,10 +202,11 @@ class AnnotationRect:
             "y1": _coord(self.y1),
             "x2": _coord(self.x2),
             "y2": _coord(self.y2),
-            "fill": self.fill,
             "opacity": self.opacity,
             "corner_radius": self.corner_radius,
         }
+        if self.fill is not None:
+            d["fill"] = self.fill
         if self.stroke is not None:
             d["stroke"] = self.stroke
         return d
@@ -250,7 +251,7 @@ class AnnotationSpan:
     axis: str
     start: CoordValue
     end: CoordValue
-    fill: str
+    fill: str | None
     opacity: float
     label: str | None
     label_position: str
@@ -272,10 +273,11 @@ class AnnotationSpan:
             "axis": self.axis,
             "start": _coord(self.start),
             "end": _coord(self.end),
-            "fill": self.fill,
             "opacity": self.opacity,
             "label_position": self.label_position,
         }
+        if self.fill is not None:
+            d["fill"] = self.fill
         if self.label is not None:
             d["label"] = self.label
         return d
@@ -328,8 +330,8 @@ class AnnotationCallout:
     text_y: CoordValue | None
     arrow: str
     padding: float
-    background: str
-    border_color: str
+    background: str | None
+    border_color: str | None
     border_radius: float
 
     def __post_init__(self) -> None:
@@ -348,10 +350,12 @@ class AnnotationCallout:
             "text": self.text,
             "arrow": self.arrow,
             "padding": self.padding,
-            "background": self.background,
-            "border_color": self.border_color,
             "border_radius": self.border_radius,
         }
+        if self.background is not None:
+            d["background"] = self.background
+        if self.border_color is not None:
+            d["border_color"] = self.border_color
         if self.text_x is not None:
             d["text_x"] = _coord(self.text_x)
         if self.text_y is not None:
@@ -499,7 +503,7 @@ def rect(
     x2: CoordValue,
     y2: CoordValue,
     *,
-    fill: str,
+    fill: str | None = None,
     opacity: float = 0.1,
     stroke: str | None = None,
     corner_radius: float = 0,
@@ -512,8 +516,8 @@ def rect(
         Top-left corner position.
     x2, y2 : CoordValue
         Bottom-right corner position.
-    fill : str
-        Fill color.
+    fill : str, optional
+        Fill color. Defaults to the theme's text colour (``font_color``).
     opacity : float, default 0.1
         Fill opacity.
     stroke : str, optional
@@ -582,7 +586,7 @@ def span(
     start: CoordValue,
     end: CoordValue,
     *,
-    fill: str,
+    fill: str | None = None,
     opacity: float = 0.3,
     label: str | None = None,
     label_position: str = "top",
@@ -600,8 +604,8 @@ def span(
         higher-placed one (``start == end`` shades that band).
     end : CoordValue
         End of the span, of the same kind as ``start``.
-    fill : str
-        Band fill color.
+    fill : str, optional
+        Band fill color. Defaults to the theme's text colour (``font_color``).
     opacity : float, default 0.3
         Fill opacity.
     label : str, optional
@@ -682,8 +686,8 @@ def callout(
     text_y: CoordValue | None = None,
     arrow: str = "curved",
     padding: float = 4,
-    background: str = "#fff",
-    border_color: str = "#ccc",
+    background: str | None = None,
+    border_color: str | None = None,
     border_radius: float = 3,
 ) -> AnnotationCallout:
     """Create a callout bubble annotation.
@@ -703,10 +707,12 @@ def callout(
         (no curve is implemented), not a Python-side validation gap.
     padding : float, default 4
         Padding inside the bubble in pixels.
-    background : str, default "#fff"
-        Bubble background color.
-    border_color : str, default "#ccc"
-        Bubble border color.
+    background : str, optional
+        Bubble background color. Defaults to the theme's background colour.
+    border_color : str, optional
+        Bubble border color; the leader line takes it too. Defaults to the
+        theme's text colour (``font_color``), which the bubble's text always
+        takes.
     border_radius : float, default 3
         Bubble corner radius.
 

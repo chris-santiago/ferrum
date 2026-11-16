@@ -302,7 +302,7 @@ fn build_span_annotation() {
         axis: "x".to_string(),
         start: CoordValue::Norm { norm: 0.2 },
         end: CoordValue::Norm { norm: 0.8 },
-        fill: "#aaaaaa".to_string(),
+        fill: Some("#aaaaaa".to_string()),
         opacity: 0.3,
         label_position: "center".to_string(),
         label: Some("span".to_string()),
@@ -332,7 +332,7 @@ fn deser_annotation_spec_line() {
 
 /// A parsed colour as the renderer draws it; the string must be a colour.
 fn colour(s: &str) -> Color {
-    resolve_color("test", "color", s).unwrap()
+    resolve_color("test", "color", s).unwrap().expect("a colour, not a paint word")
 }
 
 /// The refusal (or nodes) of building one annotation spec on a plain panel.
@@ -383,16 +383,16 @@ fn an_unparseable_colour_on_any_field_is_refused_naming_the_kind_field_and_value
 }
 
 /// `none` and `transparent` are accepted paint words, in any case and padding.
-/// They draw the bytes they have always drawn (the `#333` paint), not a refusal.
+/// They draw no paint: a cleared fill and a cleared stroke.
 #[test]
-fn the_paint_sentinels_are_accepted_and_draw_what_they_always_drew() {
+fn the_paint_sentinels_are_accepted_and_draw_no_paint() {
     for word in ["none", "transparent", "None", " TRANSPARENT "] {
         let json = format!(r#"{{"type":"rect",{SEGMENT},"fill":"{word}","stroke":"{word}"}}"#);
         let nodes = build_on_plain_panel(&json).expect(word);
         match nodes.above_marks.as_slice() {
             [SceneNode::Rect { style, .. }] => {
-                assert_eq!(style.fill, Some(Color::rgb(51, 51, 51)), "{word}");
-                assert_eq!(style.stroke, Some(Color::rgb(51, 51, 51)), "{word}");
+                assert_eq!(style.fill, None, "{word}");
+                assert_eq!(style.stroke, None, "{word}");
             }
             other => panic!("expected one rect, got {other:?}"),
         }
@@ -665,7 +665,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
         "x",
         &CoordValue::Pixel { px: f64::NAN },
         &CoordValue::Data(50.0),
-        "#ff0000",
+        Some("#ff0000"),
         0.3,
         None,
         "middle",
@@ -683,7 +683,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
         "x",
         &CoordValue::Data(10.0),
         &CoordValue::Data(50.0),
-        "#ff0000",
+        Some("#ff0000"),
         0.3,
         None,
         "middle",
@@ -699,7 +699,7 @@ fn emit_span_skips_on_non_finite_coordinate() {
 #[test]
 fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
     let mut out = Vec::new();
-    emit_arrow(100.0, 100.0, 100.001, 100.0, colour("#000000"), 1.0, 8.0, &mut out);
+    emit_arrow(100.0, 100.0, 100.001, 100.0, Some(colour("#000000")), 1.0, 8.0, &mut out);
     assert_eq!(out.len(), 2, "expected shaft line + arrowhead path");
     let SceneNode::Path { commands, .. } = &out[1] else {
         panic!("expected arrowhead Path node");
@@ -727,7 +727,7 @@ fn emit_arrow_clamps_head_size_to_epsilon_shaft() {
 fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
     let (x1, y1, x2, y2, head_size) = (10.0, 20.0, 130.0, 65.0, 8.0);
     let mut out = Vec::new();
-    emit_arrow(x1, y1, x2, y2, colour("#123456"), 1.0, head_size, &mut out);
+    emit_arrow(x1, y1, x2, y2, Some(colour("#123456")), 1.0, head_size, &mut out);
     let SceneNode::Path { commands, .. } = &out[1] else {
         panic!("expected arrowhead Path node");
     };
@@ -754,7 +754,7 @@ fn emit_arrow_triangle_matches_shared_arrowhead_triangle_helper() {
 fn emit_bracket_below_draws_like_down_and_above_like_up() {
     let drawn = |direction: &str| {
         let mut out = Vec::new();
-        emit_bracket(0.0, 100.0, 100.0, 100.0, "n", direction, colour("#000000"), colour("#111111"), 6.0, &mut out);
+        emit_bracket(0.0, 100.0, 100.0, 100.0, "n", direction, Some(colour("#000000")), colour("#111111"), 6.0, &mut out);
         format!("{out:?}")
     };
     assert_eq!(drawn("below"), drawn("down"));
@@ -774,7 +774,7 @@ fn emit_bracket_unknown_direction_defaults_to_up() {
         100.0,
         "",
         "up",
-        colour("#000000"),
+        Some(colour("#000000")),
         colour("#000000"),
         6.0,
         &mut out_up,
@@ -787,7 +787,7 @@ fn emit_bracket_unknown_direction_defaults_to_up() {
         100.0,
         "",
         "diagonal",
-        colour("#000000"),
+        Some(colour("#000000")),
         colour("#000000"),
         6.0,
         &mut out_unknown,
@@ -845,8 +845,8 @@ fn emit_callout_width_uses_char_count_not_byte_len() {
             text,
             "curved",
             4.0,
-            "#fff",
-            "#333",
+            Some("#fff"),
+            Some("#333"),
             0.0,
             None,
             None,
@@ -885,8 +885,8 @@ fn emit_callout_arrow_none_suppresses_leader_line() {
             "hi",
             arrow,
             4.0,
-            "#fff",
-            "#333",
+            Some("#fff"),
+            Some("#333"),
             0.0,
             None,
             None,
@@ -948,7 +948,7 @@ fn kind_name_covers_every_shape() {
                 y1: CoordValue::Data(2.0),
                 x2: CoordValue::Data(3.0),
                 y2: CoordValue::Data(4.0),
-                fill: "#ccc".into(),
+                fill: Some("#ccc".into()),
                 opacity: 0.3,
                 corner_radius: 0.0,
                 stroke: None,
@@ -972,7 +972,7 @@ fn kind_name_covers_every_shape() {
                 axis: "x".into(),
                 start: CoordValue::Data(1.0),
                 end: CoordValue::Data(2.0),
-                fill: "#ccc".into(),
+                fill: Some("#ccc".into()),
                 opacity: 0.2,
                 label_position: "center".into(),
                 label: None,
@@ -999,8 +999,8 @@ fn kind_name_covers_every_shape() {
                 text: "c".into(),
                 arrow: "curved".into(),
                 padding: 4.0,
-                background: "#fff".into(),
-                border_color: "#333".into(),
+                background: Some("#fff".into()),
+                border_color: Some("#333".into()),
                 border_radius: 0.0,
                 text_x: None,
                 text_y: None,
@@ -1085,7 +1085,7 @@ fn data_coords_on_axis_rect_line_bracket_share_shape() {
             y1: CoordValue::Data(2.0),
             x2: CoordValue::Data(3.0),
             y2: CoordValue::Data(4.0),
-            fill: "#ccc".into(),
+            fill: Some("#ccc".into()),
             opacity: 0.3,
             corner_radius: 0.0,
             stroke: None,
@@ -1122,7 +1122,7 @@ fn data_coords_on_axis_span_gated_by_its_own_axis_field() {
         axis: "x".into(),
         start: CoordValue::Data(1.0),
         end: CoordValue::Data(2.0),
-        fill: "#ccc".into(),
+        fill: Some("#ccc".into()),
         opacity: 0.2,
         label_position: "center".into(),
         label: None,
@@ -1134,7 +1134,7 @@ fn data_coords_on_axis_span_gated_by_its_own_axis_field() {
         axis: "y".into(),
         start: CoordValue::Data(5.0),
         end: CoordValue::Data(6.0),
-        fill: "#ccc".into(),
+        fill: Some("#ccc".into()),
         opacity: 0.2,
         label_position: "center".into(),
         label: None,
@@ -1151,8 +1151,8 @@ fn data_coords_on_axis_callout_includes_optional_text_position() {
         text: "c".into(),
         arrow: "curved".into(),
         padding: 4.0,
-        background: "#fff".into(),
-        border_color: "#333".into(),
+        background: Some("#fff".into()),
+        border_color: Some("#333".into()),
         border_radius: 0.0,
         text_x: Some(CoordValue::Data(11.0)),
         text_y: Some(CoordValue::Data(12.0)),
@@ -1174,8 +1174,8 @@ fn data_coords_on_axis_callout_includes_optional_text_position() {
         text: "c".into(),
         arrow: "curved".into(),
         padding: 4.0,
-        background: "#fff".into(),
-        border_color: "#333".into(),
+        background: Some("#fff".into()),
+        border_color: Some("#333".into()),
         border_radius: 0.0,
         text_x: None,
         text_y: None,
@@ -2206,7 +2206,7 @@ mod categories {
             axis: axis.to_string(),
             start,
             end,
-            fill: "#cccccc".to_string(),
+            fill: Some("#cccccc".to_string()),
             opacity: 0.2,
             label_position: "center".to_string(),
             label: None,
@@ -2449,8 +2449,8 @@ mod categories {
             text: "n".to_string(),
             arrow: "straight".to_string(),
             padding: 4.0,
-            background: "#ffffff".to_string(),
-            border_color: "#333333".to_string(),
+            background: Some("#ffffff".to_string()),
+            border_color: Some("#333333".to_string()),
             border_radius: 0.0,
             text_x: Some(category("zz")),
             text_y: None,
@@ -2621,8 +2621,8 @@ mod categories {
             text: "n".to_string(),
             arrow: "straight".to_string(),
             padding: 4.0,
-            background: "#ffffff".to_string(),
-            border_color: "#333333".to_string(),
+            background: Some("#ffffff".to_string()),
+            border_color: Some("#333333".to_string()),
             border_radius: 0.0,
             text_x: text_x.map(data),
             text_y: text_y.map(data),
@@ -2647,7 +2647,7 @@ mod categories {
             y1: data(y1),
             x2: data(x2),
             y2: data(y2),
-            fill: "#cccccc".to_string(),
+            fill: Some("#cccccc".to_string()),
             opacity: 0.5,
             corner_radius: 0.0,
             stroke: None,
@@ -2927,12 +2927,132 @@ mod theme_ink {
         assert_eq!(inks(&nodes.below_marks), vec![FONT]);
     }
 
+    const BG: (u8, u8, u8) = (0x0d, 0x0e, 0x0f);
+    const RECT: &str = r#"{"type":"rect","x1":{"px":10},"y1":{"px":10},"x2":{"px":60},"y2":{"px":40}}"#;
+    const CALLOUT: &str = r#"{"type":"callout","x":{"px":10},"y":{"px":10},"text":"c"}"#;
+
+    fn themed_with_background() -> ThemeInputs {
+        let mut theme = themed();
+        theme.colors.background_color = palette::Srgba::new(BG.0, BG.1, BG.2, 0xFF);
+        theme
+    }
+
+    fn rgb(c: Option<Color>) -> Option<(u8, u8, u8)> {
+        c.map(|c| (c.r, c.g, c.b))
+    }
+
+    /// The box's `(fill, stroke)`, the leader's colour and the text's colour.
+    fn callout_paints(
+        json: &str,
+    ) -> (Option<(u8, u8, u8)>, Option<(u8, u8, u8)>, Option<(u8, u8, u8)>, Option<(u8, u8, u8)>) {
+        let nodes = build(json, &themed_with_background()).above_marks;
+        match nodes.as_slice() {
+            [SceneNode::Rect { style, .. }, SceneNode::Line { style: leader, .. }, SceneNode::Text { style: text, .. }] => {
+                (rgb(style.fill), rgb(style.stroke), rgb(leader.color), rgb(text.color))
+            }
+            other => panic!("expected box, leader, text; got {other:?}"),
+        }
+    }
+
+    fn rect_style(nodes: &AnnotationNodes) -> &FillStroke {
+        match nodes.above_marks.first() {
+            Some(SceneNode::Rect { style, .. }) => style,
+            other => panic!("expected a rect, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn a_callout_keeps_its_own_text_colour() {
-        let json = r#"{"type":"callout","x":{"px":10},"y":{"px":10},"text":"c"}"#;
-        let drawn = inks(&build(json, &themed()).above_marks);
-        assert!(!drawn.is_empty());
-        assert!(drawn.iter().all(|c| *c != FONT), "a callout bubble keeps its fixed ink: {drawn:?}");
+    fn an_unset_rect_and_span_fill_draw_the_theme_text_colour_at_their_default_opacity() {
+        let rect = build(RECT, &themed());
+        assert_eq!(rgb(rect_style(&rect).fill), Some(FONT));
+        assert_eq!(rect_style(&rect).fill_opacity, 0.3);
+        let span = build(SPAN, &themed());
+        assert_eq!(rgb(rect_style(&span).fill), Some(FONT));
+        assert_eq!(rect_style(&span).fill_opacity, 0.2);
+    }
+
+    #[test]
+    fn an_unset_rect_fill_follows_the_theme_it_is_drawn_under() {
+        let mut dark = ThemeInputs::default();
+        dark.colors.font_color = palette::Srgba::new(0xe6, 0xe6, 0xe6, 0xFF);
+        assert_eq!(rgb(rect_style(&build(RECT, &dark)).fill), Some((0xe6, 0xe6, 0xe6)));
+        assert_eq!(rgb(rect_style(&build(RECT, &ThemeInputs::default())).fill), Some((0x1f, 0x29, 0x37)));
+    }
+
+    #[test]
+    fn an_explicit_rect_and_span_fill_wins_over_the_theme() {
+        for (json, opacity) in [(RECT, 0.3), (SPAN, 0.2)] {
+            let nodes = build(&extended(json, r##""fill":"#ff0000""##), &themed());
+            assert_eq!(rgb(rect_style(&nodes).fill), Some((255, 0, 0)), "{json}");
+            assert_eq!(rect_style(&nodes).fill_opacity, opacity, "{json}");
+        }
+    }
+
+    #[test]
+    fn an_unstyled_callout_draws_the_theme_colours() {
+        assert_eq!(callout_paints(CALLOUT), (Some(BG), Some(FONT), Some(FONT), Some(FONT)));
+    }
+
+    #[test]
+    fn an_unstyled_callout_on_a_dark_theme_is_legible() {
+        let mut dark = ThemeInputs::default();
+        dark.colors.font_color = palette::Srgba::new(0xe6, 0xe6, 0xe6, 0xFF);
+        dark.colors.background_color = palette::Srgba::new(0x11, 0x11, 0x11, 0xFF);
+        let nodes = build(CALLOUT, &dark).above_marks;
+        match nodes.as_slice() {
+            [SceneNode::Rect { style, .. }, SceneNode::Line { .. }, SceneNode::Text { style: text, .. }] => {
+                assert_eq!(rgb(style.fill), Some((0x11, 0x11, 0x11)));
+                assert_eq!(rgb(text.color), Some((0xe6, 0xe6, 0xe6)));
+            }
+            other => panic!("expected box, leader, text; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_explicit_callout_colour_wins_on_its_own_field_only() {
+        let border = extended(CALLOUT, r##""border_color":"#1a56db""##);
+        assert_eq!(callout_paints(&border), (Some(BG), Some((0x1a, 0x56, 0xdb)), Some((0x1a, 0x56, 0xdb)), Some(FONT)));
+        let background = extended(CALLOUT, r##""background":"#ffeecc""##);
+        assert_eq!(callout_paints(&background), (Some((0xff, 0xee, 0xcc)), Some(FONT), Some(FONT), Some(FONT)));
+        let both = extended(&border, r##""background":"#ffeecc""##);
+        assert_eq!(
+            callout_paints(&both),
+            (Some((0xff, 0xee, 0xcc)), Some((0x1a, 0x56, 0xdb)), Some((0x1a, 0x56, 0xdb)), Some(FONT))
+        );
+    }
+
+    #[test]
+    fn a_paint_word_draws_no_paint_on_any_colour_field() {
+        for word in ["none", "transparent", " None ", "TRANSPARENT"] {
+            let with = |json: &str, key: &str| extended(json, &format!(r#""{key}":"{word}""#));
+            let rect = build(&extended(&with(RECT, "fill"), &format!(r#""stroke":"{word}""#)), &themed());
+            assert_eq!((rect_style(&rect).fill, rect_style(&rect).stroke), (None, None), "{word}");
+            assert_eq!(rect_style(&build(&with(SPAN, "fill"), &themed())).fill, None, "{word}");
+            let callout = extended(&with(CALLOUT, "background"), &format!(r#""border_color":"{word}""#));
+            assert_eq!(callout_paints(&callout), (None, None, None, Some(FONT)), "{word}");
+            let text = build(&with(TEXT, "color"), &themed()).above_marks;
+            assert!(matches!(text.as_slice(), [SceneNode::Text { style, .. }] if style.color.is_none()), "{word}");
+            for json in [LINE, ARROW] {
+                let nodes = build(&with(json, "stroke"), &themed()).above_marks;
+                for node in &nodes {
+                    match node {
+                        SceneNode::Line { style, .. } => assert_eq!(style.color, None, "{word} {json}"),
+                        SceneNode::Path { style, .. } => assert_eq!(style.fill, None, "{word} {json}"),
+                        other => panic!("unexpected {other:?}"),
+                    }
+                }
+            }
+            let bracket = build(&with(BRACKET, "stroke"), &themed()).above_marks;
+            assert_eq!(
+                bracket.iter().map(|n| match n {
+                    SceneNode::Line { style, .. } => rgb(style.color),
+                    SceneNode::Text { style, .. } => rgb(style.color),
+                    other => panic!("unexpected {other:?}"),
+                }).collect::<Vec<_>>(),
+                vec![None, None, None, Some(FONT)],
+                "{word}"
+            );
+        }
     }
 
     #[test]

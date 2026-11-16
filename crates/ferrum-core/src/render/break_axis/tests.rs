@@ -2337,7 +2337,7 @@ fn segment_row(
             y2: tip.1,
             style: stroke(),
         },
-        crate::render::marks::arrowhead::arrowhead_path(points, ferrum_scene::Color::rgb(0, 0, 0)),
+        crate::render::marks::arrowhead::arrowhead_path(points, Some(ferrum_scene::Color::rgb(0, 0, 0))),
     ]
 }
 

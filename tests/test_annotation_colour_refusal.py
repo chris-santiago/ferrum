@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import pickle
+import re
 from typing import Any, Callable
 
 import numpy as np
@@ -22,6 +23,7 @@ import ferrum as fm
 import ferrum.annotation as ann
 from ferrum._entry import EntryRefusal
 from ferrum.color import to_hex
+from tests.test_annotation_theme_ink import _hex, _scene_nodes
 
 _BAD = "notacolor"
 _DF = pl.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 1.0, 2.0]})
@@ -97,14 +99,23 @@ def test_the_refusal_survives_pickling_and_can_be_revoiced():
 
 
 # Accepted colour -> digest of the SVG of ``_base() + <primitive carrying it>``, measured on the
-# build before the renderer's colour change, so the accepted values draw as they always did.
+# build before the renderer's colour change, so these accepted values draw as they always did.
 _ACCEPTED: dict[str, dict[str, str]] = {
-    "none": {"rect": "4b1055a9529e", "text": "ee68431c4553", "callout": "1711c99db57d"},
-    "transparent": {"rect": "4b1055a9529e", "text": "ee68431c4553", "callout": "1711c99db57d"},
-    "#123": {"rect": "4938fdba6bd8", "text": "a6f6c5436b5f", "callout": "3d0d697243bd"},
-    "#11223344": {"rect": "18f7706cab4d", "text": "d6bf1f2bba4e", "callout": "01499f33898d"},
-    "rgb(1,2,3)": {"rect": "880486e99256", "text": "003165175c47", "callout": "2981b6dff3bd"},
-    "red": {"rect": "194db27b6039", "text": "4384e87cceb4", "callout": "d377e513b754"},
+    "#123": {"rect": "4938fdba6bd8", "text": "a6f6c5436b5f"},
+    "#11223344": {"rect": "18f7706cab4d", "text": "d6bf1f2bba4e"},
+    "rgb(1,2,3)": {"rect": "880486e99256", "text": "003165175c47"},
+    "red": {"rect": "194db27b6039", "text": "4384e87cceb4"},
+}
+# Digests of the cells whose bytes follow the theme: a callout draws its text in the theme text
+# colour whatever the colours given, and the paint words draw no paint (a fill of ``none``, no
+# stroke). Against the build before these changes only those attributes differ.
+_THEMED: dict[str, dict[str, str]] = {
+    "none": {"rect": "26edf82ed539", "text": "59fef3f5ee4b", "callout": "8e5e901850b9"},
+    "transparent": {"rect": "26edf82ed539", "text": "59fef3f5ee4b", "callout": "8e5e901850b9"},
+    "#123": {"callout": "d17352c6d5cb"},
+    "#11223344": {"callout": "d0262db4bd23"},
+    "rgb(1,2,3)": {"callout": "ef3c30fdd1c2"},
+    "red": {"callout": "468bfaa23fc9"},
 }
 _CARRIERS: dict[str, Callable[[str], Any]] = {
     "rect": lambda v: ann.rect(0.0, 0.0, 1.0, 1.0, fill=v),
@@ -114,10 +125,99 @@ _CARRIERS: dict[str, Callable[[str], Any]] = {
 
 
 @pytest.mark.parametrize("value", sorted(_ACCEPTED))
-@pytest.mark.parametrize("carrier", sorted(_CARRIERS))
+@pytest.mark.parametrize("carrier", ["rect", "text"])
 def test_an_accepted_colour_draws_the_bytes_it_always_drew(value, carrier):
     svg = (_base() + _CARRIERS[carrier](value)).to_svg()
     assert hashlib.sha256(svg.encode()).hexdigest()[:12] == _ACCEPTED[value][carrier]
+
+
+_THEMED_CELLS = [(v, c) for v, cells in sorted(_THEMED.items()) for c in sorted(cells)]
+
+
+@pytest.mark.parametrize(("value", "carrier"), _THEMED_CELLS)
+def test_an_accepted_colour_draws_the_themed_bytes(value, carrier):
+    svg = (_base() + _CARRIERS[carrier](value)).to_svg()
+    assert hashlib.sha256(svg.encode()).hexdigest()[:12] == _THEMED[value][carrier]
+
+
+# One carrier per annotation colour field that takes a paint word. The word must add no colour
+# attribute beyond the theme text colour of a callout's text or a bracket's label.
+_PAINT_WORD_CASES: dict[str, Callable[[str], Any]] = {
+    "rect_fill": lambda v: ann.rect(0.0, 0.0, 1.0, 1.0, fill=v),
+    "rect_stroke": lambda v: ann.rect(0.0, 0.0, 1.0, 1.0, fill="none", stroke=v),
+    "span_fill": lambda v: ann.span("x", 0.5, 1.5, fill=v),
+    "text": lambda v: ann.text(1.0, 1.0, "t", color=v),
+    "arrow": lambda v: ann.arrow(0.2, 0.2, 1.5, 1.5, stroke=v),
+    "line": lambda v: ann.line(0.2, 0.2, 1.5, 1.5, stroke=v),
+    "bracket": lambda v: ann.bracket(0.2, 0.5, 1.5, 0.5, label="b", stroke=v),
+    "callout": lambda v: ann.callout(
+        1.0, 1.0, "t", text_x=1.5, text_y=1.8, background=v, border_color=v
+    ),
+}
+# The theme's text colour is the only paint a word-coloured annotation may draw (a callout's
+# text, a bracket's label); the fixed dark grey the words used to draw must not appear.
+_THEME_FONT = "#123456"
+_OLD_WORD_PAINT = "#333333"
+
+
+def _new_paints(chart: fm.Chart, plain: fm.Chart, output: str) -> list[tuple[str, str]]:
+    """(element kind, colour) of every colour the annotation adds to the plain render.
+
+    The kind is the SVG tag, or the scene node's type (the two vocabularies agree on
+    ``rect``, ``line``, ``path`` and ``text``).
+    """
+    if output == "interactive":
+        drawn_nodes = _scene_nodes(plain)
+        return [
+            (node["type"], hexed)
+            for node in _scene_nodes(chart)
+            if node not in drawn_nodes
+            for key in ("fill", "stroke", "color")
+            if (hexed := _hex(node["style"].get(key))) is not None
+        ]
+    elements = lambda svg: re.findall(  # noqa: E731
+        r"<(?:rect|line|path|text)[^>]*>", re.sub(r"<style>.*?</style>", "", svg, flags=re.S)
+    )
+    drawn = set(elements(plain.to_svg()))
+    out = []
+    for element in elements(chart.to_svg()):
+        if element in drawn:
+            continue
+        tag = element[1:].split()[0]
+        out += [
+            (tag, colour.lower())
+            for colour in re.findall(
+                r'(?:fill|stroke)="(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\))"', element
+            )
+        ]
+    return out
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("value", ["none", "transparent", " None ", "TRANSPARENT"])
+@pytest.mark.parametrize("case", sorted(_PAINT_WORD_CASES))
+def test_a_paint_word_draws_no_paint_on_any_colour_field(case, value, output):
+    theme = fm.Theme(font_color=_THEME_FONT)
+    chart = (_base() + _PAINT_WORD_CASES[case](value)).theme(theme)
+    paints = _new_paints(chart, _base().theme(theme), output)
+    # Text elements carry the theme text colour (a callout's text, a bracket's label); the
+    # text primitive's own colour is the word, so it draws none.
+    allowed = [] if case == "text" else [("text", _THEME_FONT)]
+    assert [p for p in paints if p not in allowed] == [], paints
+    assert (("text", _OLD_WORD_PAINT)) not in paints
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("case", sorted(_PAINT_WORD_CASES))
+def test_transparent_draws_as_none_does(case, output):
+    build = _PAINT_WORD_CASES[case]
+
+    def draw(value: str) -> str:
+        chart = _base() + build(value)
+        return chart.to_svg() if output == "static" else chart.interactive().scene_json
+
+    assert draw("transparent") == draw("none")
+    assert draw("none") != draw("#ff0010")
 
 
 @pytest.mark.parametrize(("kind", "param"), _FIELDS)
@@ -127,7 +227,16 @@ def test_every_colour_field_accepts_the_sentinels_and_every_colour_form(kind, pa
 
 
 # The colour fields whose value may be left unset.
-_OPTIONAL = [("text", "color"), ("arrow", "stroke"), ("rect", "stroke"), ("line", "stroke")]
+_OPTIONAL = [
+    ("text", "color"),
+    ("arrow", "stroke"),
+    ("rect", "fill"),
+    ("rect", "stroke"),
+    ("line", "stroke"),
+    ("span", "fill"),
+    ("callout", "background"),
+    ("callout", "border_color"),
+]
 
 
 @pytest.mark.parametrize(("kind", "param"), _OPTIONAL)

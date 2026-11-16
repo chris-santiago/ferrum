@@ -195,8 +195,9 @@ pub enum AnnotationSpec {
         y1: CoordValue,
         x2: CoordValue,
         y2: CoordValue,
-        #[serde(default = "default_fill_str")]
-        fill: String,
+        /// `None` draws the panel theme's text colour ([`ink`]).
+        #[serde(default)]
+        fill: Option<String>,
         #[serde(default = "default_rect_opacity")]
         opacity: f64,
         #[serde(default)]
@@ -223,8 +224,9 @@ pub enum AnnotationSpec {
         axis: String,
         start: CoordValue,
         end: CoordValue,
-        #[serde(default = "default_fill_str")]
-        fill: String,
+        /// `None` draws the panel theme's text colour ([`ink`]).
+        #[serde(default)]
+        fill: Option<String>,
         #[serde(default = "default_span_opacity")]
         opacity: f64,
         #[serde(default = "default_label_position")]
@@ -257,10 +259,12 @@ pub enum AnnotationSpec {
         arrow: String,
         #[serde(default = "default_callout_padding")]
         padding: f64,
-        #[serde(default = "default_background_str")]
-        background: String,
-        #[serde(default = "default_border_color_str")]
-        border_color: String,
+        /// `None` draws the panel theme's background colour.
+        #[serde(default)]
+        background: Option<String>,
+        /// `None` draws the panel theme's text colour ([`ink`]).
+        #[serde(default)]
+        border_color: Option<String>,
         #[serde(default)]
         border_radius: f64,
         #[serde(default)]
@@ -417,9 +421,6 @@ fn default_stroke_width() -> f64 {
 fn default_head_size() -> f64 {
     DEFAULT_ARROW_HEAD_SIZE
 }
-fn default_fill_str() -> String {
-    "#cccccc".to_string()
-}
 fn default_rect_opacity() -> f64 {
     0.3
 }
@@ -440,12 +441,6 @@ fn default_arrow_str() -> String {
 }
 fn default_callout_padding() -> f64 {
     4.0
-}
-fn default_background_str() -> String {
-    "#ffffff".to_string()
-}
-fn default_border_color_str() -> String {
-    "#333333".to_string()
 }
 fn default_image_size() -> f64 {
     50.0
@@ -709,11 +704,6 @@ enum Shape {
 
 // ── Color helpers ───────────────────────────────────────────────────────────
 
-/// What an annotation's `none` / `transparent` paint word draws: dark gray.
-/// These words never parse as colours, and an annotation has always drawn them
-/// as this fixed paint; the byte output is kept as it is.
-const PAINT_WORD_COLOR: Color = Color { r: 51, g: 51, b: 51, a: 255 };
-
 /// Whether `s` is one of the paint words the Python side accepts in place of a
 /// colour (trimmed, case-insensitive, as `draw::resolve_paint_color` reads them).
 fn is_paint_word(s: &str) -> bool {
@@ -722,13 +712,17 @@ fn is_paint_word(s: &str) -> bool {
 }
 
 /// The scene colour of `value`, the string held by `field` of a `kind`
-/// annotation: a parsed colour, or [`PAINT_WORD_COLOR`] for a paint word. A
+/// annotation: a parsed colour, or `None` (no paint) for a paint word. A
 /// string that is neither is refused.
-fn resolve_color(kind: &'static str, field: &'static str, value: &str) -> Result<Color, AnnotationRefusal> {
+fn resolve_color(
+    kind: &'static str,
+    field: &'static str,
+    value: &str,
+) -> Result<Option<Color>, AnnotationRefusal> {
     if is_paint_word(value) {
-        return Ok(PAINT_WORD_COLOR);
+        return Ok(None);
     }
-    parse_color_str(value).map(to_scene_color).map_err(|e| {
+    parse_color_str(value).map(|c| Some(to_scene_color(c))).map_err(|e| {
         AnnotationRefusal::InvalidColor(Box::new(InvalidColor {
             kind,
             field,
@@ -749,13 +743,17 @@ fn colour_fields(spec: &AnnotationSpec) -> Vec<(&'static str, &str)> {
         AnnotationSpec::Arrow { stroke, .. }
         | AnnotationSpec::Line { stroke, .. }
         | AnnotationSpec::Bracket { stroke, .. } => stroke.iter().map(|c| ("stroke", c.as_str())).collect(),
-        AnnotationSpec::Rect { fill, stroke, .. } => std::iter::once(("fill", fill.as_str()))
+        AnnotationSpec::Rect { fill, stroke, .. } => fill
+            .iter()
+            .map(|c| ("fill", c.as_str()))
             .chain(stroke.iter().map(|c| ("stroke", c.as_str())))
             .collect(),
-        AnnotationSpec::Span { fill, .. } => vec![("fill", fill.as_str())],
-        AnnotationSpec::Callout { background, border_color, .. } => {
-            vec![("background", background.as_str()), ("border_color", border_color.as_str())]
-        }
+        AnnotationSpec::Span { fill, .. } => fill.iter().map(|c| ("fill", c.as_str())).collect(),
+        AnnotationSpec::Callout { background, border_color, .. } => background
+            .iter()
+            .map(|c| ("background", c.as_str()))
+            .chain(border_color.iter().map(|c| ("border_color", c.as_str())))
+            .collect(),
         AnnotationSpec::Image { .. } => Vec::new(),
     }
 }
@@ -774,15 +772,15 @@ fn check_colors(specs: &[AnnotationSpec]) -> Result<(), AnnotationRefusal> {
 }
 
 /// The colour a `kind` annotation primitive draws for `field`: the caller's
-/// when given, else the theme's text colour (the text mark's rule), so unset
-/// ink reads on every theme.
+/// when given (`None` for a paint word), else the theme's text colour (the text
+/// mark's rule), so unset ink reads on every theme.
 fn ink(
     kind: &'static str,
     field: &'static str,
     color: Option<&str>,
     ctx: &ScaleContext,
-) -> Result<Color, AnnotationRefusal> {
-    color.map_or_else(|| Ok(theme_ink(ctx)), |c| resolve_color(kind, field, c))
+) -> Result<Option<Color>, AnnotationRefusal> {
+    color.map_or_else(|| Ok(Some(theme_ink(ctx))), |c| resolve_color(kind, field, c))
 }
 
 /// The theme's text colour, for the labels an annotation draws with no colour
@@ -891,7 +889,7 @@ fn build_one(
                     anchor: parse_anchor(anchor),
                     baseline: parse_baseline(baseline),
                     angle: *angle,
-                    color: Some(ink("text", "color", color.as_deref(), ctx)?),
+                    color: ink("text", "color", color.as_deref(), ctx)?,
                     opacity: 1.0,
                     font_family: "Inter, system-ui, sans-serif".to_string(),
                 },
@@ -940,15 +938,19 @@ fn build_one(
             let y = py1.min(py2);
             let w = (px2 - px1).abs();
             let h = (py2 - py1).abs();
-            let fill_color = resolve_color("rect", "fill", fill)?;
-            let stroke_color = stroke.as_deref().map(|c| resolve_color("rect", "stroke", c)).transpose()?;
+            let fill_color = ink("rect", "fill", fill.as_deref(), ctx)?;
+            let stroke_color = stroke
+                .as_deref()
+                .map(|c| resolve_color("rect", "stroke", c))
+                .transpose()?
+                .flatten();
             out.push(SceneNode::Rect {
                 x,
                 y,
                 w,
                 h,
                 style: FillStroke {
-                    fill: Some(fill_color),
+                    fill: fill_color,
                     stroke: stroke_color,
                     stroke_width: if stroke_color.is_some() { 1.0 } else { 0.0 },
                     opacity: 1.0,
@@ -979,7 +981,7 @@ fn build_one(
                 x2: ctx.resolve_x(x2),
                 y2: ctx.resolve_y(y2),
                 style: StrokeStyle {
-                    color: Some(ink("line", "stroke", stroke.as_deref(), ctx)?),
+                    color: ink("line", "stroke", stroke.as_deref(), ctx)?,
                     width: *stroke_width,
                     opacity: 1.0,
                     dash: dash.as_deref().map(|d| d.to_vec()),
@@ -1002,7 +1004,7 @@ fn build_one(
                 axis,
                 start,
                 end,
-                fill,
+                fill.as_deref(),
                 *opacity,
                 label.as_deref(),
                 label_position.as_str(),
@@ -1052,8 +1054,8 @@ fn build_one(
                 text,
                 arrow,
                 *padding,
-                background,
-                border_color,
+                background.as_deref(),
+                border_color.as_deref(),
                 *border_radius,
                 text_x.as_ref(),
                 text_y.as_ref(),
@@ -1110,12 +1112,11 @@ fn emit_arrow(
     y1: f64,
     x2: f64,
     y2: f64,
-    color: Color,
+    color: Option<Color>,
     stroke_width: f64,
     head_size: f64,
     out: &mut Vec<SceneNode>,
 ) {
-
     // Line shaft.
     out.push(SceneNode::Line {
         x1,
@@ -1123,7 +1124,7 @@ fn emit_arrow(
         x2,
         y2,
         style: StrokeStyle {
-            color: Some(color),
+            color,
             width: stroke_width,
             opacity: 1.0,
             dash: None,
@@ -1147,7 +1148,7 @@ fn emit_span(
     axis: &str,
     start: &CoordValue,
     end: &CoordValue,
-    fill: &str,
+    fill: Option<&str>,
     opacity: f64,
     label: Option<&str>,
     label_position: &str,
@@ -1180,7 +1181,7 @@ fn emit_span(
         w,
         h,
         style: FillStroke {
-            fill: Some(resolve_color("span", "fill", fill)?),
+            fill: ink("span", "fill", fill, ctx)?,
             stroke: None,
             stroke_width: 0.0,
             opacity: 1.0,
@@ -1263,13 +1264,13 @@ fn emit_bracket(
     py2: f64,
     label: &str,
     direction: &str,
-    color: Color,
+    color: Option<Color>,
     label_color: Color,
     tip_length: f64,
     out: &mut Vec<SceneNode>,
 ) {
     let stroke_style = StrokeStyle {
-        color: Some(color),
+        color,
         width: 1.5,
         opacity: 1.0,
         dash: None,
@@ -1352,8 +1353,8 @@ fn emit_callout(
     text: &str,
     arrow: &str,
     padding: f64,
-    background: &str,
-    border_color: &str,
+    background: Option<&str>,
+    border_color: Option<&str>,
     border_radius: f64,
     text_x: Option<&CoordValue>,
     text_y: Option<&CoordValue>,
@@ -1377,6 +1378,12 @@ fn emit_callout(
     let text_w = text.chars().count() as f64 * char_width + padding * 2.0;
     let text_h = 14.0 + padding * 2.0;
 
+    let box_fill = background.map_or_else(
+        || Ok(Some(to_scene_color(ctx.theme.colors.background_color))),
+        |c| resolve_color("callout", "background", c),
+    )?;
+    let border = ink("callout", "border_color", border_color, ctx)?;
+
     // Background rect.
     out.push(SceneNode::Rect {
         x: tx - text_w * 0.5,
@@ -1384,9 +1391,9 @@ fn emit_callout(
         w: text_w,
         h: text_h,
         style: FillStroke {
-            fill: Some(resolve_color("callout", "background", background)?),
-            stroke: Some(resolve_color("callout", "border_color", border_color)?),
-            stroke_width: 1.0,
+            fill: box_fill,
+            stroke: border,
+            stroke_width: if border.is_some() { 1.0 } else { 0.0 },
             opacity: 1.0,
             stroke_dash: None,
             stroke_opacity: 1.0,
@@ -1405,7 +1412,7 @@ fn emit_callout(
             x2: tx,
             y2: ty,
             style: StrokeStyle {
-                color: Some(resolve_color("callout", "border_color", border_color)?),
+                color: border,
                 width: 1.0,
                 opacity: 1.0,
                 dash: None,
@@ -1428,7 +1435,7 @@ fn emit_callout(
             anchor: TextAnchor::Middle,
             baseline: TextBaseline::Middle,
             angle: 0.0,
-            color: Some(Color::rgb(51, 51, 51)),
+            color: Some(theme_ink(ctx)),
             opacity: 1.0,
             font_family: "Inter, system-ui, sans-serif".to_string(),
         },

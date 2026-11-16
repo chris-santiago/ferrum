@@ -350,7 +350,8 @@ def annotate_rect(
     y2 : float, datetime.date, datetime.datetime, or str
         Top y boundary in data coordinates.
     fill : str, optional
-        Fill color as a CSS color string.
+        Fill color as a CSS color string. Defaults to the theme's text colour
+        (``font_color``).
     opacity : float, default 0.1
         Fill opacity in ``[0, 1]``.
     label : str, optional
@@ -375,10 +376,12 @@ def annotate_rect(
     x1_num, x2_num = _coerce_coord_to_numeric(x1_coord), _coerce_coord_to_numeric(x2_coord)
     y1_num, y2_num = _coerce_coord_to_numeric(y1_coord), _coerce_coord_to_numeric(y2_coord)
     df = pl.DataFrame({"_x1": [x1_num], "_x2": [x2_num], "_y1": [y1_num], "_y2": [y2_num]})
-    # Single style capture: mark gets fill only-if-supplied; primitive defaults.
-    mark_kwargs: dict = {"opacity": opacity}
-    if fill is not None:
-        mark_kwargs["fill"] = fill
+    # With no fill the mark takes the theme text colour token and the primitive takes
+    # None; both resolve to the theme's text colour at render time.
+    mark_kwargs: dict = {
+        "opacity": opacity,
+        "fill": fill if fill is not None else THEME_FONT_PAINT,
+    }
     chart = Chart(df).mark_rect(**mark_kwargs).encode(x="_x1", y="_y1", x2="_x2", y2="_y2")
     # Attach annotation primitive
     prim = AnnotationRect(
@@ -386,7 +389,7 @@ def annotate_rect(
         y1=y1_coord,
         x2=x2_coord,
         y2=y2_coord,
-        fill=fill or "#cccccc",
+        fill=fill,
         opacity=opacity,
         stroke=None,
         corner_radius=0,

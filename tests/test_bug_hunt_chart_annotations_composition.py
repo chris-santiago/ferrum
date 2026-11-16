@@ -1041,15 +1041,12 @@ class TestAnnotationPrimitiveValues:
         assert ann._annotation_primitive.stroke is None
 
     def test_annotate_rect_default_fill(self):
-        """annotate_rect with no fill kwarg should use default '#cccccc'.
-
-        Targets annotations.py:192: fill or '#cccccc'.
-        """
+        """annotate_rect with no fill kwarg leaves the primitive's fill unset."""
         from ferrum.annotation.primitives import AnnotationRect
 
         ann = annotate_rect(0, 0, 1, 1)
         assert isinstance(ann._annotation_primitive, AnnotationRect)
-        assert ann._annotation_primitive.fill == "#cccccc"
+        assert ann._annotation_primitive.fill is None
 
     def test_annotate_text_default_color(self):
         """annotate_text with no color kwarg leaves the primitive's color unset.

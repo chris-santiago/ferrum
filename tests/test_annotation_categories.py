@@ -759,9 +759,11 @@ def test_a_known_category_raises_no_warning():
 
 
 # ---------------------------------------------------------------------------
-# Unchanged: numeric, date, norm and pixel coordinates (no flip) draw the same bytes
+# Numeric, date, norm and pixel coordinates (no flip) draw the same bytes, bar a callout's theme colours
 #
-# Each digest was measured on the build before the category change reached the renderer.
+# Each digest was measured on the build before the category change reached the renderer, except
+# the numeric, date, norm and pixel cells: those four were measured again after the callout began
+# following the theme, and differ from the earlier build only in the callout's box and text fills.
 # ---------------------------------------------------------------------------
 
 
@@ -789,14 +791,14 @@ def _layered(chart: fm.Chart, primitives: list[Any]) -> str:
     return chart.to_svg()
 
 
-_UNCHANGED = {
+_COORDINATE_CHARTS = {
     "numeric": (
         lambda: _layered(
             _numeric_chart(),
             _every_kind(1.2, 1.4, 2.6, 2.7)
             + [fm.annotate_hline(2.0), fm.annotate_vline(2.0), fm.annotate_abline(1.0, 0.0)],
         ),
-        "14d3f84ff20afc270517fb95dafd24ef8a6f4c30d69bc075da3c83b8334f0d31",
+        "4d872254ef351e8f79d0bd419b3e17fb0fb04e986562e676906a1126a94e2d19",
     ),
     "date": (
         lambda: _layered(
@@ -804,14 +806,14 @@ _UNCHANGED = {
             _every_kind(dt.date(2020, 1, 1), 1.4, dt.datetime(2020, 1, 2, 12), 2.7)
             + [fm.annotate_vline("2020-01-02"), fm.annotate_text("2020-01-02", 2.0, "iso")],
         ),
-        "69be0e29bb387c8918c187d08a4bea31ad94266694ecf292251e9354ecd1abb1",
+        "1155b0e83a1514dad691ddebde2a40ce36437edd8ff7c78943a96a5e494b342e",
     ),
     "norm": (
         lambda: _layered(
             _numeric_chart(),
             _every_kind(fm.NormCoord(0.2), fm.NormCoord(0.3), fm.NormCoord(0.6), fm.NormCoord(0.7)),
         ),
-        "ef8bcf79b4e9908fa5e6498beddd166a3258e3b7ddedd58ea1c0a3268cc891fc",
+        "0d599a333c822bd885201a04629881131066216644df831bdfa9d7619b4e63bb",
     ),
     "pixel": (
         lambda: _layered(
@@ -820,7 +822,7 @@ _UNCHANGED = {
                 fm.PixelCoord(90.0), fm.PixelCoord(70.0), fm.PixelCoord(300.0), fm.PixelCoord(200.0)
             ),
         ),
-        "911de57d08ed1010a5edcab673c34b6215aa8d95abcbe38f860de3f6e6d20233",
+        "7e63cfe3009dcb9f321acdfa10b9716753546bb0bc7b1d29be8c465381a3ab8c",
     ),
     "numeric_on_a_band_axis": (
         lambda: _layered(
@@ -832,9 +834,21 @@ _UNCHANGED = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(_UNCHANGED))
+# The charts of these coordinate kinds carry a callout with no background, so its box takes the
+# theme's background colour and its text the theme's text colour; every other element draws the
+# bytes it drew before the callout followed the theme.
+_CALLOUT_FOLLOWS_THEME = ("numeric", "date", "norm", "pixel")
+
+
+@pytest.mark.parametrize("name", sorted(set(_COORDINATE_CHARTS) - set(_CALLOUT_FOLLOWS_THEME)))
 def test_a_non_category_coordinate_draws_the_bytes_it_drew_before(name):
-    build, digest = _UNCHANGED[name]
+    build, digest = _COORDINATE_CHARTS[name]
+    assert _digest(build()) == digest
+
+
+@pytest.mark.parametrize("name", sorted(_CALLOUT_FOLLOWS_THEME))
+def test_a_non_category_coordinate_draws_a_callout_in_the_theme_colours(name):
+    build, digest = _COORDINATE_CHARTS[name]
     assert _digest(build()) == digest
 
 
@@ -962,10 +976,10 @@ def test_an_all_numeric_unlabelled_arrow_keeps_the_mark_merge_route():
 
 
 # ---------------------------------------------------------------------------
-# A category on an ``Axis(label_map=...)`` axis: the data value lands, so does the display label
+# A category on an ``Axis(label_map=...)`` axis: the data value lands on its band
 #
-# ``label_map`` renames the column's values before they reach the renderer, so the renderer's
-# categories are the display labels; an annotation category follows the same map.
+# ``label_map`` relabels tick text only, so an annotation category names the data value, as
+# ``sort=`` and ``domain=`` do. The display label is not a category: it is an unknown one.
 # ---------------------------------------------------------------------------
 
 _BEE = {"b": "Bee"}
@@ -985,9 +999,8 @@ def _scene_line_x(chart: Any, stroke_nodes: int = 1) -> float:
     return nodes[0]["x1"]
 
 
-@pytest.mark.parametrize("label", ["b", "Bee"], ids=["data-value", "display-label"])
-def test_a_category_on_a_label_mapped_axis_lands_on_its_band(label):
-    chart = _doors_bars(_mapped(_BEE, sort="-y")) + fm.annotate_vline(label, stroke="#ff0030")
+def test_a_category_on_a_label_mapped_axis_lands_on_its_band():
+    chart = _doors_bars(_mapped(_BEE, sort="-y")) + fm.annotate_vline("b", stroke="#ff0030")
     svg, shown = _render_capturing(chart.to_svg)
     assert shown == []
     tick = _ticks(svg, "x")["Bee"]
@@ -995,6 +1008,24 @@ def test_a_category_on_a_label_mapped_axis_lands_on_its_band(label):
     scene, shown = _render_capturing(lambda: _scene_line_x(chart))
     assert shown == []
     _near(scene, tick)
+
+
+def test_the_display_label_is_an_unknown_category():
+    """``'Bee'`` is not one of the axis's categories (``a`` to ``d``): the unknown-category
+    warning names it on the static and the interactive routes."""
+    chart = _doors_bars(_mapped(_BEE, sort="-y")) + ann.text(
+        "Bee", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle"
+    )
+    _, shown = _render_capturing(chart.to_svg)
+    assert shown == [_unknown_message("x", "Bee")]
+    _, shown = _render_capturing(lambda: _first_annotated_panel(chart))
+    assert shown == [_unknown_message("x", "Bee")]
+
+
+def test_a_mixed_span_on_a_label_mapped_axis_echoes_the_data_value():
+    """The tick reads ``Bee``; the refusal names the category the caller wrote, ``b``."""
+    chart = _doors_bars(_mapped(_BEE)) + ann.span("x", "b", fm.NormCoord(0.9), fill="#eee")
+    _assert_refused_on_both_routes(chart, _mixed_span_message("x", "start", "b"))
 
 
 def test_a_swapping_label_map_places_the_data_value_not_the_display_text():
@@ -1015,9 +1046,8 @@ def test_a_label_mapped_category_lands_through_every_door(door):
     chart = _DOORS[door](_mapped(_BEE, sort="-y"), _primitive("text", "x"))
     svg, shown = _render_capturing(chart.to_svg)
     assert shown == []
-    # A ``+`` operand with its own frame keeps its raw rows and ticks (``label_map`` renames the
-    # chart's own data only), so the axis there displays ``b``; the category follows the rename
-    # the data took and crosses as ``b``.
+    # The first layer that draws the axis decides its tick text: the own-frame door starts with a
+    # layer that has no map, so its axis reads ``b``.
     label = "b" if door == "operand_with_its_own_frame" else "Bee"
     tick = _ticks(svg, "x")[label]
     _near(_measured("text", svg, "x"), [tick])
@@ -1041,9 +1071,8 @@ def _scene_rects(chart: Any) -> list[dict[str, Any]]:
     return [n for n in _scene_annotations(chart) if n["type"] == "rect"]
 
 
-@pytest.mark.parametrize("label", ["b", "Bee"], ids=["data-value", "display-label"])
-def test_a_category_on_a_label_mapped_y_axis_lands_on_its_band(label):
-    point = _mapped_y(_BEE) + _text_y(label)
+def test_a_category_on_a_label_mapped_y_axis_lands_on_its_band():
+    point = _mapped_y(_BEE) + _text_y("b")
     svg, shown = _render_capturing(point.to_svg)
     assert shown == []
     ticks = _ticks(svg, "y")
@@ -1051,7 +1080,7 @@ def test_a_category_on_a_label_mapped_y_axis_lands_on_its_band(label):
     nodes = [n for n in _scene_annotations(point) if n["type"] == "text"]
     _near([n["y"] for n in nodes], [ticks["Bee"]])
 
-    span = _mapped_y(_BEE) + ann.span("y", label, "c", fill=_COLOUR["span"])
+    span = _mapped_y(_BEE) + ann.span("y", "b", "c", fill=_COLOUR["span"])
     span_svg, shown = _render_capturing(span.to_svg)
     assert shown == []
     ticks = _ticks(span_svg, "y")
@@ -1061,6 +1090,12 @@ def test_a_category_on_a_label_mapped_y_axis_lands_on_its_band(label):
     _near(_span_extent(span_svg, "y"), expected)
     (rect,) = _scene_rects(span)
     _near((rect["y"], rect["y"] + rect["h"]), expected)
+
+
+def test_the_display_label_is_an_unknown_category_on_the_y_axis():
+    chart = _mapped_y(_BEE) + _text_y("Bee")
+    _, shown = _render_capturing(chart.to_svg)
+    assert shown == [_unknown_message("y", "Bee")]
 
 
 def test_a_swapping_label_map_on_the_y_axis_places_the_data_value():
@@ -1119,83 +1154,22 @@ def test_different_label_maps_on_x_and_y_each_rename_their_own_axis():
     _check_both_axes_mapped()
 
 
-@pytest.mark.parametrize("break_kind", ["y_map_routed_to_x", "y_map_dropped"])
-def test_the_two_axis_label_map_test_fails_under_a_misrouted_map(monkeypatch, break_kind):
-    """The reviewer's breaks, applied in memory: a y map routed into x, and a y map dropped."""
-    import ferrum._render as render
-
-    real = render._axis_label_maps
-
-    def broken(chart: Any, applied: Any) -> dict[str, dict[str, str]]:
-        axes = real(chart, applied)
-        if break_kind == "y_map_routed_to_x":
-            return {"x": {**axes["x"], **axes["y"]}, "y": {}}
-        return {"x": axes["x"], "y": {}}
-
-    monkeypatch.setattr(render, "_axis_label_maps", broken)
-    with pytest.raises(AssertionError):
-        _check_both_axes_mapped()
-
-
-def _rename_every_field(primitives: list[Any]) -> list[dict[str, Any]]:
-    from ferrum._render_prepare import _rename_annotation_categories
-
-    dicts = [dict(p.to_dict()) for p in primitives]
-    maps = {"x": {"b": "ViaX"}, "y": {"b": "ViaY"}}
-    return _rename_annotation_categories(dicts, maps)
-
-
-def test_every_annotation_coordinate_field_is_renamed_through_its_axis_label_map():
-    """Each primitive carries a category on every coordinate field it has; a field the axis
-    table misses stays ``b`` and fails here."""
-    c = "b"
-    primitives = [
-        ann.text(c, c, "t"),
-        ann.arrow(c, c, c, c),
-        ann.rect(c, c, c, c, fill="#eee"),
-        ann.line(c, c, c, c),
-        ann.span("x", c, c, fill="#eee"),
-        ann.span("y", c, c, fill="#eee"),
-        ann.bracket(c, c, c, c, label="r"),
-        ann.callout(c, c, "t", text_x=c, text_y=c),
-        ann.image(c, c, _IMAGE_SRC),
-    ]
-    renamed = _rename_every_field(primitives)
-    x_fields = {"x", "x1", "x2", "text_x"}
-    y_fields = {"y", "y1", "y2", "text_y"}
-    seen = 0
-    for original, out in zip(primitives, renamed):
-        for key, value in out.items():
-            if not (isinstance(value, dict) and "category" in value):
-                continue
-            seen += 1
-            if key in x_fields:
-                expected = "ViaX"
-            elif key in y_fields:
-                expected = "ViaY"
-            else:
-                assert key in ("start", "end"), key
-                expected = "ViaX" if out["axis"] == "x" else "ViaY"
-            assert value == {"category": expected}, (out["type"], key)
-    assert seen == 2 + 4 + 4 + 4 + 2 + 2 + 4 + 4 + 2
-
-
-def test_a_label_map_the_data_does_not_take_leaves_the_category_alone():
-    """An Enum column and an integer column under ``:O`` are not renamed by ``label_map``, so
-    the annotation is not renamed either: it lands on the raw tick, with no warning."""
+def test_a_label_map_on_an_enum_or_ordinal_integer_axis_relabels_and_the_data_value_lands():
+    """The map reads tick text, so it relabels an Enum column and an integer column under
+    ``:O`` too; the annotation names the data value and lands on that relabelled tick."""
     enum_df = pl.DataFrame({"c": pl.Series(_CATS).cast(pl.Enum(_CATS)), "v": [2.0, 1.0, 4.0, 3.0]})
     int_df = pl.DataFrame({"c": [2019, 2020, 2021, 2022], "v": [2.0, 1.0, 4.0, 3.0]})
     cases = [
-        (enum_df, "c", {"b": "Bee"}, "b"),
-        (int_df, "c:O", {"2021": "Late"}, "2021"),
+        (enum_df, "c", {"b": "Bee"}, "b", "Bee"),
+        (int_df, "c:O", {"2021": "Late"}, "2021", "Late"),
     ]
-    for df, field, label_map, label in cases:
+    for df, field, label_map, label, shown_as in cases:
         chart = fm.Chart(df).mark_bar().encode(
             x=fm.X(field, axis=fm.Axis(label_map=label_map)), y="v"
         ) + ann.text(label, 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
         svg, shown = _render_capturing(chart.to_svg)
         assert shown == []
-        _near(_measured("text", svg, "x"), [_ticks(svg, "x")[label]])
+        _near(_measured("text", svg, "x"), [_ticks(svg, "x")[shown_as]])
 
 
 # ---------------------------------------------------------------------------

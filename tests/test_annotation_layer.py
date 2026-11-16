@@ -400,8 +400,8 @@ class TestAnnotationCallout:
         assert c.text_y is None
         assert c.arrow == "curved"
         assert c.padding == 4
-        assert c.background == "#fff"
-        assert c.border_color == "#ccc"
+        assert c.background is None
+        assert c.border_color is None
         assert c.border_radius == 3
 
     def test_frozen(self):
