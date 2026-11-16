@@ -80,7 +80,7 @@ MUST_PASS = [
 ILLUSTRATIVE_FAILURES = {
     "ferrum": 11,
     "ferrum._configure_mixin": 1,
-    "ferrum._core": 29,
+    "ferrum._core": 15,
     "ferrum._metric_labels": 8,
     "ferrum.annotations": 4,
     "ferrum.chart": 9,
@@ -261,6 +261,42 @@ def test_illustrative_failures_are_only_undefined_names(module_name):
 
 
 REGRESSION_FAMILY = ("Glm", "Logistic", "Robust", "Smooth")
+STATISTIC_TRANSFORMS = (
+    "AggregateOp",
+    "Aggregate",
+    "Bin",
+    "Bin2D",
+    "BoxStats",
+    "ErrorExtent",
+    "Kde",
+    "Kde2D",
+    "LetterValue",
+    "Outliers",
+    "QQ",
+    "Summary",
+    "Violin",
+)
+RUNNING_CLASSES = REGRESSION_FAMILY + STATISTIC_TRANSFORMS
+
+# Per class, the alternative sets of tokens one rendered chart example must carry:
+# the class itself, or the mark that builds it. A class whose examples go only
+# through the mark says so in its docstring (the lead-in below).
+STATISTIC_DOORS = {
+    "AggregateOp": [("fm.AggregateOp(", "fm.Aggregate(")],
+    "Aggregate": [("fm.Aggregate(",)],
+    "Bin": [("fm.Bin(",)],
+    "Bin2D": [("fm.Bin2D(",)],
+    "BoxStats": [("fm.BoxStats(",)],
+    "ErrorExtent": [("fm.ErrorExtent(",)],
+    "Kde": [("fm.Kde(",)],
+    "Kde2D": [("fm.Kde2D(",), (".mark_contour(",)],
+    "LetterValue": [("fm.LetterValue(",), (".mark_boxen(",)],
+    "Outliers": [("fm.Outliers(",)],
+    "QQ": [("fm.QQ(",)],
+    "Summary": [("fm.Summary(",)],
+    "Violin": [("fm.Violin(",), (".mark_violin(",)],
+}
+MARK_LEAD_IN = "mark builds the same transform:"
 
 
 def _core_class_doctests(class_name: str) -> list[doctest.DocTest]:
@@ -300,10 +336,10 @@ def _unrendered_charts(sources: list[str]) -> list[str]:
     return unrendered
 
 
-@pytest.mark.parametrize("class_name", REGRESSION_FAMILY)
-def test_regression_family_examples_run_and_render(class_name):
-    """Each regression-family class docstring carries examples that all run
-    as written (no ``NameError``, no refusal), and every chart one builds is
+@pytest.mark.parametrize("class_name", RUNNING_CLASSES)
+def test_class_examples_run_and_render(class_name):
+    """Each regression-family and statistic-transform class docstring carries
+    examples that all run as written (no ``NameError``, no refusal), and every chart one builds is
     rendered by the example that follows it."""
     result = _run_doctests(_core_class_doctests(class_name))
     assert result.attempted > 0, f"{class_name} has no docstring examples"
@@ -311,6 +347,99 @@ def test_regression_family_examples_run_and_render(class_name):
     sources = _example_sources(class_name)
     assert any(_is_chart_example(source) for source in sources)
     assert not _unrendered_charts(sources), f"{class_name}: built but never rendered"
+
+
+def _absent_doors(source: str) -> list[str]:
+    """Return the doors that do not exist an example reaches for: a heatmap
+    mark, a ``fn_=`` keyword on ``Summary``, and a ``transform=`` keyword
+    anywhere inside an ``encode(...)`` call (continuation lines included)."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == "mark_heatmap":
+            found.append("mark_heatmap")
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        name = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", "")
+        keywords = {keyword.arg for keyword in node.keywords}
+        if name == "Summary" and "fn_" in keywords:
+            found.append("Summary(fn_=)")
+        if name == "encode" and "transform" in keywords:
+            found.append("encode(transform=)")
+    return found
+
+
+def test_absent_door_check_detects_each_door_and_spares_a_real_keyword():
+    """The check fires on every nonexistent door, wherever the keyword sits,
+    and leaves ``AggregateOp``'s real ``fn_=`` keyword alone."""
+    assert _absent_doors("fm.Chart(df).mark_heatmap()") == ["mark_heatmap"]
+    assert _absent_doors('fm.Summary("p", fn_="mean")') == ["Summary(fn_=)"]
+    assert _absent_doors('chart.encode(x="a", transform=t)') == ["encode(transform=)"]
+    assert _absent_doors('chart.encode(\n    x="a",\n    y="b",\n    transform=t,\n)') == [
+        "encode(transform=)"
+    ]
+    assert not _absent_doors('fm.AggregateOp(field="p", fn_="mean", as_="m")')
+    assert not _absent_doors('fm.Chart(df).transform(t).encode(x="a", y="b")')
+
+
+@pytest.mark.parametrize("class_name", STATISTIC_TRANSFORMS)
+def test_statistic_transform_examples_name_only_doors_that_exist(class_name):
+    for source in _example_sources(class_name):
+        assert not _absent_doors(source), f"{class_name}: {source}"
+
+
+def _door_gaps(class_name: str, sources: list[str], docstring: str) -> list[str]:
+    """Return what keeps a class's examples from using the class it documents
+    or the mark that builds it: no rendered chart example carrying one of its
+    door alternatives, and, when no example names the class itself, a docstring
+    that does not say the mark builds the same transform."""
+    gaps = []
+    rendered = [
+        source
+        for i, source in enumerate(sources)
+        if _is_chart_example(source) and not _unrendered_charts(sources[i : i + 2])
+    ]
+    for tokens in STATISTIC_DOORS[class_name]:
+        if any(all(token in source for token in tokens) for source in rendered):
+            break
+    else:
+        gaps.append("no rendered chart example uses the class or its mark")
+    if not any(f"fm.{class_name}(" in source for source in rendered) and (
+        MARK_LEAD_IN not in docstring
+    ):
+        gaps.append(f"examples go through a mark without saying it '{MARK_LEAD_IN}'")
+    return gaps
+
+
+def _class_docstring(class_name: str) -> str:
+    return "\n".join(test.docstring for test in _core_class_doctests(class_name))
+
+
+@pytest.mark.parametrize("class_name", STATISTIC_TRANSFORMS)
+def test_statistic_transform_examples_use_the_class_or_the_mark_that_builds_it(class_name):
+    sources = _example_sources(class_name)
+    assert _door_gaps(class_name, sources, _class_docstring(class_name)) == []
+
+
+def test_door_check_detects_an_example_that_stops_using_its_class():
+    """Violin's mark swapped for the boxplot mark, and Kde's transform example
+    replaced by a plain chart, each leave the no-door gap; a docstring without
+    the lead-in adds the second gap."""
+    no_door = "no rendered chart example uses the class or its mark"
+    no_lead_in = f"examples go through a mark without saying it '{MARK_LEAD_IN}'"
+    violin = _example_sources("Violin")
+    swapped = [source.replace(".mark_violin()", ".mark_boxplot()") for source in violin]
+    assert swapped != violin
+    assert _door_gaps("Violin", swapped, MARK_LEAD_IN) == [no_door]
+    assert _door_gaps("Violin", swapped, "") == [no_door, no_lead_in]
+    kde = _example_sources("Kde")
+    plain = [
+        source.replace('.transform(fm.Kde("val", bandwidth=0.8)).mark_area()', ".mark_point()")
+        for source in kde
+    ]
+    assert plain != kde
+    assert _door_gaps("Kde", plain, MARK_LEAD_IN) == [no_door]
+    assert _door_gaps("Kde", kde, "") == []
 
 
 @pytest.mark.parametrize(

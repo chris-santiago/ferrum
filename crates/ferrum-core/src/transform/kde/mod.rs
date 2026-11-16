@@ -305,8 +305,8 @@ fn validate_extent(spec: &KdeSpec) -> PyResult<()> {
 }
 
 /// Refuse a reversed, zero-width or non-finite 1-D extent in `voice`, the
-/// refusing transform's own prefix. Read by `Kde` for its two extent slots and
-/// by `Violin` for its own, so every statistic that reads a caller extent
+/// refusing transform's own prefix. Read by `Kde` for its two extent slots, by
+/// `Violin` and by `DensityData` for their own, so every statistic that reads a caller extent
 /// refuses it by what it is, at its own entry, whatever the data.
 pub(crate) fn refuse_malformed_extent(voice: &str, slot: &str, extent: Option<(f64, f64)>) -> PyResult<()> {
     match extent {
@@ -950,14 +950,15 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_density().encode(x="val")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"val": [1.2, 2.3, 2.9, 3.1, 3.8, 4.4, 4.7, 5.5, 6.1, 7.4, 8.0, 9.2]})
+/// >>> chart = fm.Chart(df).transform(fm.Kde("val", bandwidth=0.8)).mark_area().encode(x="value", y="density")
+/// >>> svg = chart.to_svg()
 ///
-/// Direct construction (custom bandwidth):
+/// The density mark builds the same transform:
 ///
-/// >>> fm.Chart(df).mark_area().encode(
-/// ...     x="x_kde", y="density",
-/// ...     transform=fm.Kde("val", bandwidth=0.3),
-/// ... )
+/// >>> chart = fm.Chart(df).mark_density().encode(x="val")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Kde")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyKde(pub(crate) TransformSpec);

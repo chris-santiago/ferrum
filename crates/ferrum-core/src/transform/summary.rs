@@ -248,10 +248,10 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_point().encode(
-/// ...     x="cut", y="mean_price",
-/// ...     transform=fm.Summary("price", fn_="mean", groupby=["cut"]),
-/// ... )
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"cut": ["fair"] * 5 + ["good"] * 5 + ["ideal"] * 5, "price": [3.2, 4.1, 3.8, 3.5, 4.4, 5.0, 5.6, 4.9, 5.3, 6.1, 7.2, 6.8, 8.1, 7.5, 7.9]})
+/// >>> chart = fm.Chart(df).transform(fm.Summary("price", groupby=["cut"], error_fn="stderr")).mark_point().encode(x="cut", y="mean")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Summary")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PySummary(pub(crate) TransformSpec);

@@ -521,7 +521,10 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_qqplot().encode(x="residuals")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"val": [1.2, 2.3, 2.9, 3.1, 3.8, 4.4, 4.7, 5.5, 6.1, 7.4, 8.0, 9.2]})
+/// >>> chart = fm.Chart(df).transform(fm.QQ("val")).mark_point().encode(x="theoretical", y="sample")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "QQ")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyQq(pub(crate) TransformSpec);

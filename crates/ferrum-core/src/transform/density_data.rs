@@ -102,6 +102,7 @@ pub(crate) fn apply_with_context(
         "kernel",
         &spec.kernel,
     )?;
+    crate::transform::kde::refuse_malformed_extent("data_density", "extent", spec.extent)?;
     let schema = batch.schema();
     let idx = schema.index_of(&spec.field).map_err(|_| {
         PyValueError::new_err(format!("data_density: column '{}' not found", spec.field))
@@ -781,5 +782,30 @@ mod tests {
         for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(apply(&spec, &frame_of(Some(infinite))).unwrap(), twin);
         }
+    }
+
+    /// A reversed, equal or non-finite caller extent is refused in the stat
+    /// voice `Kde` and `Violin` use, whatever the data.
+    #[test]
+    fn a_reversed_equal_or_non_finite_extent_is_refused() {
+        pyo3::Python::initialize();
+        let batch = make_batch(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        for (extent, shown) in [
+            ((9.0, 1.0), "(9, 1)"),
+            ((3.0, 3.0), "(3, 3)"),
+            ((f64::NAN, 9.0), "(NaN, 9)"),
+            ((1.0, f64::INFINITY), "(1, inf)"),
+        ] {
+            let spec = DensityDataSpec { extent: Some(extent), ..base_spec() };
+            let err = apply(&spec, &batch).expect_err("a malformed extent must refuse");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "ValueError: data_density: extent must satisfy lo < hi with both finite; got {shown}"
+                )
+            );
+        }
+        let ok = DensityDataSpec { extent: Some((0.0, 6.0)), ..base_spec() };
+        assert!(apply(&ok, &batch).is_ok());
     }
 }

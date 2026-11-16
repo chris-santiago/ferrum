@@ -488,8 +488,12 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> op = fm.AggregateOp("price", "mean", "mean_price")
-/// >>> agg = fm.Aggregate([op], groupby=["cut"])
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"cut": ["fair"] * 5 + ["good"] * 5 + ["ideal"] * 5, "price": [3.2, 4.1, 3.8, 3.5, 4.4, 5.0, 5.6, 4.9, 5.3, 6.1, 7.2, 6.8, 8.1, 7.5, 7.9]})
+/// >>> chart = fm.Chart(df).transform(
+/// ...     fm.Aggregate([fm.AggregateOp("price", "mean", "mean_price")], groupby=["cut"])
+/// ... ).mark_bar().encode(x="cut", y="mean_price")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "AggregateOp")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyAggregateOp(pub(crate) AggregateOp);
@@ -563,10 +567,14 @@ pub(crate) fn extract_aggregate_ops(label: &str, ops: &Bound<'_, PyAny>) -> PyRe
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> op = fm.AggregateOp("price", "mean", "mean_price")
-/// >>> agg = fm.Aggregate([op], groupby=["cut"])
-/// >>> fm.Chart(df).mark_bar().encode(x="cut", y="mean_price",
-/// ...     transform=agg)
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"cut": ["fair"] * 5 + ["good"] * 5 + ["ideal"] * 5, "price": [3.2, 4.1, 3.8, 3.5, 4.4, 5.0, 5.6, 4.9, 5.3, 6.1, 7.2, 6.8, 8.1, 7.5, 7.9]})
+/// >>> ops = [
+/// ...     fm.AggregateOp("price", "mean", "mean_price"),
+/// ...     fm.AggregateOp("price", "count", "n"),
+/// ... ]
+/// >>> chart = fm.Chart(df).transform(fm.Aggregate(ops, groupby=["cut"])).mark_bar().encode(x="cut", y="mean_price")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Aggregate")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyAggregate(pub(crate) TransformSpec);

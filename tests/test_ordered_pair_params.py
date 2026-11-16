@@ -19,6 +19,7 @@ import dataclasses
 import decimal
 import fractions
 import hashlib
+import json
 from collections.abc import Callable
 from typing import Any
 
@@ -349,6 +350,129 @@ def test_density_extent_renders_the_same_for_every_ordered_kind():
     expected = svg((1, 9))
     for extent in ([1, 9], np.array([1, 9]), range(1, 10, 8)):
         assert svg(extent) == expected
+
+
+_DENSITY_DATA_EXTENTS = [
+    ("reversed", [9, 1], "(9, 1)"),
+    ("equal", [3, 3], "(3, 3)"),
+]
+_DENSITY_DATA_STAT = (
+    "transform failed: ValueError: data_density: extent must satisfy lo < hi with both finite; got "
+)
+_COMPOSITE_LEAF = "failed to render composite leaf leaf #0: "
+
+
+def _density_data_spec(extent: Any, *, groupby: bool = False) -> dict[str, Any]:
+    spec: dict[str, Any] = {"type": "density_data", "field": "v", "extent": extent}
+    if groupby:
+        spec["groupby"] = ["g"]
+    return spec
+
+
+def _density_data_chart(
+    extent: Any, frame: pl.DataFrame | None = None, *, groupby: bool = False
+) -> fm.Chart:
+    frame = _frame() if frame is None else frame
+    spec = _density_data_spec(extent, groupby=groupby)
+    return fm.Chart(frame).transform(spec).mark_line().encode(x="value:Q", y="density:Q")
+
+
+def _render_refusal(chart: Any, output: str) -> str:
+    render = chart.to_svg if output == "svg" else lambda: chart.interactive().scene_json
+    with pytest.raises(ValueError) as caught:
+        render()
+    return str(caught.value)
+
+
+def _grouped_frame() -> pl.DataFrame:
+    return _frame().with_columns(pl.Series("g", ["a", "b"] * 20 + ["a"]))
+
+
+# (id, frame) for every column shape the extent guard sits in front of
+_DENSITY_DATA_FRAMES: list[tuple[str, Callable[[], pl.DataFrame]]] = [
+    ("float64", _frame),
+    ("zero_rows", lambda: _frame().clear()),
+    ("all_null", lambda: _frame().with_columns(pl.lit(None, dtype=pl.Float64).alias("v"))),
+    ("int32", lambda: _frame().with_columns((pl.col("v") * 4).cast(pl.Int32))),
+    ("float32", lambda: _frame().with_columns(pl.col("v").cast(pl.Float32))),
+]
+
+
+@pytest.mark.parametrize("output", ["svg", "interactive"])
+@pytest.mark.parametrize(
+    ("kind", "extent", "shown"), _DENSITY_DATA_EXTENTS, ids=[k for k, _, _ in _DENSITY_DATA_EXTENTS]
+)
+def test_density_data_dict_refuses_a_reversed_or_equal_extent(output, kind, extent, shown):
+    assert _render_refusal(_density_data_chart(extent), output) == _DENSITY_DATA_STAT + shown
+
+
+@pytest.mark.parametrize("output", ["svg", "interactive"])
+@pytest.mark.parametrize(
+    ("kind", "extent", "shown"), _DENSITY_DATA_EXTENTS, ids=[k for k, _, _ in _DENSITY_DATA_EXTENTS]
+)
+@pytest.mark.parametrize("frame_id", [i for i, _ in _DENSITY_DATA_FRAMES])
+def test_density_data_extent_refusal_does_not_depend_on_the_column(
+    output, kind, extent, shown, frame_id
+):
+    frame = dict(_DENSITY_DATA_FRAMES)[frame_id]()
+    assert _render_refusal(_density_data_chart(extent, frame), output) == _DENSITY_DATA_STAT + shown
+
+
+@pytest.mark.parametrize("output", ["svg", "interactive"])
+def test_density_data_extent_refusal_holds_for_a_groupby_frame(output):
+    chart = _density_data_chart([9, 1], _grouped_frame(), groupby=True)
+    assert _render_refusal(chart, output) == _DENSITY_DATA_STAT + "(9, 1)"
+
+
+def _plus() -> Any:
+    return _density_data_chart([9, 1]) + _density_data_chart([9, 1])
+
+
+def _layer_chart() -> Any:
+    return fm.LayerChart(_density_data_chart([9, 1]), _density_data_chart([9, 1]))
+
+
+def _hconcat() -> Any:
+    return fm.hconcat(_density_data_chart([9, 1]), _density_data_chart([9, 1]))
+
+
+# (id, factory, prefix of the static render, prefix of the interactive render): a
+# composite leaf renders through the composite entry, which names the failing leaf
+_DENSITY_DATA_DOORS: list[tuple[str, Callable[[], Any], str, str]] = [
+    ("plus", _plus, "", ""),
+    ("layer_chart", _layer_chart, _COMPOSITE_LEAF, ""),
+    ("hconcat", _hconcat, _COMPOSITE_LEAF, _COMPOSITE_LEAF),
+]
+
+
+@pytest.mark.parametrize("output", ["svg", "interactive"])
+@pytest.mark.parametrize(
+    ("door", "make", "svg_prefix", "interactive_prefix"),
+    _DENSITY_DATA_DOORS,
+    ids=[d[0] for d in _DENSITY_DATA_DOORS],
+)
+def test_density_data_extent_refusal_holds_on_every_door(
+    output, door, make, svg_prefix, interactive_prefix
+):
+    prefix = svg_prefix if output == "svg" else interactive_prefix
+    assert _render_refusal(make(), output) == prefix + _DENSITY_DATA_STAT + "(9, 1)"
+
+
+@pytest.mark.parametrize("output", ["svg", "interactive"])
+@pytest.mark.parametrize("extent", [[_NAN, 9], [1, _INF]], ids=["nan", "inf"])
+def test_density_data_dict_refuses_a_non_finite_extent(output, extent):
+    """A non-finite end never reaches the transform: the spec JSON the Rust side
+    reads cannot carry it, so the refusal is the JSON reader's. The reader names
+    the column of the first non-finite token in the payload Python sends, so the
+    expected text is built from that payload."""
+    payload = json.dumps([_density_data_spec(extent)])
+    token = "NaN" if extent[0] != extent[0] else "Infinity"
+    expected = f"transforms_json: expected value at line 1 column {payload.index(token) + 1}"
+    assert _render_refusal(_density_data_chart(extent), output) == expected
+
+
+def test_density_data_dict_keeps_an_ordered_extent():
+    assert "<polyline" in _density_data_chart([1, 9]).to_svg()
 
 
 # --- limits: finite ends only, a reversed pair kept ---------------------------------------

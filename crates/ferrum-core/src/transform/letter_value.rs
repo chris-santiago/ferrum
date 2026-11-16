@@ -948,7 +948,15 @@ fn parse_sort(sort: Option<&Bound<'_, PyDict>>) -> PyResult<Option<LetterValueSo
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_boxen().encode(x="cut", y="price")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"cut": ["fair"] * 5 + ["good"] * 5 + ["ideal"] * 5, "price": [3.2, 4.1, 3.8, 3.5, 4.4, 5.0, 5.6, 4.9, 5.3, 6.1, 7.2, 6.8, 8.1, 7.5, 7.9]})
+/// >>> chart = fm.Chart(df).transform(fm.LetterValue("price", groupby=["cut"])).mark_bar().encode(x="cut", y="lower", y2="upper")
+/// >>> svg = chart.to_svg()
+///
+/// The boxen mark builds the same transform:
+///
+/// >>> chart = fm.Chart(df).mark_boxen().encode(x="cut", y="price")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "LetterValue")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyLetterValue(pub(crate) TransformSpec);

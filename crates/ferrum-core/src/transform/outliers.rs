@@ -350,7 +350,10 @@ use pyo3::prelude::*;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_boxplot().encode(x="cut", y="price")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"cut": ["fair"] * 6 + ["good"] * 6, "price": [3.2, 4.1, 3.8, 3.5, 4.4, 19.0, 5.0, 5.6, 4.9, 5.3, 6.1, 5.4]})
+/// >>> chart = fm.Chart(df).transform(fm.Outliers("price", groupby=["cut"])).mark_point().encode(x="cut", y="price")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Outliers")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyOutliers(pub(crate) crate::transform::core::TransformSpec);

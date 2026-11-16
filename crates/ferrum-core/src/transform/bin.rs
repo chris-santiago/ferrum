@@ -1278,14 +1278,15 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_histogram(bin_count=10).encode(x="mpg")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"cut": ["fair"] * 5 + ["good"] * 5 + ["ideal"] * 5, "price": [3.2, 4.1, 3.8, 3.5, 4.4, 5.0, 5.6, 4.9, 5.3, 6.1, 7.2, 6.8, 8.1, 7.5, 7.9]})
+/// >>> chart = fm.Chart(df).transform(fm.Bin("price", bin_count=5)).mark_bar().encode(x="bin_start", x2="bin_end", y="count")
+/// >>> svg = chart.to_svg()
 ///
-/// Direct construction:
+/// The histogram mark builds the same transform:
 ///
-/// >>> fm.Chart(df).mark_bar().encode(
-/// ...     x=fm.X("mpg_bin_start"), y="count",
-/// ...     transform=fm.Bin("mpg", bin_count=10),
-/// ... )
+/// >>> chart = fm.Chart(df).mark_histogram(bin_count=5).encode(x="price")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Bin")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyBin(pub(crate) TransformSpec);

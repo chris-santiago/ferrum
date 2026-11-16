@@ -664,7 +664,13 @@ use crate::transform::core::TransformSpec;
 /// Examples
 /// --------
 /// >>> import ferrum as fm
-/// >>> fm.Chart(df).mark_contour().encode(x="x", y="y")
+/// >>> import polars as pl
+/// >>> df = pl.DataFrame({"x": [1.0, 2.0, 2.5, 3.1, 4.0, 4.4, 5.2, 6.0, 6.3, 7.1, 7.7, 8.5], "y": [2.0, 1.5, 3.3, 3.9, 3.0, 5.1, 4.6, 6.2, 5.8, 7.4, 6.9, 8.8]})
+///
+/// The contour mark builds the same transform:
+///
+/// >>> chart = fm.Chart(df).mark_contour().encode(x="x", y="y")
+/// >>> svg = chart.to_svg()
 #[pyclass(eq, module = "ferrum._core", name = "Kde2D")]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PyKde2D(pub(crate) TransformSpec);
