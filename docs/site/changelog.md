@@ -6,6 +6,42 @@ All notable changes to Ferrum are documented here.
 
 *No unreleased changes.*
 
+## 0.26.0 — 2026-11-16
+
+The other-column bindings block. A figure or composite mark refits when a later binding names another column, a Date or Datetime column draws as a category axis, `Axis(label_map=)` relabels tick text only, annotation coordinates on categorical axes are refused or skipped out loud, and ordered-pair and sequence parameters read one set of shapes on every door. Several of these reverse earlier behavior; each reversal has a dated entry in `design-docs/spec-history.md`.
+
+### Added
+
+None
+
+### Fixed
+
+- the jointplot hist remedy renders, a date or Duration colour reads one way on every layer order and door, range refusals share one text, and an interactive chart saves one snapshot
+- bytes and unordered collections are refused on scale domains and ranges, a dict is refused on selection fields, and a date refused on a category axis names its label
+- the non-finite annotation coordinate refusals share one predicate
+- a number, date or non-finite annotation coordinate on a categorical axis is refused, an unknown category is skipped with a warning, and a date or ISO label lands on its band
+- Axis(label_map=) relabels tick text only, applied in Rust at draw time, and a tick follows its axis under interactive zoom and pan whatever its text
+- an uncoloured annotation fill and an unstyled callout draw the theme's colours on every route, and the colour words none and transparent draw no paint
+- the statistic transforms' docstring examples run and render, and a reversed or equal density_data extent on the dict door is refused
+- the regplot and lmplot bin and aggregate remedies use the generic text, and every followed remedy renders
+- a figure refits when a later encode binds another column, through every layering door
+- an unordered or byte collection is refused on every ordered-pair parameter, a reversed or non-finite statistic range gets a typed refusal, and a list is accepted wherever a tuple is
+- BreakAxis(axis=) under a caller's CoordFlip means the caller's channel
+- a ferrum warning names the caller's line on the auto-raster, override and Rust render routes
+- a Date or Datetime column draws as a category axis in time order on every category channel, a Duration there is refused with a remedy, and datetimes sharing a millisecond warn once
+- an unparseable annotation colour is refused at construction in the caller's words, and break rollups name the caller's axis under a flip
+- a mapping is refused on every sequence parameter with no dict form, in one voice on the Python wrappers and every name-list constructor
+- a composite mark that resolved early rebuilds when a later encode binds another column
+- a figure call reads its encode= x/y as its own x and y, a jointplot limit keeps the caller's scale, and a 2-D histogram titles its axes by field
+- an interactive chart renders once, so its HTML and JSON come from the scene built at construction and each warning appears once
+- a zero-row leaf of a concat or grid beside a populated leaf draws its frame and warns once, and a composition whose every leaf is empty is refused however its layers were combined
+
+### Other
+
+- the contract text states every behavior the other-column bindings block shipped and names every reversal
+- every ferrum._core docstring example runs and renders under a must-pass gate
+- a date-category legend answers a format as its label-text twin does
+
 ## 0.25.0 — 2026-11-15
 
 The structural wave. Statistics and transforms now treat empty, null, infinite and date inputs by one rule on every mark and door, `impute=` works on every key dtype, and annotations are placed in the caller's channels.
