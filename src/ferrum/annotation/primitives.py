@@ -28,9 +28,8 @@ from typing import Any
 from ferrum.annotation.coords import CoordValue, _coord  # noqa: F401
 from ferrum._entry import _voiced
 from ferrum._validate import (
-    as_finite_real,
+    is_non_finite_number,
     is_none_color_sentinel,
-    is_real_number,
     validate_choice,
     validate_str,
 )
@@ -116,7 +115,7 @@ def _validate_coord(entry: str, field: str, axis: str, value: Any) -> None:
     """
 
     def check(voice: str) -> None:
-        if is_real_number(value) and as_finite_real(value) is None:
+        if is_non_finite_number(value):
             raise ValueError(
                 f"{voice}: {field}={value} is not a finite number, so it has no position; "
                 f"pass a value the {axis} axis holds, fm.NormCoord or fm.PixelCoord"

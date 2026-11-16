@@ -790,6 +790,17 @@ def as_finite_real(value: Any) -> float | None:
     return as_float if math.isfinite(as_float) else None
 
 
+def is_non_finite_number(value: Any) -> bool:
+    """Return whether *value* is a real number that is not finite.
+
+    True for NaN, an infinity, and a number whose ``float`` cannot be formed (an integer too
+    large for a float, ``Decimal("sNaN")``). False for every finite number and for anything that
+    is not a real number at all (a string, ``None``, a ``bool``, a list), which a door's own
+    checks speak for.
+    """
+    return is_real_number(value) and as_finite_real(value) is None
+
+
 #: The largest integer a float holds exactly; a count above it cannot cross
 #: the JSON wire or a native integer argument intact.
 _MAX_EXACT_INT = 2**53

@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeAlias, Union
 
 from ferrum._entry import _voiced
-from ferrum._validate import as_finite_real, is_real_number
+from ferrum._validate import is_non_finite_number
 
 if TYPE_CHECKING:  # numpy is imported lazily at runtime (see _is_datetime64)
     import numpy as np
@@ -52,7 +52,7 @@ def _refuse_non_finite(entry: str, value: Any, remedy: str) -> None:
     """Refuse a coordinate wrapper's *value* when it is a number with no position."""
 
     def check(voice: str) -> None:
-        if is_real_number(value) and as_finite_real(value) is None:
+        if is_non_finite_number(value):
             raise ValueError(f"{voice}: value={value} is not a finite number; pass {remedy}")
 
     _voiced(entry, check)
