@@ -49,7 +49,6 @@ from tests.test_null_group_warning import (
     _census,
     _render_capturing,
     _slot_message,
-    _unenumerable_refusal,
     _unreadable_key_refusal,
 )
 
@@ -1635,7 +1634,7 @@ def test_a_layer_the_null_key_drop_moved_is_imputed_in_place_under_its_own_rows(
     assert shown == [_null_key_dropped_message("mark_point", 1, "d")]
     assert _glyphs(svg) == 23
     route_shown, scene = _route(chart)
-    assert route_shown == shown + shown
+    assert route_shown == shown
     assert _scene_marks(scene) == 23
 
 
@@ -1686,15 +1685,23 @@ def test_a_chart_with_no_series_key_is_one_series_and_nothing_is_imputed():
     assert imputed == plain
 
 
-def test_a_temporal_ordinal_colour_is_refused_as_it_was_without_the_impute():
+def test_a_temporal_ordinal_colour_is_imputed_per_date_series_as_its_label_text_is():
+    """A date declared ordinal is a category: each date is a series of its own, labelled by its ISO
+    text, so the impute completes the missing key of the second date exactly as it does for the
+    same series spelled as text, and draws the point the unimputed chart lacks."""
     first, second = dt.date(2024, 1, 1), dt.date(2024, 1, 2)
     frame = pl.DataFrame(
         {"t": [1, 2, 3, 1, 3], "h": [first] * 3 + [second] * 2, "v": _SIMPLE_VALUES}
     )
+    twin = frame.with_columns(h=pl.col("h").cast(pl.Utf8))
     channel = fm.Color("h", type_="O")
-    refusal = _refusal(_chart(frame, y=_y(True), color=channel))
-    assert refusal == _refusal(_chart(frame, color=channel))
-    assert refusal == _unenumerable_refusal("h")
+    svg, shown = _render_capturing(_chart(frame, y=_y(True), color=channel).to_svg)
+    twin_svg, twin_shown = _render_capturing(_chart(twin, y=_y(True), color=channel).to_svg)
+    plain, _ = _render_capturing(_chart(frame, color=channel).to_svg)
+    assert svg == twin_svg
+    assert shown == twin_shown == []
+    assert _glyphs(svg) == _glyphs(plain) + 1
+    assert {"2024-01-01", "2024-01-02"} <= set(text_runs(svg))
 
 
 def test_a_detail_no_key_reader_takes_is_refused_as_it_was_without_the_impute():
@@ -2048,7 +2055,7 @@ def test_layers_that_share_one_impute_report_its_fallback_once():
     )
     assert _render_capturing(chart.to_svg)[1] == [_FALLBACK]
     route_shown, _ = _route(chart)
-    assert route_shown == [_FALLBACK, _FALLBACK]
+    assert route_shown == [_FALLBACK]
 
 
 def test_layers_that_impute_separately_each_report_their_own_fallback_in_layer_order():

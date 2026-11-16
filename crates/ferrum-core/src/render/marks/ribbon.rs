@@ -27,7 +27,7 @@
 //! When neither `y2` nor `x2` is bound the drawer skips — ribbon requires a
 //! band channel.
 
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, col_as_str, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, detail_series, grouping_series_values, resolve_row_stroke_dash, series_keys, stroke_dash_column_loader, ColorSeries, SeriesPartition};
 use crate::render::series_keys::{SeriesKey, SplitChannel};
@@ -83,6 +83,7 @@ fn edge_point(axis: CurveAxis, shared: f64, value: f64) -> (f64, f64) {
 /// extrapolating read — identical on both axes.
 fn resolve_shared_pixels(
     ctx: &DrawCtx,
+    channel: &str,
     scale: &ScaleKind,
     field: &str,
     n: usize,
@@ -92,7 +93,7 @@ fn resolve_shared_pixels(
     // because col_as_f64 succeeds on integer columns, but to_pixel_f64 returns
     // None for ordinal scales, producing all-None pixels.
     if matches!(scale, ScaleKind::Ordinal(_)) {
-        if let Ok(xs_s) = col_as_ordinal_category_str(ctx.batch, field) {
+        if let Ok(xs_s) = ctx.category_strings(channel, field) {
             let pixels: Vec<Option<f64>> = xs_s
                 .into_iter()
                 .take(n)
@@ -204,14 +205,14 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<BandVertices> {
     let (band_field, curve_axis) = band_curve_axis(spec)?;
     // The lower bound rides the same axis as the band channel; the remaining
     // positional channel is the coordinate both edges share.
-    let (lower_field, shared_field, value_scale, shared_scale) = match curve_axis {
-        CurveAxis::X => (yf, xf, &ctx.scales.y, &ctx.scales.x),
-        CurveAxis::Y => (xf, yf, &ctx.scales.x, &ctx.scales.y),
+    let (lower_field, shared_field, value_scale, shared_scale, shared_channel) = match curve_axis {
+        CurveAxis::X => (yf, xf, &ctx.scales.y, &ctx.scales.x, "x"),
+        CurveAxis::Y => (xf, yf, &ctx.scales.x, &ctx.scales.y, "y"),
     };
     let lows = col_as_f64(ctx.batch, lower_field).ok()?;
     let highs = col_as_f64(ctx.batch, band_field).ok()?;
     let n = lows.len().min(highs.len());
-    let (shared_pixels, shared_is_ordinal) = resolve_shared_pixels(ctx, shared_scale, shared_field, n)?;
+    let (shared_pixels, shared_is_ordinal) = resolve_shared_pixels(ctx, shared_channel, shared_scale, shared_field, n)?;
     let edge = |v: Option<f64>| v.filter(|v| v.is_finite()).and_then(|v| ctx.to_pixel(value_scale, v));
     let pixels = (0..n)
         .map(|i| {
@@ -1479,7 +1480,7 @@ mod tests {
     }
 
     /// A `Timestamp` `color` under a categorical scale splits the series, one
-    /// per instant, each keyed by its epoch string.
+    /// per instant, each keyed by its label.
     #[test]
     fn a_timestamp_color_splits_the_series() {
         use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
@@ -1487,6 +1488,6 @@ mod tests {
         let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
         assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
-        assert_eq!(keys, vec![Some("1000".to_string()), Some("2000".to_string())]);
+        assert_eq!(keys, vec![Some("1970-01-01T00:00:01".to_string()), Some("1970-01-01T00:00:02".to_string())]);
     }
 }

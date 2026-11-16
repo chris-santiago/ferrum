@@ -46,7 +46,25 @@ pub(crate) fn color_is_quantitative(ctx: &DrawCtx) -> bool {
 /// row, as every banded builder's category read places none.
 fn polygon_read(ctx: &DrawCtx, field: &str) -> crate::render::draw::PlacementRead {
     use crate::render::draw::PlacementRead;
-    if col_as_f64(ctx.batch, field).is_ok() { PlacementRead::Strict } else { PlacementRead::Category }
+    let channel = if x_field(ctx, ctx.spec) == Some(field) { "x" } else { "y" };
+    if col_as_f64(ctx.batch, field).is_ok() && !timestamp_on_ordinal(ctx, channel, field) {
+        PlacementRead::Strict
+    } else {
+        PlacementRead::Category
+    }
+}
+
+/// Whether `field` is a `Timestamp` column drawn on a categorical axis. It
+/// reads as numbers too, but placed as numbers on an ordinal scale it lands
+/// outside every band; it is placed by its category label instead.
+fn timestamp_on_ordinal(ctx: &DrawCtx, channel: &str, field: &str) -> bool {
+    let scale = if channel == "x" { &ctx.scales.x } else { &ctx.scales.y };
+    matches!(scale, crate::render::scale_resolve::ScaleKind::Ordinal(_))
+        && ctx.timestamp_read(channel) == crate::render::category_read::TimestampRead::Categories
+        && ctx
+            .batch
+            .column_by_name(field)
+            .is_some_and(|col| matches!(col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)))
 }
 
 /// One first-appearance-order group per distinct non-null `key_at(i)`, over
@@ -77,7 +95,7 @@ fn group_first_appearance<K: Eq + Hash>(n: usize, key_at: impl Fn(usize) -> Opti
 /// series mark's `detail` partition uses, for every dtype alike. Integer
 /// and float columns keep typed keys (`i64`, a `Float64`'s `to_bits` as
 /// `i64`) for a cheap hash; every other dtype [`col_as_identity_key_str`]
-/// can read (a date or datetime included, by its epoch value) groups the same
+/// can read (a date or datetime included, by its UTC ISO label) groups the same
 /// way, by its string key. A single group of
 /// every row when `detail` is unset. Empty (no groups at all) when a bound
 /// `detail` names a column this batch does not carry: `build` draws nothing
@@ -195,8 +213,11 @@ pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::P
 pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
     let spec = ctx.spec;
     let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
-    let axis_pixels = |scale: &crate::render::scale_resolve::ScaleKind, field: &str| -> Option<Vec<Option<f64>>> {
-        if let Ok(v) = col_as_f64(ctx.batch, field) {
+    let axis_pixels = |channel: &str, scale: &crate::render::scale_resolve::ScaleKind, field: &str| -> Option<Vec<Option<f64>>> {
+        if timestamp_on_ordinal(ctx, channel, field) {
+            let labels = ctx.category_strings(channel, field).ok()?;
+            Some(labels.into_iter().map(|opt| opt.as_deref().and_then(|s| scale.to_pixel_str(s))).collect())
+        } else if let Ok(v) = col_as_f64(ctx.batch, field) {
             Some(v.into_iter().map(|opt| opt.and_then(|x| scale.to_pixel_f64(x))).collect())
         } else if let Ok(v) = col_as_str(ctx.batch, field) {
             Some(v.into_iter().map(|opt| opt.as_deref().and_then(|s| scale.to_pixel_str(s))).collect())
@@ -204,8 +225,8 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
             None
         }
     };
-    let xpx = axis_pixels(&ctx.scales.x, xf)?;
-    let ypx = axis_pixels(&ctx.scales.y, yf)?;
+    let xpx = axis_pixels("x", &ctx.scales.x, xf)?;
+    let ypx = axis_pixels("y", &ctx.scales.y, yf)?;
     Some(xpx.into_iter().zip(ypx).map(|(x, y)| Some((x?, y?))).collect())
 }
 
@@ -1480,8 +1501,45 @@ mod tests {
         assert_eq!(result.nodes.iter().filter(|n| matches!(n, ferrum_scene::SceneNode::Polygon { .. })).count(), 2);
     }
 
+    /// A `Timestamp` `x` drawn nominal places each vertex on its date's band,
+    /// where the numeric reader would put every vertex off the ordinal scale:
+    /// the placed pixels equal its label-text twin's.
+    #[test]
+    fn a_timestamp_x_on_a_categorical_axis_places_vertices_like_its_label_text() {
+        use arrow::array::{StringArray, TimestampMillisecondArray};
+        let mut spec = polygon_spec(Some("ring"), None);
+        spec.encoding.x = Some(EncodingSpec {
+            field: "k".into(),
+            type_: Some(crate::spec::encoding::DataType::Nominal),
+            ..Default::default()
+        });
+        let day = 86_400_000_i64;
+        let build_with = |k: Arc<dyn arrow::array::Array>| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("k", k.data_type().clone(), false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("ring", DataType::UInt32, false),
+            ]));
+            let batch = arrow::record_batch::RecordBatch::try_new(schema, vec![
+                k,
+                Arc::new(Float64Array::from(vec![0.0, 1.0, 0.5, 0.0, 1.0, 0.5])),
+                Arc::new(UInt32Array::from(vec![0u32, 0, 0, 1, 1, 1])),
+            ]).unwrap();
+            let theme = ThemeInputs::default();
+            let panel = rect_panel();
+            let (scales, _) = resolve_scales(&spec, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
+            let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();
+            let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
+            super::vertex_pixels(&ctx)
+        };
+        let dates = build_with(Arc::new(TimestampMillisecondArray::from(vec![0, 0, 0, day, day, day])));
+        let text = build_with(Arc::new(StringArray::from(vec!["1970-01-01", "1970-01-01", "1970-01-01", "1970-01-02", "1970-01-02", "1970-01-02"])));
+        assert!(dates.as_ref().is_some_and(|v| v.iter().all(Option::is_some)), "every vertex is placed: {dates:?}");
+        assert_eq!(dates, text);
+    }
+
     /// A `Timestamp` `color` under a categorical scale paints each ring by its
-    /// instant's epoch string, as the same values as text do.
+    /// instant's label, as the same values as text do.
     #[test]
     fn a_timestamp_color_paints_each_ring_by_its_instant() {
         use crate::render::color::Color;
@@ -1507,7 +1565,7 @@ mod tests {
         no_color.encoding.color = None;
         let (mut scales, _) = resolve_scales(&no_color, &batch, (0.0, 100.0), (0.0, 100.0), &theme).unwrap();
         scales.color = Some(ColorScale::Categorical {
-            domain: vec!["1000".into(), "2000".into()],
+            domain: vec!["1970-01-01T00:00:01".into(), "1970-01-01T00:00:02".into()],
             palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
         });
         let mark_style = resolve_mark_style(spec.mark_style.as_ref(), &theme, &Mark::Polygon).unwrap();

@@ -265,6 +265,12 @@ pub struct OrdinalScale {
     /// Original range values as supplied by the user, preserved for the
     /// Python getter. `None` when the user did not supply a range.
     range_orig: Option<Vec<OrdinalRangeValue>>,
+    /// Whether this scale's categories are instants: the axis was established
+    /// by a `Timestamp` column read as categories, so a later layer's
+    /// `Timestamp` column on the channel reads as categories too
+    /// ([`crate::render::category_read::timestamp_read`], clause (e)). `false`
+    /// for every scale a caller constructs and every non-date axis.
+    of_dates: bool,
 }
 
 impl OrdinalScale {
@@ -285,7 +291,19 @@ impl OrdinalScale {
             data: OrdinalScaleData { domain, range, layout },
             range_provenance: RangeProvenance::UserSet,
             range_orig: Some(range_orig),
+            of_dates: false,
         }
+    }
+
+    /// Records that this scale's categories are instants (see the field).
+    pub(crate) fn with_of_dates(mut self, of_dates: bool) -> Self {
+        self.of_dates = of_dates;
+        self
+    }
+
+    /// Whether this scale's categories are instants.
+    pub(crate) fn of_dates(&self) -> bool {
+        self.of_dates
     }
 
     /// Marks this scale's pixel range as explicitly supplied by the user
@@ -507,6 +525,7 @@ impl OrdinalScale {
             },
             range_provenance,
             range_orig,
+            of_dates: false,
         })
     }
 
@@ -849,6 +868,7 @@ mod tests {
                 OrdinalRangeValue::Str("#cccccc".into()),
                 OrdinalRangeValue::Str("#e4572e".into()),
             ]),
+            of_dates: false,
         };
         let orig = scale.range_orig.as_ref().unwrap();
         assert_eq!(orig.len(), 3);

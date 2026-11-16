@@ -720,14 +720,13 @@ fn shape_scale_explicit_domain_reassigns_glyph_assignment() {
 }
 
 /// A batch holding `x`, `y` and a column `name` of each dtype no category
-/// reader takes that a caller can bind to `shape` or `stroke_dash`: a naive and
-/// a zoned `Timestamp` and a `Decimal128`.
+/// reader takes that a caller can bind to `shape` or `stroke_dash`: a
+/// `Duration` and a `Decimal128`.
 fn columns_with_no_categories(name: &str) -> Vec<(&'static str, RecordBatch)> {
-    use arrow::array::{Array, ArrayRef, Decimal128Array, TimestampMillisecondArray};
+    use arrow::array::{Array, ArrayRef, Decimal128Array, DurationMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     let columns: Vec<(&'static str, ArrayRef)> = vec![
-        ("Timestamp", Arc::new(TimestampMillisecondArray::from(vec![1_000_i64, 2_000]))),
-        ("Timestamp(Europe/Paris)", Arc::new(TimestampMillisecondArray::from(vec![1_000_i64, 2_000]).with_timezone("Europe/Paris"))),
+        ("Duration", Arc::new(DurationMillisecondArray::from(vec![1_000_i64, 2_000]))),
         ("Decimal128", Arc::new(Decimal128Array::from(vec![100_i128, 200]).with_precision_and_scale(10, 2).unwrap())),
     ];
     columns
@@ -4487,7 +4486,7 @@ fn d4b_shared_ordinal_seeds_category_vector() {
 
     // Shared ordinal union carries categories this leaf's data does not have.
     let ctx = LeafScaleContext {
-        x: Some(SharedDomain::Ordinal(vec![
+        x: Some(SharedDomain::ordinal(vec![
             "z".into(), "a".into(), "b".into(), "c".into(), "d".into(),
         ])),
         y: None,
@@ -4522,7 +4521,7 @@ fn d4b_shared_ordinal_ignores_local_data_aware_sort() {
     let pr = (0.0, 100.0);
 
     let ctx = LeafScaleContext {
-        x: Some(SharedDomain::Ordinal(vec![
+        x: Some(SharedDomain::ordinal(vec![
             "z".into(), "a".into(), "b".into(), "c".into(), "d".into(),
         ])),
         y: None,
@@ -4633,7 +4632,7 @@ fn d10preb_shared_categorical_color_seeds_domain_through_seam() {
 
     // Shared union carries categories this leaf's data lacks, in union order.
     let ctx = LeafScaleContext {
-        color: Some(SharedDomain::Ordinal(vec![
+        color: Some(SharedDomain::ordinal(vec![
             "z".into(), "a".into(), "b".into(), "c".into(), "d".into(),
         ])),
         ..Default::default()

@@ -33,7 +33,7 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_ordinal_category_str, resolve_stroke_paint, stroke_width_column, x_field, y_field,
+    col_as_f64, resolve_stroke_paint, stroke_width_column, x_field, y_field,
     DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
@@ -212,7 +212,7 @@ fn build_geometry(
         // Ordinal y only → horizontal crossbars centered on each category band.
         TickMode::OrdinalYOnly => {
             let Some(yf) = y_field(ctx, spec) else { return empty() };
-            let ys = match col_as_ordinal_category_str(ctx.batch, yf) {
+            let ys = match ctx.category_strings("y", yf) {
                 Ok(v) => v,
                 Err(_) => return empty(),
             };
@@ -323,7 +323,7 @@ fn build_geometry(
         TickMode::OrdinalXQuantY => {
             let Some(xf) = x_field(ctx, spec) else { return empty() };
             let Some(yf) = y_field(ctx, spec) else { return empty() };
-            let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
+            let xs = match ctx.category_strings("x", xf) { Ok(v) => v, Err(_) => return empty() };
             let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
             // Length is the resolved x scale's drawn band × `band_size`
             // (F-L04-03, spec §4A; see `ScaleKind::bandwidth`). `None` is
@@ -386,7 +386,7 @@ fn build_geometry(
             let Some(xf) = x_field(ctx, spec) else { return empty() };
             let Some(yf) = y_field(ctx, spec) else { return empty() };
             let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return empty() };
-            let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return empty() };
+            let ys = match ctx.category_strings("y", yf) { Ok(v) => v, Err(_) => return empty() };
             // The y twin of the ordinal-x mode's length (F-L04-03, spec §4A;
             // see `ScaleKind::bandwidth`). `None` is unreachable — this branch
             // is gated on an ordinal y.
@@ -435,7 +435,7 @@ fn build_geometry(
         // Ordinal x only (no y field) → vertical crossbars at each category, anchored at panel bottom.
         TickMode::OrdinalXOnly => {
             let Some(xf) = x_field(ctx, spec) else { return empty() };
-            let xs = match col_as_ordinal_category_str(ctx.batch, xf) {
+            let xs = match ctx.category_strings("x", xf) {
                 Ok(v) => v,
                 Err(_) => return empty(),
             };

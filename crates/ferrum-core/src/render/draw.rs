@@ -21,6 +21,56 @@ use super::RenderError;
 use crate::transform::vocabulary::Vocabulary;
 
 impl DrawCtx<'_> {
+    /// Whether the layer's panel scale on `channel` (`x`/`x2` read `x`'s,
+    /// `y`/`y2` read `y`'s) is a date-category scale: its categories are
+    /// instants, so a later layer's date on it reads as categories.
+    pub(crate) fn scale_of_dates(&self, channel: &str) -> bool {
+        let scale = match channel {
+            "x" | "x2" => &self.scales.x,
+            "y" | "y2" => &self.scales.y,
+            _ => return false,
+        };
+        matches!(scale, ScaleKind::Ordinal(ordinal) if ordinal.of_dates())
+    }
+
+    /// The category door for a mark builder: the per-row category strings of
+    /// `field`, read as the layer's own binding on `channel` reads a date (the
+    /// post-flip channel the builder places by; `x2`/`y2` read through `x`/`y`).
+    /// A date the binding leaves temporal on a scale that is not of dates is
+    /// the refusal it drew before dates could be categories, so the builder's
+    /// own error handling takes its empty path; see
+    /// [`super::category_read::timestamp_read`].
+    pub(crate) fn category_strings(&self, channel: &str, field: &str) -> Result<Vec<Option<String>>, RenderError> {
+        super::category_read::category_strings(self.batch, field, self.timestamp_read(channel))
+    }
+
+    /// [`Self::category_strings`] for a polar angle, whose channel is whichever
+    /// of `x` and `y` binds `field`.
+    pub(crate) fn category_strings_of_field(&self, field: &str) -> Result<Vec<Option<String>>, RenderError> {
+        let channel = if self.spec.encoding.x.as_ref().is_some_and(|binding| binding.field == field) { "x" } else { "y" };
+        self.category_strings(channel, field)
+    }
+
+    /// How the layer's own binding on `channel` reads a `Timestamp` column on
+    /// this panel ([`super::category_read::timestamp_read`]).
+    pub(crate) fn timestamp_read(&self, channel: &str) -> super::category_read::TimestampRead {
+        let primary = match channel {
+            "x2" => "x",
+            "y2" => "y",
+            other => other,
+        };
+        let encoding = &self.spec.encoding;
+        let binding = match primary {
+            "x" => encoding.x.as_ref().or(encoding.x2.as_ref()),
+            "y" => encoding.y.as_ref().or(encoding.y2.as_ref()),
+            "color" => encoding.color.as_ref(),
+            "shape" => encoding.shape.as_ref(),
+            "stroke_dash" => encoding.stroke_dash.as_ref(),
+            _ => None,
+        };
+        super::category_read::timestamp_read(primary, binding, self.spec.mark, self.scale_of_dates(primary))
+    }
+
     /// Whether this chart's coordinate system is flipped (`fm.CoordFlip()`).
     ///
     /// Mirrors `marks::rule`'s read of the same flag off the same `spec`.
@@ -191,6 +241,25 @@ impl<'a> Placement<'a> {
     pub(crate) fn new(channel: PositionalChannel, field: &'a str, read: PlacementRead) -> Self {
         Self { channel, columns: vec![field], read }
     }
+}
+
+/// Whether the census counts nothing for `placement`: a `Strict` or `ClipAware`
+/// placement (the numeric reads, `area` and `segment` among them) on a
+/// categorical scale over a date column the owner reads as categories
+/// ([`DrawCtx::timestamp_read`]). The builder cannot place a category by a number,
+/// exactly as it cannot for the column's label text, whose numeric read fails and
+/// is counted as nothing; so the census reports no row of it, whatever domain the
+/// scale states. Never the epoch number the column also holds, which an ordinal
+/// scale places nowhere and the census would report as every row left out.
+fn census_counts_nothing(ctx: &DrawCtx, placement: &Placement) -> bool {
+    matches!(placement.read, PlacementRead::Strict | PlacementRead::ClipAware)
+        && matches!(channel_scale(ctx, placement.channel), ScaleKind::Ordinal(_))
+        && ctx.timestamp_read(placement.channel.as_str()) == super::category_read::TimestampRead::Categories
+        && placement.columns.iter().all(|column| {
+            ctx.batch
+                .column_by_name(column)
+                .is_some_and(|col| matches!(col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)))
+        })
 }
 
 /// The resolved scale a positional channel reads through: `x`'s for `x`/`x2`,
@@ -502,11 +571,14 @@ fn group_left_out_reasons(
 /// class a raster's own `ImagePath` resolver closes for `mark_image`.
 fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<LeftOutRows, RenderError> {
     let scale = channel_scale(ctx, placement.channel);
+    if census_counts_nothing(ctx, placement) {
+        return Ok(Default::default());
+    }
     match placement.read {
         PlacementRead::Category => {
             let mut columns = Vec::with_capacity(placement.columns.len());
             for col in &placement.columns {
-                match col_as_ordinal_category_str(ctx.batch, col) {
+                match ctx.category_strings(placement.channel.as_str(), col) {
                     Ok(v) => columns.push(v),
                     Err(RenderError::UnsupportedDtype { .. }) => return Ok(Default::default()),
                     Err(e) => return Err(e),
@@ -575,11 +647,14 @@ fn placement_left_out_rows(ctx: &DrawCtx, placement: &Placement) -> Result<LeftO
 /// identical read fails the identical way); any other error propagates.
 fn placement_absent_rows(ctx: &DrawCtx, placement: &Placement) -> Result<std::collections::BTreeSet<usize>, RenderError> {
     let scale = channel_scale(ctx, placement.channel);
+    if census_counts_nothing(ctx, placement) {
+        return Ok(Default::default());
+    }
     match placement.read {
         PlacementRead::Category => {
             let mut columns = Vec::with_capacity(placement.columns.len());
             for col in &placement.columns {
-                match col_as_ordinal_category_str(ctx.batch, col) {
+                match ctx.category_strings(placement.channel.as_str(), col) {
                     Ok(v) => columns.push(v),
                     Err(RenderError::UnsupportedDtype { .. }) => return Ok(Default::default()),
                     Err(e) => return Err(e),
@@ -896,7 +971,7 @@ fn band_slot_groups(ctx: &DrawCtx, placements: &[Placement]) -> Result<Vec<SlotG
             continue;
         }
         partitioned.push(column);
-        let categories = match col_as_ordinal_category_str(ctx.batch, column) {
+        let categories = match ctx.category_strings(placement.channel.as_str(), column) {
             Ok(categories) => categories,
             Err(RenderError::UnsupportedDtype { .. }) => continue,
             Err(e) => return Err(e),
@@ -1813,9 +1888,7 @@ pub fn resolve_mark_style(
     Ok(style)
 }
 
-pub(crate) use super::arrow_cast::{
-    col_as_f64, col_as_ordinal_category_str, col_as_str,
-};
+pub(crate) use super::arrow_cast::{col_as_f64, col_as_str};
 
 /// The tooltip entries a chart's field selections add to a layer's own
 /// (`listed`): one per field any point or interval selection names, in
@@ -5267,21 +5340,21 @@ mod tests {
     #[test]
     fn band_slot_groups_bucket_rows_by_category_in_first_appearance_order() {
         use crate::spec::encoding::Encoding;
-        use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+        use arrow::array::{DurationMillisecondArray, Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
         use std::sync::Arc;
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("c", DataType::Utf8, true),
             Field::new("y", DataType::Float64, true),
-            Field::new("when", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new("when", DataType::Duration(TimeUnit::Millisecond), true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
             vec![
                 Arc::new(StringArray::from(vec!["z", "a", "z", "a", "b"])),
                 Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0, 5.0])),
-                Arc::new(TimestampMillisecondArray::from(vec![1, 2, 3, 4, 5])),
+                Arc::new(DurationMillisecondArray::from(vec![1, 2, 3, 4, 5])),
             ],
         )
         .unwrap();
@@ -5315,6 +5388,208 @@ mod tests {
 
         let unknown = [Placement::new(PositionalChannel::X, "nope", PlacementRead::Category)];
         assert!(matches!(band_slot_groups(&ctx, &unknown), Err(RenderError::UnknownColumn { .. })));
+    }
+
+    /// One date column on an ordinal x scale, drawn by `mark` with `declared` as the x
+    /// binding's type and `of_dates` as the scale's date fact.
+    fn date_band_fixture(mark: Mark, declared: Option<crate::spec::encoding::DataType>, of_dates: bool) -> SlotFixture {
+        use crate::spec::encoding::{Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("when", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new("y", DataType::Float64, false),
+            ])),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0_i64, 86_400_000, 0])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let encoding = Encoding {
+            x: Some(EncodingSpec { field: "when".into(), type_: declared, ..Default::default() }),
+            y: bound("y"),
+            ..Default::default()
+        };
+        let mut fixture = SlotFixture::new(mark, encoding, batch, PositionalChannel::X, &["1970-01-01", "1970-01-02"]);
+        if let ScaleKind::Ordinal(ordinal) = &fixture.scales.x {
+            fixture.scales.x = ScaleKind::Ordinal(ordinal.clone().with_of_dates(of_dates));
+        }
+        fixture
+    }
+
+    /// The per-row labels a polar angle reads for the fixture's x field.
+    fn fixture_labels(fixture: &SlotFixture) -> Vec<Option<String>> {
+        fixture.ctx().category_strings_of_field("when").unwrap()
+    }
+
+    /// Every band-placing reader asks the owner: a date its binding leaves
+    /// temporal, on a scale that is not of dates, reads as no category. The one
+    /// door refuses it in the words a date drew before dates could be categories,
+    /// the rule's `?` carries that refusal out, the builders that treat the
+    /// refusal as "place nothing" draw nothing, the census counts no row and
+    /// `band_slot_groups` skips the column.
+    #[test]
+    fn every_band_placing_reader_reads_a_temporal_date_as_no_category() {
+        use crate::spec::encoding::DataType as Declared;
+        let refused = |fixture: &SlotFixture| {
+            let ctx = fixture.ctx();
+            let door = ctx.category_strings("x", "when").map(|_| ());
+            let census = domain_left_out_counts(&ctx, None).unwrap().left_out.iter().map(|l| l.rows).sum::<usize>();
+            let slots = band_slot_groups(&ctx, &[Placement::new(PositionalChannel::X, "when", PlacementRead::Category)])
+                .unwrap()
+                .len();
+            (door.is_err(), census, slots)
+        };
+        for declared in [None, Some(Declared::Temporal)] {
+            let fixture = date_band_fixture(Mark::Tick, declared, false);
+            assert_eq!(refused(&fixture), (true, 0, 0), "{declared:?}");
+        }
+        for mark in [Mark::Tick, Mark::Bar, Mark::Point] {
+            let fixture = date_band_fixture(mark.clone(), None, false);
+            let built = dispatch_mark_build(&mark, &fixture.ctx());
+            assert!(
+                built.as_ref().map_or(true, |result| result.nodes.is_empty()),
+                "{mark:?} places nothing on an axis of text"
+            );
+        }
+        // Polygon, ribbon and text place by the same door, and the polar readers (arc theta,
+        // bar radial angle, text polar theta) read their angle field through it.
+        for mark in [Mark::Polygon, Mark::Ribbon, Mark::Text] {
+            let mut fixture = date_band_fixture(mark.clone(), None, false);
+            fixture.spec.encoding.y2 = bound("y");
+            let built = dispatch_mark_build(&mark, &fixture.ctx());
+            assert!(
+                built.as_ref().map_or(true, |result| result.nodes.is_empty()),
+                "{mark:?} places nothing on an axis of text"
+            );
+        }
+        let temporal = date_band_fixture(Mark::Arc, None, false);
+        assert!(temporal.ctx().category_strings_of_field("when").is_err(), "a polar angle over a temporal date");
+        let mut rule = date_band_fixture(Mark::Rule, None, false);
+        rule.spec.encoding.y2 = bound("y");
+        assert!(dispatch_mark_build(&Mark::Rule, &rule.ctx()).is_err(), "the rule carries the refusal out");
+    }
+
+    /// The census counts a date the owner reads as categories as its label-text
+    /// twin is counted. `line` and `point` place by label, so a date in the domain is
+    /// counted as nothing left out and one the declared domain lacks is counted by
+    /// its label; `area` and `segment` place by number, which neither the date nor its
+    /// text twin can be on a categorical scale, so the census counts nothing for them,
+    /// whatever domain the scale states. A temporal date beside a text axis keeps
+    /// the count it had.
+    #[test]
+    fn the_census_counts_a_categorical_date_as_its_label_text_twin_is_counted() {
+        use crate::spec::encoding::DataType as Declared;
+        let left_out = |mark: Mark, declared: Option<Declared>, of_dates: bool, domain: &[&str]| {
+            let mut fixture = date_band_fixture(mark.clone(), declared, of_dates);
+            if mark == Mark::Segment {
+                fixture.spec.encoding.x2 = Some(crate::spec::encoding::EncodingSpec {
+                    field: "when".into(),
+                    type_: declared,
+                    ..Default::default()
+                });
+                fixture.spec.encoding.y2 = bound("y");
+            }
+            if let ScaleKind::Ordinal(ordinal) = &fixture.scales.x {
+                let widened = crate::scale::ordinal::OrdinalScale::new_internal(
+                    domain.iter().map(|c| c.to_string()).collect(),
+                    vec![0.0, 100.0],
+                    crate::scale::discrete::DiscreteLayout::UNPADDED,
+                )
+                .with_of_dates(ordinal.of_dates());
+                fixture.scales.x = ScaleKind::Ordinal(widened);
+            }
+            let ctx = fixture.ctx();
+            domain_left_out_counts(&ctx, None).unwrap().left_out.iter().map(|l| (l.categorical, l.rows)).collect::<Vec<_>>()
+        };
+        for mark in [Mark::Area, Mark::Segment, Mark::Line, Mark::Point] {
+            let by_number = matches!(mark, Mark::Area | Mark::Segment);
+            for (declared, of_dates) in [(Some(Declared::Nominal), false), (None, true)] {
+                assert_eq!(
+                    left_out(mark.clone(), declared, of_dates, &["1970-01-01", "1970-01-02"]),
+                    Vec::<(bool, usize)>::new(),
+                    "{mark:?} {declared:?} of_dates={of_dates}: nothing left out in the domain"
+                );
+                let outside = left_out(mark.clone(), declared, of_dates, &["1970-01-02"]);
+                let expected = if by_number { vec![] } else { vec![(true, 2)] };
+                assert_eq!(outside, expected, "{mark:?} {declared:?} of_dates={of_dates}: a date the domain omits");
+            }
+        }
+        // Undeclared on a scale that is not of dates keeps the count it had: epoch numbers on an ordinal scale.
+        let temporal = left_out(Mark::Area, None, false, &["1970-01-01", "1970-01-02"]);
+        assert_eq!(temporal, vec![(false, 3)], "a temporal date beside a text axis keeps its HEAD count");
+    }
+
+    /// The same readers given a date the owner reads as categories (declared
+    /// nominal, or on a scale of dates) place each row on its label's band.
+    #[test]
+    fn every_band_placing_reader_places_a_categorical_date_on_its_label_band() {
+        use crate::spec::encoding::DataType as Declared;
+        for (declared, of_dates) in [(Some(Declared::Nominal), false), (Some(Declared::Ordinal), false), (None, true)] {
+            let fixture = date_band_fixture(Mark::Tick, declared, of_dates);
+            let ctx = fixture.ctx();
+            assert_eq!(
+                ctx.category_strings("x", "when").unwrap(),
+                vec![Some("1970-01-01".into()), Some("1970-01-02".into()), Some("1970-01-01".into())],
+                "{declared:?} of_dates={of_dates}"
+            );
+            let slots = band_slot_groups(&ctx, &[Placement::new(PositionalChannel::X, "when", PlacementRead::Category)]).unwrap();
+            assert_eq!(slots.iter().map(|s| s.rows.clone()).collect::<Vec<_>>(), [vec![0, 2], vec![1]]);
+            for mark in [Mark::Tick, Mark::Bar, Mark::Point] {
+                let built = dispatch_mark_build(&mark, &date_band_fixture(mark.clone(), declared, of_dates).ctx()).unwrap();
+                assert_eq!(built.nodes.len(), 3, "{mark:?} {declared:?} of_dates={of_dates}");
+            }
+            // The polar readers (arc theta, bar radial, text polar theta) read their angle through the same door.
+            assert_eq!(
+                fixture_labels(&date_band_fixture(Mark::Arc, declared, of_dates)),
+                vec![Some("1970-01-01".into()), Some("1970-01-02".into()), Some("1970-01-01".into())]
+            );
+        }
+    }
+
+    /// A date column on a band axis counts as naming categories only where its
+    /// layer declares it nominal or ordinal. A layer that leaves it temporal (a
+    /// line over `when` beside a categorical layer) is not counted as leaving
+    /// categories out of the domain; the same column declared nominal is.
+    #[test]
+    fn a_temporal_declared_date_names_no_category_the_domain_leaves_out() {
+        use crate::spec::encoding::{DataType as Declared, Encoding, EncodingSpec};
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use std::sync::Arc;
+
+        let build = |declared: Declared| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("when", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new("y", DataType::Float64, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![0_i64, 86_400_000, 172_800_000])),
+                    Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                ],
+            )
+            .unwrap();
+            let encoding = Encoding {
+                x: Some(EncodingSpec { field: "when".into(), type_: Some(declared), ..Default::default() }),
+                y: bound("y"),
+                ..Default::default()
+            };
+            let fixture = SlotFixture::new(Mark::Line, encoding, batch, PositionalChannel::X, &["a", "b", "c"]);
+            let ctx = fixture.ctx();
+            let census = domain_left_out_counts(&ctx, None).unwrap().left_out.iter().map(|l| l.rows).sum::<usize>();
+            let vertices = crate::render::marks::line::vertex_pixels(&ctx);
+            (census, vertices.is_some())
+        };
+        // A temporal-declared date is unreadable as categories, so the line
+        // builder places nothing and takes its empty path, as for any other
+        // column no category reader takes.
+        assert_eq!(build(Declared::Temporal), (0, false), "a temporal-declared date names no category");
+        assert_eq!(build(Declared::Nominal), (3, true), "a nominal date names three categories the domain lacks");
     }
 
     /// A group whose rows are each blocked by a DIFFERENT placement — one

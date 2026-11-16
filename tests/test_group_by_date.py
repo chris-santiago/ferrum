@@ -625,19 +625,13 @@ def test_a_swarm_categorised_by_a_date_places_each_point_in_its_days_category():
     assert clusters == _category_clusters(twin_svg)
 
 
-def test_a_boxplot_by_a_date_ordinal_reaches_the_band_axis_refusal():
-    """The box statistic now groups by day; the refusal that follows is the band axis's own,
-    the one a temporal ordinal column meets on any mark."""
-    refusal = (
-        "column 'k' has unsupported dtype: Timestamp(Millisecond, None) "
-        "(cannot enumerate distinct values)"
-    )
-    with pytest.raises(ValueError) as band:
-        fm.Chart(_date_frame()).mark_point().encode(x=fm.X("k", type_="O"), y="v").to_svg()
-    with pytest.raises(ValueError) as box:
-        fm.Chart(_date_frame()).mark_boxplot().encode(x=fm.X("k", type_="O"), y="v").to_svg()
-    assert str(band.value) == refusal
-    assert str(box.value) == refusal
+def test_a_boxplot_by_a_date_ordinal_draws_a_box_per_day_in_time_order():
+    """The box statistic groups by day and the band axis reads the dates as categories: one box
+    per day, labelled by its ISO date in time order, on a point chart's ordinal axis too."""
+    labels = [d.isoformat() for d in sorted(_DAYS)]
+    for mark in ("mark_point", "mark_boxplot"):
+        chart = getattr(fm.Chart(_date_frame()), mark)().encode(x=fm.X("k", type_="O"), y="v")
+        assert axis_tick_labels(chart.to_svg(), axis="x") == labels
 
 
 # ---------------------------------------------------------------------------

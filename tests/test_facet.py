@@ -776,14 +776,13 @@ def test_all_null_facet_categorical_dtype_renders_and_warns():
         }
     )
     chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
-    reset_warnings()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        svg = chart.to_svg()
-    msgs = [str(x.message) for x in w]
+    twin = Chart(df.with_columns(f=pl.Series([None, None, None], dtype=pl.Utf8)))
+    twin = twin.mark_point().encode(x="x", y="y").facet("f")
+    (svg, msgs), (twin_svg, twin_msgs) = _capture(chart), _capture(twin)
     assert "<svg" in svg
     assert _all_null_drop_warning(msgs, "f", 3), msgs
     assert _no_panel_warning(msgs), msgs
+    assert msgs == twin_msgs
 
 
 def test_all_null_facet_interactive_renders_and_warns():
@@ -987,14 +986,13 @@ def test_all_null_non_utf8_facet_column_renders_and_warns(dtype):
         {"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None], dtype=dtype)}
     )
     chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
-    reset_warnings()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        svg = chart.to_svg()
-    msgs = [str(x.message) for x in w]
+    twin = Chart(df.with_columns(f=pl.Series([None, None, None], dtype=pl.Utf8)))
+    twin = twin.mark_point().encode(x="x", y="y").facet("f")
+    (svg, msgs), (twin_svg, twin_msgs) = _capture(chart), _capture(twin)
     assert "<svg" in svg
     assert _all_null_drop_warning(msgs, "f", 3), msgs
     assert _no_panel_warning(msgs), msgs
+    assert msgs == twin_msgs
 
 
 def test_all_null_null_typed_facet_column_renders_and_warns():
@@ -1005,61 +1003,101 @@ def test_all_null_null_typed_facet_column_renders_and_warns():
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None])})
     assert df["f"].dtype == pl.Null
     chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
-    reset_warnings()
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        svg = chart.to_svg()
-    msgs = [str(x.message) for x in w]
+    twin = Chart(df.with_columns(f=pl.Series([None, None, None], dtype=pl.Utf8)))
+    twin = twin.mark_point().encode(x="x", y="y").facet("f")
+    (svg, msgs), (twin_svg, twin_msgs) = _capture(chart), _capture(twin)
     assert "<svg" in svg
     assert _all_null_drop_warning(msgs, "f", 3), msgs
     assert _no_panel_warning(msgs), msgs
+    assert msgs == twin_msgs
+
+
+def _label_of(value) -> str:
+    """The panel header of a date or date-time: its ISO date at midnight, else its full ISO text."""
+    stamp = (
+        datetime.datetime.combine(value, datetime.time()) if type(value) is datetime.date else value
+    )
+    return stamp.date().isoformat() if stamp.time() == datetime.time() else stamp.isoformat()
+
+
+def _capture(chart) -> tuple[str, list[str]]:
+    """The svg a chart draws and every warning it raised, in order."""
+    reset_warnings()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        svg = chart.to_svg()
+    return svg, [str(w.message) for w in caught]
 
 
 @pytest.mark.parametrize(
-    "values,dtype",
+    "values,dtype,labels",
     [
         (
-            [datetime.date(2020, 1, 1), datetime.date(2020, 1, 2), datetime.date(2020, 1, 1)],
+            [datetime.date(2020, 1, 3), datetime.date(2020, 1, 1), datetime.date(2020, 1, 2)],
             pl.Date,
+            ["2020-01-01", "2020-01-02", "2020-01-03"],
         ),
         (
             [
-                datetime.datetime(2020, 1, 1),
                 datetime.datetime(2020, 1, 2),
+                datetime.datetime(2020, 1, 1, 12),
                 datetime.datetime(2020, 1, 1),
             ],
             pl.Datetime,
-        ),
-        (
-            [datetime.timedelta(days=1), datetime.timedelta(days=2), datetime.timedelta(days=1)],
-            pl.Duration,
+            ["2020-01-01", "2020-01-01T12:00:00", "2020-01-02"],
         ),
     ],
-    ids=["date", "datetime", "duration"],
+    ids=["date", "datetime"],
 )
-def test_temporal_facet_column_refuses_naming_the_accepted_dtypes(values, dtype):
-    """A temporal facet field is refused with a typed error naming the
-    accepted dtypes and the cast remedy."""
+def test_temporal_facet_column_draws_a_panel_per_date_in_time_order(values, dtype, labels):
+    """A date or datetime facet field is one panel per distinct value, headed by its ISO text (a
+    midnight reads its date, any other value its full date-time), in time order whatever the row
+    order."""
     df = pl.DataFrame({"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series(values, dtype=dtype)})
     chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
-    with pytest.raises(ValueError) as excinfo:
-        chart.to_svg()
-    msg = str(excinfo.value)
-    assert "unsupported dtype" in msg, msg
-    assert "cast 'f' to a string to facet by it" in msg, msg
-    assert "must be Utf8" not in msg, msg
+    twin_df = df.with_columns(f=pl.Series([_label_of(v) for v in values], dtype=pl.Utf8))
+    twin = Chart(twin_df).mark_point().encode(x="x", y="y").facet("f")
+    (svg, msgs), (twin_svg, twin_msgs) = (_capture(c) for c in (chart, twin))
+    assert _panel_headers(svg, labels) == labels
+    assert svg.count("<circle") == 3
+    assert msgs == twin_msgs
 
 
-def test_all_null_datetime_facet_column_refuses_the_same_way():
-    """The dtype decides before the nulls: an all-null `Datetime` column
-    still refuses as a temporal column, the same as a some-null one, not
-    the all-null drop-and-warn route every category dtype above takes."""
+def test_a_duration_facet_column_is_refused_with_a_remedy_that_draws():
+    """A Duration reaches the engine as a timestamp, so it is refused rather than headed by
+    1970 dates; converting it to text, as the message says, draws one panel per value."""
     df = pl.DataFrame(
-        {"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None], dtype=pl.Datetime)}
+        {
+            "x": [1, 2, 3],
+            "y": [1, 2, 3],
+            "f": pl.Series(
+                [datetime.timedelta(days=1), datetime.timedelta(days=2), datetime.timedelta(days=1)]
+            ),
+        }
     )
     chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
     with pytest.raises(ValueError) as excinfo:
         chart.to_svg()
-    msg = str(excinfo.value)
-    assert "unsupported dtype" in msg, msg
-    assert "cast 'f' to a string to facet by it" in msg, msg
+    assert str(excinfo.value) == (
+        "column 'f' is a Duration, which cannot be read as categories (it is a facet field); "
+        "convert it to text with pl.col('f').dt.to_string('polars') for one category per value"
+    )
+    fixed = df.with_columns(pl.col("f").dt.to_string("polars"))
+    svg = Chart(fixed).mark_point().encode(x="x", y="y").facet("f").to_svg()
+    assert _panel_headers(svg, ["1d", "2d"]) == ["1d", "2d"]
+
+
+def test_all_null_datetime_facet_column_drops_and_warns_like_every_category_dtype():
+    """An all-null `Datetime` column follows the same drop-and-warn route as an all-null column of
+    any other dtype, instead of refusing as a temporal column."""
+    df = pl.DataFrame(
+        {"x": [1, 2, 3], "y": [1, 2, 3], "f": pl.Series([None, None, None], dtype=pl.Datetime)}
+    )
+    chart = Chart(df).mark_point().encode(x="x", y="y").facet("f")
+    twin = Chart(df.with_columns(f=pl.Series([None, None, None], dtype=pl.Utf8)))
+    twin = twin.mark_point().encode(x="x", y="y").facet("f")
+    (svg, msgs), (twin_svg, twin_msgs) = _capture(chart), _capture(twin)
+    assert "<svg" in svg
+    assert _all_null_drop_warning(msgs, "f", 3), msgs
+    assert _no_panel_warning(msgs), msgs
+    assert msgs == twin_msgs

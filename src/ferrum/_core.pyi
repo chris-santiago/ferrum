@@ -508,7 +508,7 @@ class Bin:
         bins: Optional[Union[str, int, float]] = None,
         bin_count: Optional[int] = None,
         bin_width: Optional[float] = None,
-        extent: Optional[Tuple[float, float]] = None,
+        extent: Optional[Sequence[float]] = None,
         nice: bool = True,
         cumulative: bool = False,
         shared_extent: bool = False,
@@ -528,8 +528,8 @@ class Bin2D:
         *,
         bins_x: Optional[Union[str, int, float]] = None,
         bins_y: Optional[Union[str, int, float]] = None,
-        extent_x: Optional[Tuple[float, float]] = None,
-        extent_y: Optional[Tuple[float, float]] = None,
+        extent_x: Optional[Sequence[float]] = None,
+        extent_y: Optional[Sequence[float]] = None,
         cumulative: bool = False,
         name: Optional[str] = None,
     ) -> None: ...
@@ -552,7 +552,7 @@ class Kde:
         bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         bw_adjust: float = 1.0,
         n: int = 512,
-        extent: Optional[Tuple[float, float]] = None,
+        extent: Optional[Sequence[float]] = None,
         cumulative: bool = False,
         shared_extent: bool = False,
         kernel: str = "gaussian",
@@ -569,7 +569,7 @@ class Kde2D:
         *,
         bandwidth: object = None,  # str ("scott"|"silverman") or float; None → scott
         n: int = 128,
-        extent: Optional[Tuple[float, float, float, float]] = None,
+        extent: Optional[Sequence[float]] = None,
         groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
     ) -> None: ...
@@ -604,7 +604,7 @@ class Smooth:
         inject_metrics: bool = False,
         groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
-        x_range: Optional[Tuple[float, float]] = None,
+        x_range: Optional[Sequence[float]] = None,
         x_range_pad: Optional[float] = None,
     ) -> None: ...
     def _with_residual_columns(
@@ -827,7 +827,7 @@ class Robust:
         inject_metrics: bool = False,
         groupby: Optional[List[str]] = None,
         name: Optional[str] = None,
-        x_range: Optional[Tuple[float, float]] = None,
+        x_range: Optional[Sequence[float]] = None,
         x_range_pad: Optional[float] = None,
     ) -> None: ...
     def _with_residual_columns(
@@ -903,8 +903,8 @@ class ReferenceLine:
         x_field: str,
         y_field: str,
         *,
-        x: Tuple[float, float] = (0.0, 1.0),
-        y: Tuple[float, float] = (0.0, 1.0),
+        x: Sequence[float] = (0.0, 1.0),
+        y: Sequence[float] = (0.0, 1.0),
         name: Optional[str] = None,
     ) -> None: ...
 
@@ -1157,6 +1157,17 @@ def numeric_columns(schema: Any, entry: str) -> list[str]: ...
 # or boolean column reads categorical, a number or timestamp does not, and a
 # field the schema lacks reads ``False``.
 def column_reads_categorical(schema: Any, field: str) -> bool: ...
+
+# ``ferrum._core.category_read_fields(spec, schema)``: every
+# ``(data_source, channel, field)`` of a built ``ChartSpec`` whose binding the
+# engine reads a date column as categories on (the one rule,
+# ``render::category_read::timestamp_read``). ``data_source`` is a layer's
+# ``data_source`` or ``None`` for the chart-level encoding and a facet;
+# ``channel`` is the spec channel name (a facet field, row or column is
+# ``"facet"``); ``field`` is the spec's own spelling. ``schema`` is the frame's
+# Arrow schema after ``_coerce.normalize_for_rust``: it decides whether a later
+# layer's date joins a date-category scale an earlier layer's date established.
+def category_read_fields(spec: Any, schema: Any) -> list[tuple[str | None, str, str]]: ...
 
 # The refusal text of the render gate's unknown-column error
 # (``RenderError::LayerUnknownColumn``), formatted by its own ``Display``, so a

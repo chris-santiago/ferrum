@@ -1,6 +1,6 @@
 use ferrum_scene::{MarkBatchKind, PathCmd, SceneNode};
 
-use crate::render::arrow_cast::{col_as_f64, col_as_ordinal_category_str};
+use crate::render::arrow_cast::col_as_f64;
 use crate::render::color::with_opacity;
 use crate::render::draw::{
     resolve_fill_color, to_scene_fill_stroke, DrawCtx, MarkBuildResult, MetadataColumns,
@@ -410,7 +410,7 @@ fn build_nominal_theta(
     radius_field: Option<&str>,
     radius_scale: &crate::render::scale_resolve::ScaleKind,
 ) -> MarkBuildResult {
-    let angle_strs = match col_as_ordinal_category_str(ctx.batch, theta_field) {
+    let angle_strs = match ctx.category_strings_of_field(theta_field) {
         Ok(v) => v,
         Err(_) => return MarkBuildResult::empty(MarkBatchKind::Arc),
     };

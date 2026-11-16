@@ -1425,9 +1425,13 @@ def _lower_overlay_leaf_node(
     no hole placeholder at all (a hole is illegal under overlay). An
     empty-data layer (``num_rows == 0``) lowers like any other leaf and draws
     its share of the shared panel's frame. A ``LayerChart`` with a zero-row
-    layer beside a populated one draws without a warning.
+    layer beside a populated one draws without a warning. The caller checks the
+    columns a category binding reads once on the merged chart, so a leaf lowers
+    with that check off.
     """
-    spec, data, viewport, theme, chart_config = chart._render_inputs(_auto_tooltips=auto_tooltips)
+    spec, data, viewport, theme, chart_config = chart._render_inputs(
+        _auto_tooltips=auto_tooltips, _check_categories=False
+    )
     return _append_leaf_wire_node(
         spec,
         data,
@@ -3853,6 +3857,7 @@ class LayerChart(_ChartLike):
             )
             for layer in layers
         ]
+        self._check_category_bindings_once(layers)
 
         tree = _composite_node(
             "overlay",
@@ -3871,6 +3876,25 @@ class LayerChart(_ChartLike):
             theme=theme,
             chart_config=chart_config or None,
         )
+
+    def _check_category_bindings_once(self, layers: list) -> None:
+        """Check the columns a category binding reads, once, as the merged chart a single render
+        (the interactive route) would see them.
+
+        The members lower with the check off; this runs it on the merged chart so the static
+        overlay checks exactly the bindings the interactive route checks, and a column bound in
+        two members warns once. A merge that itself refuses (its own wording, raised by the
+        interactive route) leaves each member to be checked on its own.
+        """
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                merged = self._build_merged()
+        except ValueError:
+            for layer in layers:
+                layer._check_category_bindings()
+            return
+        merged._check_category_bindings()
 
     def _render_interactive(self) -> tuple[str, bytes]:
         """Render to (scene_json, packed_data) via the merged single-panel Chart.

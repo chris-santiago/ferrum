@@ -8,7 +8,7 @@
 //!   path; only y2 present → ordinal-range; else heatmap.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, col_as_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, col_as_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{color_column_loader, resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
@@ -292,7 +292,7 @@ fn build_ordinal_range(ctx: &DrawCtx, band: Option<BandAxis>) -> Result<crate::r
         let y2f = match spec.encoding.y2.as_ref().map(|e| e.field.as_str()) {
             Some(f) => f, None => return Ok(empty_result()),
         };
-        let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        let xs = match ctx.category_strings("x", xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
         let ys = match col_as_f64(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
         let y2s = match col_as_f64(ctx.batch, y2f) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
         if xs.len() != ys.len() || y2s.len() != ys.len() { return Ok(empty_result()); }
@@ -392,7 +392,7 @@ fn build_ordinal_range(ctx: &DrawCtx, band: Option<BandAxis>) -> Result<crate::r
         let x2f = match spec.encoding.x2.as_ref().map(|e| e.field.as_str()) {
             Some(f) => f, None => return Ok(empty_result()),
         };
-        let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+        let ys = match ctx.category_strings("y", yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
         let xs = match col_as_f64(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
         let x2s = match col_as_f64(ctx.batch, x2f) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
         if ys.len() != xs.len() || x2s.len() != xs.len() { return Ok(empty_result()); }
@@ -518,8 +518,8 @@ fn build_heatmap(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, 
     let (xf, yf) = match (x_field(ctx, spec), y_field(ctx, spec)) {
         (Some(a), Some(b)) => (a, b), _ => return Ok(empty_result()),
     };
-    let xs = match col_as_ordinal_category_str(ctx.batch, xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
-    let ys = match col_as_ordinal_category_str(ctx.batch, yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+    let xs = match ctx.category_strings("x", xf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
+    let ys = match ctx.category_strings("y", yf) { Ok(v) => v, Err(_) => return Ok(empty_result()) };
     if xs.len() != ys.len() { return Ok(empty_result()); }
 
     // A heatmap cell IS its band on both axes: the drawn band of each resolved

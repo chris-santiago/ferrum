@@ -24,7 +24,7 @@
 
 use crate::render::color::with_opacity;
 use crate::render::arrow_cast::col_as_identity_key_str;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, MetadataColumns};
+use crate::render::draw::{col_as_f64, resolve_effective_stroke, resolve_fill_color, stroke_width_column, x_field, y_field, ClearablePaint, DrawCtx, MetadataColumns};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{resolve_row_stroke_dash, stroke_dash_column_loader};
 use crate::render::marks::opacity::{resolve_scaled_opacity, OpacityFallback, OpacityResolver};
@@ -366,9 +366,9 @@ pub fn build(ctx: &DrawCtx) -> crate::render::draw::MarkBuildResult {
     // Use col_as_ordinal_category_str so integer-typed ordinal columns (e.g.
     // Int64 year values) stringify the same way the ordinal domain was built; a
     // null positional category has no band and places no point.
-    let xs_str = col_as_ordinal_category_str(ctx.batch, xf).ok();
+    let xs_str = ctx.category_strings("x", xf).ok();
     let ys_f64 = col_as_f64(ctx.batch, yf).ok();
-    let ys_str = col_as_ordinal_category_str(ctx.batch, yf).ok();
+    let ys_str = ctx.category_strings("y", yf).ok();
     let n = xs_f64
         .as_ref().map(|v| v.len())
         .or_else(|| xs_str.as_ref().map(|v| v.len()))
@@ -1998,7 +1998,7 @@ mod tests {
         };
         let text = columns(
             Field::new("species", DataType::Utf8, false),
-            Arc::new(StringArray::from(vec!["1000", "2000", "3000"])),
+            Arc::new(StringArray::from(vec!["1970-01-01T00:00:01", "1970-01-01T00:00:02", "1970-01-01T00:00:03"])),
         );
         let batch = columns(
             Field::new("species", DataType::Timestamp(TimeUnit::Millisecond, None), false),

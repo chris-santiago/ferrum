@@ -16,8 +16,8 @@ pub(crate) enum TemporalKeyChannel {
 /// A series mark's own partition of four rows whose key column `k` is a
 /// `Timestamp` holding two instants (rows 0 and 1, then rows 2 and 3), bound
 /// to `key`. A color key carries a hand-built categorical scale over the two
-/// instants' epoch strings (the scale resolver refuses a temporal key it is
-/// asked to enumerate, so this is the one way a builder's own read sees it).
+/// instants' label strings (a hand-built scale, so the builder's own read of the
+/// key is what is pinned, not the resolver's domain).
 /// Shared by `line`, `area` and `ribbon`, whose `series_groups` take the same
 /// context, so each pins its own key reads with one fixture.
 pub(crate) fn temporal_key_partition(
@@ -72,7 +72,7 @@ pub(crate) fn temporal_key_partition(
         TemporalKeyChannel::Color => {
             draw_spec.encoding.color = field("k");
             scales.color = Some(ColorScale::Categorical {
-                domain: vec!["1000".into(), "2000".into()],
+                domain: vec!["1970-01-01T00:00:01".into(), "1970-01-01T00:00:02".into()],
                 palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
             });
             MarkKwargsSpec::default()

@@ -950,3 +950,62 @@ def test_the_merge_still_warns_about_a_discarded_theme():
     assert [m for m in messages if "theme" in m], (
         f"the RHS theme IS still discarded and must still warn; got {messages}"
     )
+
+
+# ---------------------------------------------------------------------------
+# An exchanged date lands on a date category axis
+# ---------------------------------------------------------------------------
+#
+# A flipped box over dates makes the panel's y a date category axis. A coordless layer is
+# exchanged onto it, so its y column (the dates) lands on that axis: it is servable, because the
+# axis is of dates (a text category axis refuses an undeclared date there, above). The point
+# layer draws on each date's band, as the same layers over the dates' label text do.
+
+_EXCHANGE_DAYS = [dt.datetime(2020, 1, d) for d in (3, 1, 2)]
+
+
+def _exchange_frame(as_text: bool) -> pl.DataFrame:
+    frame = pl.DataFrame(
+        {
+            "k": [day for day in _EXCHANGE_DAYS for _ in range(5)],
+            "v": [float(i * 10 + r + 1) for i in range(3) for r in range(5)],
+        }
+    ).sort("k", maintain_order=True)
+    if as_text:
+        frame = frame.with_columns(pl.col("k").dt.strftime("%Y-%m-%d"))
+    return frame
+
+
+def _exchange_chart(door: str, frame: pl.DataFrame):
+    lead = fm.Chart(frame).mark_boxplot().encode(x="k", y="v").coord(fm.CoordFlip())
+    member = fm.Chart(frame).mark_point().encode(x="v", y="k")
+    if door == "+":
+        return lead + member
+    if door == "fm.layer":
+        return fm.layer(lead, member)
+    return fm.LayerChart(lead, member)
+
+
+def _exchange_outcome(chart, output: str):
+    """What the chart draws (svg, or the scene without tooltips) and every warning, in order."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if output == "static":
+            drawn = chart.to_svg()
+        else:
+            drawn = json.loads(chart.interactive().scene_json)
+            for panel in drawn["panels"]:
+                for batch in panel["marks"]:
+                    batch.pop("tooltips", None)
+    return drawn, [str(w.message) for w in caught]
+
+
+@pytest.mark.parametrize("output", ["static", "interactive"])
+@pytest.mark.parametrize("door", ["+", "fm.layer", "LayerChart"])
+def test_an_exchanged_date_lands_on_a_date_category_axis(door: str, output: str):
+    drawn, messages = _exchange_outcome(_exchange_chart(door, _exchange_frame(False)), output)
+    twin, twin_messages = _exchange_outcome(_exchange_chart(door, _exchange_frame(True)), output)
+    assert messages == twin_messages == []
+    assert drawn == twin
+    if output == "static":
+        assert len(_circles(drawn)) == 15

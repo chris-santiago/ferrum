@@ -43,10 +43,11 @@
 //! Everything in this module is consumed by Task 5b's composite render core
 //! ([`crate::render::composite_render`]) and the D4b scale seam, which reach it
 //! from within the crate.
+use crate::render::category_read::{establishes_dates, timestamp_read, CategoryDomain, TimestampRead};
 use crate::render::scale_resolve::{
     add_distinct_source, admitted_aux_reads, admitted_color_reads, binned_color_sources, finite_sorted, apply_sort_to_domain, aux_category_union, aux_numeric_union, aux_reads, chart_sort_rows, establishing_sort_rows, AuxRead, ColorReads,
     SortContext,
-    distinct_values_in_order, extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
+    extend_extent_to_zero, infer_spec_type, locate_field, locate_seed_field,
     establishing_caller_scale, explicit_ordinal_domain, is_categorical_scale, numeric_domain_union_over, numeric_extent, positional_category_union,
     column_reads_categorical, fold_log_input_into_tally, log_axis_name, log_axis_statistic_field, resolve_color_scale, resolve_log_extent, sided_aux_numeric_union, sided_min_max_f64, warn_members_off_caller_scale, AxisMember, AxisMembers, Channel, ColorScale, FacetExtentPolicy, LayerUnion, LeafScaleContext, LeftOutTally, SharedDomain, SidedExtent,
 };
@@ -54,6 +55,7 @@ use crate::render::{prepare, ExcludedLayerPlacement, RenderError, RenderWarning}
 use crate::spec::chart::ChartSpec;
 use crate::spec::composite::{CompositeLayout, CompositeNode};
 use crate::spec::encoding::DataType as SpecDataType;
+use crate::spec::mark::Mark;
 use crate::layout::facet::ResolveMode;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
@@ -629,6 +631,7 @@ fn resolve_group(
             domains.push((idx, d));
         }
     }
+    promote_dates_to_the_groups_date_axis(group, &mut domains, channel, leaves)?;
     // `size` has no caller-scale concept (unlike x/y),
     // so the group's `Log`-ness is decided by its members' OWN scales —
     // the first contributing member declaring one establishes the side and
@@ -666,6 +669,67 @@ fn resolve_group(
         }
     }
     assign_union(&domains, channel, leaves, out)
+}
+
+/// A positional group whose establishing member (the first member drawing
+/// `channel`) establishes a date-category axis ([`establishes_dates`]: its column
+/// is a `Timestamp` its binding reads as categories, with or without a caller's
+/// own band domain) gives every later member whose `Timestamp` binding the owner
+/// then reads as categories ([`timestamp_read`], clause (e)) the group's
+/// categorical axis rather than its own time axis: its domain becomes its own
+/// dates as categories, which the group's union orders in time, so the member
+/// places by label on the one axis the panel draws. An establishing member's
+/// explicit domain is never widened: it is not a contributor to the union, and a
+/// joining member keeps the categories it reads, as its label-text twin does. A
+/// member beside a text axis keeps its own time reading.
+fn promote_dates_to_the_groups_date_axis(
+    group: &[usize],
+    domains: &mut [(usize, SharedDomain)],
+    channel: Channel,
+    leaves: &[LeafResolveInput<'_>],
+) -> Result<(), CompositeResolveError> {
+    if !matches!(channel, Channel::X | Channel::Y) {
+        return Ok(());
+    }
+    let Some((establishing, enc)) =
+        group.iter().find_map(|&idx| leaf_post_flip_encoding(&leaves[idx], channel).map(|enc| (idx, enc)))
+    else {
+        return Ok(());
+    };
+    let leaf = &leaves[establishing];
+    let Some(located) = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
+    else {
+        return Ok(());
+    };
+    let is_date = matches!(located.col.data_type(), arrow::datatypes::DataType::Timestamp(_, _));
+    if !establishes_dates(channel.as_str(), enc, leaf.spec.mark, is_date) {
+        return Ok(());
+    }
+    for (idx, domain) in domains.iter_mut() {
+        if *idx == establishing || !matches!(domain, SharedDomain::Numeric { .. }) {
+            continue;
+        }
+        let leaf = &leaves[*idx];
+        let Some(enc) = leaf_post_flip_encoding(leaf, channel) else { continue };
+        let Some(located) = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs)
+        else {
+            continue;
+        };
+        let is_date = matches!(located.col.data_type(), arrow::datatypes::DataType::Timestamp(_, _));
+        let read = timestamp_read(channel.as_str(), Some(enc), leaf.spec.mark, true);
+        if is_date && read == TimestampRead::Categories {
+            let dates = CategoryDomain::from_column(located.batch, &enc.field, read).map_err(|source| {
+                CompositeResolveError::DomainResolve {
+                    channel: channel.as_str(),
+                    field: enc.field.clone(),
+                    source,
+                    coord_flipped: leaf.names_unflipped(),
+                }
+            })?;
+            *domain = SharedDomain::Ordinal(dates.with_of_dates(true));
+        }
+    }
+    Ok(())
 }
 
 /// Union `domains` and assign the result to each leaf that contributed one.
@@ -717,17 +781,18 @@ fn assign_union(
         }
         SharedDomain::Numeric { lo, hi }
     } else if all_ordinal {
-        let mut cats: Vec<String> = Vec::new();
+        // First appearance across the group, dates in time order (one
+        // [`CategoryDomain`] join); the first leaf's date fact is the group's.
+        let mut cats: Option<CategoryDomain> = None;
         for (_, d) in domains {
             if let SharedDomain::Ordinal(cs) = d {
-                for c in cs {
-                    if !cats.contains(c) {
-                        cats.push(c.clone());
-                    }
+                match cats.as_mut() {
+                    Some(united) => united.join(cs),
+                    None => cats = Some(cs.clone()),
                 }
             }
         }
-        SharedDomain::Ordinal(cats)
+        SharedDomain::Ordinal(cats.unwrap_or_default())
     } else if let (true, Some((_, SharedDomain::Samples { field, bin, .. }))) = (all_samples, domains.first()) {
         // One binned setting (checked above): the panels pool their values,
         // each distinct source once, so every leaf cuts one edge set.
@@ -915,11 +980,14 @@ fn sort_overlay_categories(
         Channel::Y => ctx.y.clone(),
         Channel::Color | Channel::Size => None,
     };
-    let Some(SharedDomain::Ordinal(mut categories)) = slot(&out[establishing]) else { return Ok(()) };
+    let Some(SharedDomain::Ordinal(domain)) = slot(&out[establishing]) else { return Ok(()) };
+    let mut categories = domain.labels();
     sort_member_categories(&mut categories, sort, enc, &leaves[establishing], channel, warnings)?;
+    // The sorted order is authoritative; the date fact is the group's own.
+    let sorted = CategoryDomain::from_labels(categories).with_of_dates(domain.of_dates());
     for &idx in group {
         if matches!(slot(&out[idx]), Some(SharedDomain::Ordinal(_))) {
-            out[idx].set(channel, SharedDomain::Ordinal(categories.clone()));
+            out[idx].set(channel, SharedDomain::Ordinal(sorted.clone()));
         }
     }
     Ok(())
@@ -973,20 +1041,21 @@ fn establishing_categories(
     channel: Channel,
     enc: &crate::spec::encoding::EncodingSpec,
     warnings: &mut Vec<RenderWarning>,
-) -> Result<Option<Vec<String>>, CompositeResolveError> {
+) -> Result<Option<CategoryDomain>, CompositeResolveError> {
     if let Some(stated) = explicit_ordinal_domain(enc) {
-        return Ok(Some(stated));
+        return Ok(Some(CategoryDomain::from_labels(stated)));
     }
     let Some(located) = locate_seed_field(channel.as_str(), &enc.field, leaf.spec, leaf.final_batch, leaf.transform_outputs) else {
         return Ok(None);
     };
-    let mut categories = distinct_values_in_order(located.batch, &enc.field).map_err(|source| {
+    let read = timestamp_read(channel.as_str(), Some(enc), leaf.spec.mark, false);
+    let domain = CategoryDomain::from_column(located.batch, &enc.field, read).map_err(|source| {
         CompositeResolveError::DomainResolve { channel: channel.as_str(), field: enc.field.clone(), source, coord_flipped: leaf.names_unflipped() }
     })?;
-    if let Some(sort) = enc.sort.as_ref() {
-        sort_member_categories(&mut categories, sort, enc, leaf, channel, warnings)?;
-    }
-    Ok(Some(categories))
+    let Some(sort) = enc.sort.as_ref() else { return Ok(Some(domain)) };
+    let mut categories = domain.labels();
+    sort_member_categories(&mut categories, sort, enc, leaf, channel, warnings)?;
+    Ok(Some(CategoryDomain::from_labels(categories).with_of_dates(domain.of_dates())))
 }
 
 /// Give every member of an `Overlay` group that draws nothing on the
@@ -1276,7 +1345,7 @@ fn refuse_unplaceable_overlay_members<'a>(
             // resolve can rescue it.
             match leaf_channel_domain(&leaves[group[position]], channel, &mut LeftOutTally::new(), &out[group[position]])? {
                 Some(SharedDomain::Numeric { .. }) => (position, PanelAxisKind::Continuous),
-                Some(SharedDomain::Ordinal(_)) => (position, PanelAxisKind::Categorical),
+                Some(SharedDomain::Ordinal(domain)) => (position, PanelAxisKind::Categorical { of_dates: domain.of_dates() }),
                 // `Samples` and `FixedBins` are binned colors' domains, never an axis's.
                 Some(SharedDomain::Samples { .. } | SharedDomain::FixedBins { .. }) | None => return Ok(()),
             }
@@ -1299,7 +1368,7 @@ fn refuse_unplaceable_overlay_members<'a>(
         // merged-flat routes name.
         let exchanged_by = (member_flipped != panel_flipped)
             .then(|| leaf.spec.coord.as_ref().unwrap_or(&inherited_cartesian));
-        if exchanged_by.is_none() && axis_kind == PanelAxisKind::Categorical {
+        if exchanged_by.is_none() && matches!(axis_kind, PanelAxisKind::Categorical { .. }) {
             continue;
         }
         // `resolve_channel`, the only caller, resolves positional channels
@@ -1333,6 +1402,7 @@ fn refuse_unplaceable_overlay_members<'a>(
                 channel.as_str(),
                 &enc.field,
                 located.col.data_type(),
+                enc,
                 axis_kind,
             )
             // Named by the member's own overlay position on every member
@@ -1648,7 +1718,7 @@ fn leaf_positional_domain(
             // fail the leaf's whole domain resolve.
             let cats = positional_category_union(
                 channel.as_str(),
-                &enc.field,
+                enc,
                 leaf.final_batch,
                 leaf.transform_outputs,
                 leaf.spec,
@@ -1761,11 +1831,13 @@ fn leaf_color_domain(
             Ok(union.map(|(lo, hi)| SharedDomain::Numeric { lo, hi }))
         }
         (false, None) => {
-            let cats = distinct_values_in_order(located.batch, &enc.field).map_err(resolve_error)?;
+            let mark = if force_categorical { Mark::Area } else { leaf.spec.mark };
+            let read = timestamp_read("color", Some(enc), mark, false);
+            let cats = CategoryDomain::from_column(located.batch, &enc.field, read).map_err(resolve_error)?;
             Ok(Some(SharedDomain::Ordinal(cats)))
         }
         (false, Some(reads)) => {
-            let union = aux_category_union(&reads, leaf.final_batch, leaf.transform_outputs, false).map_err(resolve_error)?;
+            let union = aux_category_union(&reads, "color", leaf.final_batch, leaf.transform_outputs, false).map_err(resolve_error)?;
             Ok(union.map(|(cats, ..)| SharedDomain::Ordinal(cats)))
         }
     }
@@ -2597,7 +2669,7 @@ mod tests {
         let inputs = [input(&l0), input(&l1)];
         let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // First-appearance order across the group: b, a (leaf0), then c (new in leaf1).
-        let expect = Some(SharedDomain::Ordinal(vec!["b".into(), "a".into(), "c".into()]));
+        let expect = Some(SharedDomain::ordinal(vec!["b".into(), "a".into(), "c".into()]));
         assert_eq!(ctx[0].x, expect);
         assert_eq!(ctx[1].x, expect);
     }
@@ -2652,7 +2724,7 @@ mod tests {
         let inputs = [input(&l0), input(&l1)];
         let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).unwrap();
         // First-appearance order across the group: b, a (leaf0), then c (new in leaf1).
-        let expect = Some(SharedDomain::Ordinal(vec!["b".into(), "a".into(), "c".into()]));
+        let expect = Some(SharedDomain::ordinal(vec!["b".into(), "a".into(), "c".into()]));
         assert_eq!(ctx[0].color, expect);
         assert_eq!(ctx[1].color, expect);
     }
@@ -4893,12 +4965,13 @@ mod tests {
     /// A later layer whose `CoordFlip` lands a column on an axis of layer
     /// 0's that cannot draw it refuses on both routes with the same refusal,
     /// the exchanged channel naming the column and the axis kind it cannot
-    /// serve, on either kind of panel axis: a string column on the continuous
-    /// y, a timestamp on the categorical x. A flipped layer whose exchanged
-    /// columns suit the axes they land on renders on both: numeric columns
-    /// (servable on the continuous y and keyable on the categorical x), and
-    /// a string column landing on the categorical x, which only a categorical
-    /// judgment of that axis accepts.
+    /// serve: a string column on the continuous y, an undeclared timestamp on the
+    /// categorical x (a time axis, which a band axis cannot draw). A flipped layer
+    /// whose exchanged columns suit the axes they land on renders on both: numeric
+    /// columns (servable on the continuous y and keyable on the categorical x), a
+    /// string column landing on the categorical x, which only a categorical
+    /// judgment of that axis accepts, and a timestamp the owner reads as
+    /// categories because its binding declares nominal.
     #[test]
     fn a_flipped_layers_unservable_exchanged_column_refuses_on_both_routes() {
         use crate::spec::coord::CoordKind;
@@ -4936,15 +5009,26 @@ mod tests {
             assert_eq!(flat, Ok(()), "+ renders a flipped layer x={x1}, y={y1} whose columns suit the panel");
             assert_eq!(layered, Ok(()), "fm.layer renders a flipped layer x={x1}, y={y1} whose columns suit the panel");
         }
+
+        // The same timestamp declared nominal is a category, so the band axis serves it.
+        let mut declared = xy_spec("v", "t", Some(CoordKind::Flip));
+        declared.encoding.y.as_mut().expect("y").type_ = Some(SpecDataType::Nominal);
+        let (flat, layered) = render_on_both_layering_routes(
+            &batch,
+            xy_spec("s", "v", None),
+            declared,
+            Some(CoordKind::Flip),
+        );
+        assert_eq!(flat, Ok(()), "+ renders a declared-nominal date on the categorical axis");
+        assert_eq!(layered, Ok(()), "fm.layer renders a declared-nominal date on the categorical axis");
     }
 
     /// The mirror: layer 0 flipped and a later layer declaring no coord. `+`
     /// stamps `fm.CoordCartesian` on that layer, and `fm.layer` names the
     /// same coord for it, so both routes refuse a column the exchange lands
-    /// on an axis that cannot draw it with the same refusal, on either kind
-    /// of panel axis: a string column on a continuous x, a timestamp on a
-    /// categorical x. A later layer whose columns suit the axes they land on
-    /// renders on both.
+    /// on an axis that cannot draw it with the same refusal: a string column on a
+    /// continuous x, an undeclared timestamp on a categorical x. A later layer
+    /// whose columns suit the axes they land on renders on both.
     #[test]
     fn a_coordless_layer_beside_a_flipped_first_layer_refuses_on_both_routes() {
         use crate::spec::coord::CoordKind;
@@ -5340,7 +5424,7 @@ mod tests {
         let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new(), &LeafScaleContext::default())
             .expect("every category column is Utf8");
         let expected: Vec<String> = ["a", "b", "x", "y"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));
+        assert_eq!(domain, Some(SharedDomain::ordinal(expected)));
     }
 
     /// The other live `+` lowering on the composite path: a chainless left
@@ -5374,7 +5458,7 @@ mod tests {
         let domain = leaf_positional_domain(&input(&leaf), Channel::X, LayerUnion::Every, &mut LeftOutTally::new(), &LeafScaleContext::default())
             .expect("every category column is Utf8");
         let expected: Vec<String> = ["c", "a", "b"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(domain, Some(SharedDomain::Ordinal(expected)));
+        assert_eq!(domain, Some(SharedDomain::ordinal(expected)));
     }
 
     // -- establishing member and layer -----------------------------------------
@@ -5410,7 +5494,7 @@ mod tests {
         );
         let inputs = [input(&rule), input(&bars)];
         let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("the group resolves");
-        let categories = SharedDomain::Ordinal(vec!["a".to_string(), "b".to_string()]);
+        let categories = SharedDomain::ordinal(vec!["a".to_string(), "b".to_string()]);
         let (binding, domain) = ctx[0].imposed(Channel::X).expect("the rule takes the bars' x axis");
         assert_eq!(binding.field, "g");
         assert_eq!(binding.type_, Some(SpecDataType::Nominal), "typed by the column the bars draw");
@@ -5418,6 +5502,154 @@ mod tests {
         assert_eq!(ctx[1].x.as_ref(), Some(&categories));
         assert!(ctx[1].imposed(Channel::X).is_none(), "a member drawing x keeps its own axis");
         assert!(ctx[0].imposed(Channel::Y).is_none() && ctx[1].imposed(Channel::Y).is_none(), "both draw y");
+    }
+
+    /// A leaf of dates: a `Timestamp` `g` (day numbers since the epoch) and a
+    /// value `v`, `g` bound with `declared` (None leaves it undeclared).
+    fn date_leaf(days: &[i64], declared: Option<SpecDataType>) -> LeafOwned {
+        let encoding = Encoding {
+            x: Some(EncodingSpec { field: "g".into(), type_: declared, ..Default::default() }),
+            y: Some(enc("v")),
+            ..Encoding::default()
+        };
+        LeafOwned {
+            spec: spec_with(encoding.clone()),
+            encoding,
+            batch: RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("g", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![
+                    Arc::new(arrow::array::TimestampMillisecondArray::from(
+                        days.iter().map(|d| d * 86_400_000).collect::<Vec<_>>(),
+                    )),
+                    Arc::new(Float64Array::from(vec![1.0; days.len()])),
+                ],
+            )
+            .unwrap(),
+            outputs: HashMap::new(),
+        }
+    }
+
+    /// Members of an overlay group holding different dates share one axis whose
+    /// categories are every date in time order, whichever member lists them first.
+    #[test]
+    fn an_overlay_group_merges_date_categories_in_time_order() {
+        let first = date_leaf(&[2, 0], Some(SpecDataType::Nominal));
+        let second = date_leaf(&[1, 0, 3], Some(SpecDataType::Nominal));
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("g"), Some("v")), leaf_node(Some("g"), Some("v"))],
+            shared_both(),
+        );
+        let ctx = resolve_composite_scales(&tree, &[input(&first), input(&second)], &mut Vec::new()).expect("the group resolves");
+        let Some(SharedDomain::Ordinal(domain)) = ctx[1].x.as_ref() else { panic!("a categorical group axis: {:?}", ctx[1].x) };
+        assert_eq!(domain.labels(), ["1970-01-01", "1970-01-02", "1970-01-03", "1970-01-04"]);
+        assert!(domain.of_dates(), "the axis is one of dates");
+        assert_eq!(ctx[0].x, ctx[1].x, "every member shares the one axis");
+    }
+
+    /// A member whose date binding is undeclared takes the group's date-category
+    /// axis: its domain becomes its dates as categories, and its leaf scale is the
+    /// group's ordinal scale carrying the date fact, not its own time scale.
+    /// Beside a text axis it keeps its own reading.
+    #[test]
+    fn an_overlay_member_over_dates_takes_the_groups_date_category_axis() {
+        let establishing = date_leaf(&[0, 1], Some(SpecDataType::Nominal));
+        let member = date_leaf(&[1, 2], None);
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("g"), Some("v")), leaf_node(Some("g"), Some("v"))],
+            shared_both(),
+        );
+        let ctx = resolve_composite_scales(&tree, &[input(&establishing), input(&member)], &mut Vec::new()).expect("the group resolves");
+        let Some(SharedDomain::Ordinal(domain)) = ctx[1].x.as_ref() else { panic!("the member joins the group axis: {:?}", ctx[1].x) };
+        assert_eq!(domain.labels(), ["1970-01-01", "1970-01-02", "1970-01-03"]);
+        assert!(domain.of_dates());
+
+        let text = LeafOwned {
+            spec: spec_with(Encoding { x: Some(enc("g")), y: Some(enc("v")), ..Encoding::default() }),
+            encoding: Encoding { x: Some(enc("g")), y: Some(enc("v")), ..Encoding::default() },
+            batch: RecordBatch::try_new(
+                Arc::new(Schema::new(vec![
+                    Field::new("g", DataType::Utf8, false),
+                    Field::new("v", DataType::Float64, false),
+                ])),
+                vec![Arc::new(StringArray::from(vec!["a", "b"])), Arc::new(Float64Array::from(vec![3.0, 5.0]))],
+            )
+            .unwrap(),
+            outputs: HashMap::new(),
+        };
+        let beside_text = date_leaf(&[1, 2], None);
+        let ctx = resolve_composite_scales(&tree, &[input(&text), input(&beside_text)], &mut Vec::new());
+        // A temporal member beside a text axis is unchanged: a text axis and a time
+        // axis share no domain, so the group assigns neither member one, and the
+        // member never takes the text axis's labels or a date category axis.
+        let ctx = ctx.expect("the group resolves");
+        assert_eq!(ctx.iter().map(|leaf| leaf.x.clone()).collect::<Vec<_>>(), [None, None]);
+    }
+
+    /// A lead whose band scale states its domain is never widened by a joining
+    /// layer: the lead contributes nothing to the group's union, and a later layer
+    /// over dates takes the same domain its label-text twin does (its own
+    /// categories, dates in time order), so the date overlay and the text twin lay
+    /// out alike. Fails when a later date is left on its own time axis.
+    #[test]
+    fn an_explicit_band_domain_is_not_widened_by_a_joining_date_layer_and_matches_the_text_twin() {
+        let band: crate::spec::encoding::ScaleSpec =
+            serde_json::from_str(r#"{"type":"band","domain":["1970-01-01","1970-01-02"]}"#).unwrap();
+        let lead_encoding = Encoding {
+            x: Some(EncodingSpec { field: "g".into(), type_: Some(SpecDataType::Nominal), scale: Some(band), ..Default::default() }),
+            y: Some(enc("v")),
+            ..Encoding::default()
+        };
+        let later_encoding = Encoding { x: Some(enc("g")), y: Some(enc("v")), ..Encoding::default() };
+        let text_batch = |vals: &[&str]| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("g", DataType::Utf8, false), Field::new("v", DataType::Float64, false)])),
+                vec![Arc::new(StringArray::from(vals.to_vec())), Arc::new(Float64Array::from(vec![1.0; vals.len()]))],
+            )
+            .unwrap()
+        };
+        let days = ["1970-01-01", "1970-01-02", "1970-01-03"];
+        let text_leaf = |encoding: &Encoding| LeafOwned {
+            spec: spec_with(encoding.clone()),
+            encoding: encoding.clone(),
+            batch: text_batch(&days),
+            outputs: HashMap::new(),
+        };
+        let date_leaf_with = |encoding: &Encoding, declared: Option<SpecDataType>| {
+            let mut leaf = date_leaf(&[0, 1, 2], declared);
+            leaf.spec.encoding = encoding.clone();
+            leaf.encoding = encoding.clone();
+            leaf
+        };
+        let tree = composite(
+            CompositeLayout::Overlay,
+            vec![leaf_node(Some("g"), Some("v")), leaf_node(Some("g"), Some("v"))],
+            shared_both(),
+        );
+        let domains = |lead: &LeafOwned, later: &LeafOwned| {
+            let ctx = resolve_composite_scales(&tree, &[input(lead), input(later)], &mut Vec::new()).expect("the group resolves");
+            ctx.iter()
+                .map(|leaf| match &leaf.x {
+                    Some(SharedDomain::Ordinal(domain)) => Some(domain.labels()),
+                    other => {
+                        assert!(other.is_none(), "an ordinal or no shared domain, got {other:?}");
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let twin = domains(&text_leaf(&lead_encoding), &text_leaf(&later_encoding));
+        assert_eq!(twin[0], None, "the lead keeps its stated domain");
+        for later_declared in [None, Some(SpecDataType::Temporal)] {
+            let mut later_encoding = later_encoding.clone();
+            later_encoding.x.as_mut().expect("x").type_ = later_declared;
+            let dates = domains(&date_leaf_with(&lead_encoding, Some(SpecDataType::Nominal)), &date_leaf_with(&later_encoding, later_declared));
+            assert_eq!(dates, twin, "a later date {later_declared:?} resolves as its label-text twin does");
+        }
     }
 
     /// A layered leaf's color domain is read as its own color scale reads it:
@@ -5460,7 +5692,7 @@ mod tests {
         let inputs = [input(&layered), input(&plain)];
         let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("resolves");
         let expected: Vec<String> = ["p", "q", "r", "s"].iter().map(|s| s.to_string()).collect();
-        assert_eq!(ctx[0].color, Some(SharedDomain::Ordinal(expected)));
+        assert_eq!(ctx[0].color, Some(SharedDomain::ordinal(expected)));
     }
 
     /// An `Overlay` group whose axis a caller's continuous scale establishes
@@ -5524,7 +5756,7 @@ mod tests {
         );
         let inputs = [input(&rule), input(&bars)];
         let ctx = resolve_composite_scales(&tree, &inputs, &mut Vec::new()).expect("resolves");
-        let order = SharedDomain::Ordinal(["c", "b", "a"].iter().map(|s| s.to_string()).collect());
+        let order = SharedDomain::ordinal(["c", "b", "a"].iter().map(|s| s.to_string()));
         assert_eq!(ctx[1].x.as_ref(), Some(&order), "the bars' own w orders them");
         assert_eq!(ctx[0].imposed(Channel::X).and_then(|(_, domain)| domain), Some(&order));
     }
@@ -5636,7 +5868,7 @@ mod tests {
                 assert_eq!(binding.scale.as_ref(), Some(&scale));
                 assert!(binding.sort.is_none(), "the order is in the domain");
                 let categories: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-                assert_eq!(domain, Some(&SharedDomain::Ordinal(categories)), "{scale:?} {sort:?}");
+                assert_eq!(domain, Some(&SharedDomain::ordinal(categories)), "{scale:?} {sort:?}");
             }
         }
     }

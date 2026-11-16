@@ -10,8 +10,8 @@ two-arm chain that accepted `Float64` (keyed on `f64::to_bits`) and `Utf8`
 raised `Stack: x column must be Float64 or Utf8` on an `Int64` category column
 while the identical column dodged, jittered and laid out bands. The key now
 comes from `arrow_cast::col_as_identity_key_str`: the reader the ordinal band
-ladder itself is enumerated with, falling back to the temporal epoch reader for
-`Timestamp`. So a stack's groups ARE its bands wherever a band ladder exists, and
+ladder itself is enumerated with, which labels a `Timestamp` as its ISO date (a midnight)
+or full date-time. So a stack's groups ARE its bands wherever a band ladder exists, and
 are the exact value where one does not -- which is also what makes a stacked time
 series render (`mark_area(position=fm.Stack())` over a date x raised for every
 input before).
@@ -47,7 +47,7 @@ from _svg_rects import data_bar_rects, mark_layer, svg_elements
 # invert it. The pending hoist recorded here is done: they now live in
 # `_svg_extents`, whose tick primitives they are built on, instead of in a
 # sibling test module.
-from _svg_extents import pixel_for, value_axis_ladder
+from _svg_extents import pixel_for, text_runs, value_axis_ladder
 
 #: How many rows `category_frame` carries per category level, and therefore how
 #: many stacked segments each bar is built from once a segment column is added.
@@ -178,47 +178,48 @@ def test_int64_category_stacks_where_it_used_to_refuse() -> None:
     assert numeric == reference
 
 
-def _temporal_frame() -> pl.DataFrame:
-    """Two dates x five segments -- a `Timestamp(ms)` category column after
-    `_coerce.normalize_for_rust` pre-casts the polars `Date`."""
-    return _with_segments(
+def test_nominal_temporal_stack_draws_a_stacked_bar_per_date_in_time_order() -> None:
+    """A temporal column *declared nominal or ordinal* is a category axis: one band per
+    distinct date in time order, labelled by its ISO text, each band a stack of its own five
+    segments. The rows list the later date first, so a first-appearance order would put the
+    bands the other way round; the geometry is the label-text twin's, and each band's total
+    height is the value axis's 15 (1 + 2 + 3 + 4 + 5)."""
+    frame = _with_segments(
         pl.DataFrame(
             {
-                "cat": [dt.date(2024, 1, 1)] * 5 + [dt.date(2024, 1, 2)] * 5,
+                "cat": [dt.date(2024, 1, 2)] * 5 + [dt.date(2024, 1, 1)] * 5,
                 "value": [1.0, 2.0, 3.0, 4.0, 5.0] * 2,
             }
         )
     )
 
+    def render(data: pl.DataFrame) -> str:
+        return (
+            fm.Chart(data)
+            .mark_bar(position=fm.Stack())
+            .encode(x=fm.X("cat", type_="N"), y="value", color="seg")
+            .to_svg()
+        )
 
-def test_nominal_temporal_stack_refuses_at_the_scale_naming_the_column() -> None:
-    """A temporal column *declared nominal or ordinal* still refuses, one layer
-    earlier: the scale could not enumerate a band ladder for it, and says so as a
-    typed `ValueError` naming the column and its dtype -- never a raw Arrow
-    error.
-
-    **This refusal is a separate defect, filed separately, and deliberately NOT
-    fixed here.** It lives in the enumeration layer
-    (`arrow_cast::distinct_values_in_order`, which excludes `Timestamp` by
-    documented contract because an epoch read through the `f64` widening is not
-    injective past `2^53`), not in the stack's keying chain -- so `#184`'s fix
-    cannot reach it, and a temporal x declared `:N`/`:O` never gets as far as
-    `apply_stack`. The test exists to pin WHICH layer speaks and to keep today's
-    behavior honest while that defect is open: the continuous temporal stack now
-    renders (see `test_temporal_stack_renders_a_stacked_time_series`), so without
-    this pin the two spellings could silently diverge in message quality.
-    """
-    chart = (
-        fm.Chart(_temporal_frame())
-        .mark_bar(position=fm.Stack())
-        .encode(x=fm.X("cat", type_="N"), y="value", color="seg")
-    )
-    with pytest.raises(ValueError) as excinfo:
-        chart.to_svg()
-
-    message = str(excinfo.value)
-    assert "unsupported dtype" in message, message
-    assert "'cat'" in message and "Timestamp" in message, message
+    svg = render(frame)
+    twin = render(frame.sort("cat", maintain_order=True).with_columns(pl.col("cat").cast(pl.Utf8)))
+    labels = [t for t in text_runs(svg) if t.startswith("2024-")]
+    assert labels == ["2024-01-01", "2024-01-02"]
+    rects = [
+        (float(a["x"]), float(a["y"]), float(a["width"]), float(a["height"]))
+        for a in data_bar_rects(mark_layer(svg))
+    ]
+    bands = _bars_by_x(rects)
+    assert len(bands) == 2 and all(len(r) == _SEGMENTS_PER_BAR for r in bands.values())
+    ladder = value_axis_ladder(svg, axis="y")
+    base = pixel_for(ladder, 0.0)
+    for x, band in bands.items():
+        top = min(r[1] for r in band)
+        assert base - top == pytest.approx(base - pixel_for(ladder, 15.0), abs=0.01), x
+    assert [t for t in text_runs(twin) if t.startswith("2024-")] == labels
+    assert sorted(
+        (float(a["x"]), float(a["width"])) for a in data_bar_rects(mark_layer(twin))
+    ) == sorted((r[0], r[2]) for r in rects)
 
 
 #: Two groups over three dates. The per-date stacked totals are 5, 7 and 9,

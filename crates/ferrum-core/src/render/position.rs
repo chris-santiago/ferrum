@@ -3393,20 +3393,20 @@ mod tests {
     /// split's error, not stacked across panels as one stack.
     #[test]
     fn stack_preview_refuses_a_facet_field_the_panel_split_cannot_read() {
-        use arrow::array::TimestampMillisecondArray;
+        use arrow::array::DurationMillisecondArray;
         use arrow::datatypes::TimeUnit;
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
                 Field::new("x", DataType::Utf8, false),
                 Field::new("y", DataType::Float64, false),
                 Field::new("g", DataType::Utf8, false),
-                Field::new("h", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+                Field::new("h", DataType::Duration(TimeUnit::Millisecond), false),
             ])),
             vec![
                 Arc::new(StringArray::from(vec!["a", "a"])),
                 Arc::new(Float64Array::from(vec![1.0, 2.0])),
                 Arc::new(StringArray::from(vec!["g1", "g2"])),
-                Arc::new(TimestampMillisecondArray::from(vec![1, 2])),
+                Arc::new(DurationMillisecondArray::from(vec![1, 2])),
             ],
         )
         .unwrap();
@@ -3420,9 +3420,9 @@ mod tests {
                 crate::render::RenderError::UnsupportedDtype {
                     field: "h".into(),
                     dtype: format!(
-                        "{:?} (a facet field holds strings, integers, floats or booleans; cast \
+                        "{:?} (a facet field holds strings, integers, floats, booleans or dates; cast \
                          'h' to a string to facet by it)",
-                        DataType::Timestamp(TimeUnit::Millisecond, None),
+                        DataType::Duration(TimeUnit::Millisecond),
                     ),
                     context: Some("facet"),
                 }
@@ -4879,30 +4879,18 @@ mod tests {
     }
 
     /// The relationship that holds between what `apply_stack` keys and what the
-    /// band ladder enumerates: every dtype the ladder can enumerate stacks, AND
-    /// `Timestamp` — which the ladder deliberately cannot enumerate — stacks
-    /// too, by exact instant.
+    /// band ladder enumerates: exactly the dtypes the ladder can enumerate
+    /// (`Timestamp` included, one bin per instant).
     ///
     /// This is deliberately NOT a call to `col_as_identity_key_str`, which is
     /// the function under test; it restates the contract in the terms the
-    /// crate's own gate (`ensure_category_keyable`) and the documented temporal
-    /// exception are written in, so a change to the reader's coverage has to
-    /// disagree with the rule rather than move it along.
-    ///
-    /// An earlier version of this guard asserted `acceptance ==
-    /// ensure_category_keyable`, which was too narrow rather than wrong in kind:
-    /// it encoded the premise that a stack can only bin by a *band*. A stack
-    /// over a continuous axis bins by exact value (an `Int32` x:Q stacks to its
-    /// group sum through the same reader), and `Timestamp` is exactly the dtype
-    /// whose exact value the category reader cannot spell — so equality with the
-    /// band-keyable set would have kept every stacked time series refused.
-    /// Widening it to "keyable or temporal" keeps both directions live: a
-    /// narrowing back to `Float64`/`Utf8` fails on the matrix, and a widening to
-    /// a dtype neither identity reader covers (`Duration`, `Date32`) fails on
-    /// `stack_refuses_a_column_that_cannot_identify_a_row`.
+    /// crate's own gate (`ensure_category_keyable`) is written in, so a change
+    /// to the reader's coverage has to disagree with the rule rather than move
+    /// it along. A narrowing back to `Float64`/`Utf8` fails on the matrix, and
+    /// a widening to a dtype the category reader refuses (`Duration`, `Date32`)
+    /// fails on `stack_refuses_a_column_that_cannot_identify_a_row`.
     fn stack_accepts_dtype(dtype: &DataType) -> bool {
-        crate::render::arrow_cast::ensure_category_keyable("x", dtype).is_ok()
-            || matches!(dtype, DataType::Timestamp(_, _))
+        crate::render::arrow_cast::ensure_category_keyable("x", dtype, crate::render::category_read::TimestampRead::Categories).is_ok()
     }
 
     /// A stacked time series renders, and it stacks by the INSTANT: two rows
@@ -4939,15 +4927,8 @@ mod tests {
         );
         assert!(warnings.is_empty(), "a temporal stack must not warn: {warnings:?}");
         assert!(
-            stack_accepts_dtype(&DataType::Timestamp(TimeUnit::Millisecond, None))
-                && crate::render::arrow_cast::ensure_category_keyable(
-                    "x",
-                    &DataType::Timestamp(TimeUnit::Millisecond, None)
-                )
-                .is_err(),
-            "Timestamp is the documented case where stack accepts what the band \
-             ladder cannot enumerate — if that stops being true, the acceptance \
-             rule above is no longer describing anything"
+            stack_accepts_dtype(&DataType::Timestamp(TimeUnit::Millisecond, None)),
+            "a Timestamp category column stacks, one bin per instant"
         );
     }
 
@@ -5032,7 +5013,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            crate::render::arrow_cast::distinct_values_in_order(&batch, "x").unwrap(),
+            crate::render::category_read::CategoryDomain::from_column(&batch, "x", crate::render::category_read::TimestampRead::Categories)
+                .unwrap()
+                .labels(),
             vec!["0".to_string()],
             "premise: the ladder this stack must agree with has one band here, and a null has none"
         );

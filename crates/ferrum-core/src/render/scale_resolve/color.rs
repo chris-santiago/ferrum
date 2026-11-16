@@ -8,14 +8,16 @@ use arrow::record_batch::RecordBatch;
 use crate::layout::ThemeInputs;
 use crate::spec::encoding::DataType as SpecDataType;
 
+use crate::render::category_read::{timestamp_read, CategoryDomain};
 use crate::render::color::Color;
+use crate::spec::mark::Mark;
 use crate::render::color::palette;
 use crate::render::series_keys::ColorSplit;
 use crate::render::RenderError;
 
 use super::domain::{admitted_color_reads, apply_sort_to_domain, ColorReads, aux_category_union, aux_numeric_union, aux_numeric_values, binned_color_values, legend_sort_context, locate_field, AuxRead, FacetExtentPolicy};
 use crate::transform::core::FINAL_OUTPUT_KEY;
-use super::{distinct_values_in_order, infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
+use super::{infer_spec_type, numeric_extent, shared_categorical_batch, union_panel_with_global_extent, ColorScale, DiscretizedColors, SharedDomain};
 
 /// Resolve the color encoding into a `ColorScale`.
 ///
@@ -350,9 +352,14 @@ pub fn build_color_scale(
         // default path below is byte-identical, since the gate admits exactly
         // the dtypes that builder does (pinned by
         // `arrow_cast::category_readers_accept_exactly_the_dtypes_ensure_category_keyable_does`).
+        // Whether the binding reads a date as categories is the owner's answer
+        // ([`timestamp_read`]); an area is the one mark that groups colour.
+        let mark = if grouping_area.is_some() { Mark::Area } else { Mark::Point };
+        let read = timestamp_read("color", Some(c_enc), mark, false);
         crate::render::arrow_cast::ensure_category_keyable(
             &c_enc.field,
             located.col.data_type(),
+            read,
         )?;
 
         // T3/categorical: when the chart is faceted (Shared), resolve the domain
@@ -365,7 +372,7 @@ pub fn build_color_scale(
         // (`layer_reads`); a data-aware sort then aggregates over the first
         // contributing batch.
         let (layer_categories, domain_batch, lead) =
-            match aux_category_union(layer_reads, primary_batch, transform_outputs, facet_shared)? {
+            match aux_category_union(layer_reads, "color", primary_batch, transform_outputs, facet_shared)? {
                 Some((categories, batch, read)) => (Some(categories), batch, Some(read)),
                 None => (
                     None,
@@ -375,8 +382,8 @@ pub fn build_color_scale(
             };
         let data_categories = |batch| -> Result<Vec<String>, RenderError> {
             match &layer_categories {
-                Some(categories) => Ok(categories.clone()),
-                None => distinct_values_in_order(batch, &c_enc.field),
+                Some(categories) => Ok(categories.labels()),
+                None => CategoryDomain::from_column(batch, &c_enc.field, read).map(|domain| domain.labels()),
             }
         };
 
@@ -1005,7 +1012,7 @@ fn composite_samples(domain: Option<&SharedDomain>) -> Option<Vec<f64>> {
 /// the categorical ([`SharedDomain::Ordinal`]) variant. `None` otherwise.
 fn composite_categorical_domain(domain: Option<&SharedDomain>) -> Option<Vec<String>> {
     match domain? {
-        SharedDomain::Ordinal(cats) => Some(cats.clone()),
+        SharedDomain::Ordinal(cats) => Some(cats.labels()),
         SharedDomain::Numeric { .. } | SharedDomain::Samples { .. } | SharedDomain::FixedBins { .. } => None,
     }
 }

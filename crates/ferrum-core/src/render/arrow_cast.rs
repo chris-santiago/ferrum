@@ -25,7 +25,9 @@ use arrow::array::{
 use arrow::datatypes::{DataType, TimeUnit};
 use arrow::record_batch::RecordBatch;
 
+use super::category_read::{timestamp_read, TimestampRead};
 use super::RenderError;
+use crate::transform::context::format_instant;
 
 /// The label a null category is named by where something must spell it: the
 /// census (`c=null`) and the temporal stack's bin for a null instant.
@@ -108,7 +110,8 @@ pub(crate) fn require_placeable_on_continuous_axis(
 /// The kind of panel axis an exchanged layer's column lands on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::render) enum PanelAxisKind {
-    Categorical,
+    /// A band axis; `of_dates` when its categories are instants.
+    Categorical { of_dates: bool },
     Continuous,
 }
 
@@ -116,7 +119,7 @@ impl PanelAxisKind {
     /// The axis kind as refusal messages spell it.
     pub(in crate::render) fn as_str(self) -> &'static str {
         match self {
-            PanelAxisKind::Categorical => "categorical",
+            PanelAxisKind::Categorical { .. } => "categorical",
             PanelAxisKind::Continuous => "continuous",
         }
     }
@@ -127,22 +130,29 @@ impl PanelAxisKind {
 /// cannot draw it. The one servability question behind
 /// [`super::LayerCoordUnplaceableReason::ExchangedChannelUnservable`], asked
 /// by every route that layers a member whose flip state differs from the
-/// panel's: a categorical axis serves what [`ensure_category_keyable`]
-/// admits, a continuous one what [`supported_numeric_dtype`] admits.
+/// panel's: a categorical axis serves what [`ensure_category_keyable`] admits
+/// under the owner's reading of `binding` ([`timestamp_read`]: an undeclared
+/// date is a time axis, which a band axis cannot draw, unless the axis itself
+/// is of dates), a continuous one what [`supported_numeric_dtype`] admits.
 ///
 /// Carries no layer index: the caller wraps the `Err` in
 /// [`super::RenderError::in_layer_context`] (mirroring `scene_build::
 /// in_layer_voice`), the one place that index is known and voiced.
+#[allow(clippy::too_many_arguments)]
 pub(in crate::render) fn require_exchanged_column_servable(
     mark: crate::spec::mark::Mark,
     coord: &crate::spec::coord::CoordKind,
     channel: &'static str,
     field: &str,
     dtype: &DataType,
+    binding: &crate::spec::encoding::EncodingSpec,
     axis: PanelAxisKind,
 ) -> Result<(), RenderError> {
     let servable = match axis {
-        PanelAxisKind::Categorical => ensure_category_keyable(field, dtype).is_ok(),
+        PanelAxisKind::Categorical { of_dates } => {
+            let read = timestamp_read(channel, Some(binding), mark, of_dates);
+            ensure_category_keyable(field, dtype, read).is_ok()
+        }
         PanelAxisKind::Continuous => supported_numeric_dtype(dtype),
     };
     if servable {
@@ -249,12 +259,15 @@ pub(crate) fn col_as_str(batch: &RecordBatch, field: &str) -> Result<Vec<Option<
 ///   `2000.0` → `"2000"`), so integer-valued float columns behave identically
 ///   to Int64 ordinal columns.
 /// - Boolean → `"true"` / `"false"` (same as `distinct_values_in_order`).
+/// - Timestamp (any unit, any zone) → [`timestamp_category_label`]: the
+///   value's UTC ISO text, date-only at midnight.
 /// - Null (an all-null column with no further dtype) → `None` for every
 ///   row; there is no value to stringify, but the row count is kept.
 ///
 /// Returns `Err(UnsupportedDtype)` only for dtypes that cannot be sensibly
-/// turned into category strings (timestamps, durations, etc.).
-pub(crate) fn col_as_ordinal_category_str(
+/// turned into category strings (durations and the like; `Date32`/`Date64`/
+/// `Duration` reach the render layer already cast to `Timestamp(ms)`).
+fn col_as_ordinal_category_str(
     batch: &RecordBatch,
     field: &str,
 ) -> Result<Vec<Option<String>>, RenderError> {
@@ -303,6 +316,11 @@ pub(crate) fn col_as_ordinal_category_str(
         return Ok(a.iter().map(|v| v.map(|b| b.to_string())).collect());
     }
 
+    // Timestamp — one label per instant, read from the raw epoch value.
+    if let Some((instants, unit)) = timestamp_instants(col.as_ref()) {
+        return Ok(instants.into_iter().map(|v| v.map(|raw| timestamp_category_label(raw, unit))).collect());
+    }
+
     // Null-typed column (every value null, with no further dtype to read):
     // one `None` per row rather than a refusal — there is no value to
     // stringify, but the row count is still knowable.
@@ -315,6 +333,51 @@ pub(crate) fn col_as_ordinal_category_str(
         dtype: format!("{:?} (cannot convert to ordinal category string)", col.data_type()),
         context: None,
     })
+}
+
+/// A `Timestamp` column's raw epoch values and their unit, or `None` for any
+/// other dtype. Every zone reads as the same instants: the label is UTC.
+fn timestamp_instants(col: &dyn Array) -> Option<(Vec<Option<i64>>, TimeUnit)> {
+    macro_rules! read {
+        ($t:ty, $unit:expr) => {
+            if let Some(a) = col.as_any().downcast_ref::<$t>() {
+                return Some((a.iter().collect(), $unit));
+            }
+        };
+    }
+    read!(TimestampNanosecondArray, TimeUnit::Nanosecond);
+    read!(TimestampMicrosecondArray, TimeUnit::Microsecond);
+    read!(TimestampMillisecondArray, TimeUnit::Millisecond);
+    read!(TimestampSecondArray, TimeUnit::Second);
+    None
+}
+
+/// The category label of one timestamp value: its UTC ISO text, date-only
+/// (`2020-01-01`) when the value is at midnight, otherwise the group-key form
+/// [`format_instant`] writes (`2020-01-01T12:00:00`, with a `.250`-style
+/// fraction only when the value has one).
+///
+/// The rule is per value, so one instant has one label on every layer and a
+/// band and a point drawn from different layers' rows of one column meet.
+/// Distinct instants of one unit have distinct labels.
+pub(crate) fn timestamp_category_label(raw: i64, unit: TimeUnit) -> String {
+    let text = format_instant(raw, unit);
+    match text.strip_suffix("T00:00:00") {
+        Some(date) => date.to_string(),
+        None => text,
+    }
+}
+
+/// Put `values`, each a category label paired with a row of `batch` that
+/// holds it, into time order when `field` is a `Timestamp` column; any other
+/// dtype keeps the order given (first appearance). The same default order
+/// [`distinct_values_in_order`] gives a timestamp axis, for the facet panel
+/// split.
+pub(crate) fn order_labels_by_instant(batch: &RecordBatch, field: &str, values: &mut [(String, usize)]) {
+    let Some(col) = batch.column_by_name(field) else { return };
+    if let Some((instants, _)) = timestamp_instants(col.as_ref()) {
+        values.sort_by_key(|(_, row)| instants.get(*row).copied().flatten());
+    }
 }
 
 /// Read a `Timestamp` column (any unit) as `Vec<Option<String>>` via the raw
@@ -332,10 +395,9 @@ pub(crate) fn col_as_ordinal_category_str(
 /// native `i64` and stringifying it directly has no such ceiling — every
 /// representable epoch value round-trips to a distinct string.
 ///
-/// `col_as_ordinal_category_str` deliberately does not cover `Timestamp`
-/// (see its doc); this is the sibling that does, for exactly one caller:
-/// `extract_keys` (GH #93), which needs an injective row -> string map for a
-/// temporal `key=` column, not a human-readable date.
+/// Its one caller is [`col_as_object_key_str`], which needs an injective
+/// row -> string map for a temporal `key=` column that keeps its epoch text
+/// across releases, not the category label `col_as_ordinal_category_str` reads.
 ///
 /// Returns `Err(UnsupportedDtype)` for any dtype other than `Timestamp`.
 pub(crate) fn col_as_temporal_epoch_str(
@@ -344,59 +406,102 @@ pub(crate) fn col_as_temporal_epoch_str(
 ) -> Result<Vec<Option<String>>, RenderError> {
     let col = batch.column_by_name(field)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    macro_rules! collect_epoch_as_str {
-        ($t:ty) => {{
-            let a = col.as_any().downcast_ref::<$t>().expect("dtype matched");
-            return Ok(a.iter().map(|v| v.map(|x| x.to_string())).collect());
-        }};
-    }
-    match col.data_type() {
-        DataType::Timestamp(TimeUnit::Nanosecond, _) => collect_epoch_as_str!(TimestampNanosecondArray),
-        DataType::Timestamp(TimeUnit::Microsecond, _) => collect_epoch_as_str!(TimestampMicrosecondArray),
-        DataType::Timestamp(TimeUnit::Millisecond, _) => collect_epoch_as_str!(TimestampMillisecondArray),
-        DataType::Timestamp(TimeUnit::Second, _) => collect_epoch_as_str!(TimestampSecondArray),
-        other => Err(RenderError::UnsupportedDtype {
+    match timestamp_instants(col.as_ref()) {
+        Some((instants, _)) => Ok(instants.into_iter().map(|v| v.map(|x| x.to_string())).collect()),
+        None => Err(RenderError::UnsupportedDtype {
             field: field.to_string(),
-            dtype: format!("{other:?} (expected Timestamp)"),
+            dtype: format!("{:?} (expected Timestamp)", col.data_type()),
             context: None,
         }),
     }
 }
 
-/// Per-row **identity key** for any column that must partition rows by value:
-/// [`col_as_ordinal_category_str`] for every dtype the ordinal band ladder
-/// enumerates, falling back to [`col_as_temporal_epoch_str`] for `Timestamp`,
-/// which the first deliberately excludes.
+/// Per-row **identity key** for any column that must partition rows by value
+/// or place rows on a category scale: exactly [`col_as_ordinal_category_str`],
+/// so "which category is this row" has one answer on every path (a band, a
+/// colour or shape legend entry, a stack bin, a facet panel).
 ///
-/// The two readers are complements, not alternatives: between them they cover
-/// every dtype that can identify a row, and each is injective over the dtypes it
-/// claims (with the documented `float_as_ordinal_str` saturation caveat above
-/// `2^53`/`2^63` for floats). "Which value is this row" is therefore one
-/// question with one answer, rather than a pairing each caller re-derives.
+/// A stack over a *category* axis must bin exactly as the band ladder does,
+/// which delegating byte-for-byte guarantees; a stack over a continuous axis
+/// bins by exact value, and every timestamp label is injective per instant
+/// (`apply_stack`, #184).
 ///
-/// Two callers ask it. `scene_build::extract_keys` needs an injective row →
-/// string map for a `key=` column (GH #93). `position::apply_stack` needs the
-/// bin identity for its category axis (#184): a stack over a *category* axis
-/// must bin exactly as the band ladder does, which the first reader guarantees
-/// by construction, and a stack over a *continuous* axis bins by exact value —
-/// which is why a temporal x, whose exact value is an epoch and whose band
-/// ladder does not exist, must key through the second reader rather than be
-/// refused. Before this existed, `extract_keys` spelled the pairing inline and
-/// `apply_stack` did not know about it at all, so a stacked time series raised.
-///
-/// Nulls stay `None`, as in both underlying readers; a caller that needs them
+/// Nulls stay `None`, as in the underlying reader; a caller that needs them
 /// binned (the stack) maps them itself.
 pub(crate) fn col_as_identity_key_str(
     batch: &RecordBatch,
     field: &str,
 ) -> Result<Vec<Option<String>>, RenderError> {
-    match col_as_ordinal_category_str(batch, field) {
-        Ok(keys) => Ok(keys),
-        // The category reader's refusal is the more informative of the two for
-        // every dtype neither covers, so it is the one returned when the
-        // temporal fallback also declines.
-        Err(category_err) => col_as_temporal_epoch_str(batch, field).map_err(|_| category_err),
+    col_as_ordinal_category_str(batch, field)
+}
+
+/// The category door for per-row reads that decide category versus time: the
+/// per-row category strings of `field` under `read`
+/// ([`super::category_read::timestamp_read`] decides it). Under
+/// [`TimestampRead::Temporal`] a `Timestamp` column is the refusal it drew
+/// before dates could be categories (`UnsupportedDtype`, "cannot convert to
+/// ordinal category string"), so a builder's own error handling reproduces what
+/// it did then; under [`TimestampRead::Categories`] it reads its per-value
+/// labels. Every other dtype is read the same under both.
+pub(crate) fn category_strings(
+    batch: &RecordBatch,
+    field: &str,
+    read: TimestampRead,
+) -> Result<Vec<Option<String>>, RenderError> {
+    if read == TimestampRead::Temporal {
+        if let Some(col) = batch.column_by_name(field) {
+            if matches!(col.data_type(), DataType::Timestamp(_, _)) {
+                return Err(RenderError::UnsupportedDtype {
+                    field: field.to_string(),
+                    dtype: format!("{:?} (cannot convert to ordinal category string)", col.data_type()),
+                    context: None,
+                });
+            }
+        }
     }
+    col_as_ordinal_category_str(batch, field)
+}
+
+/// The category door for domain reads: the distinct categories of `field`
+/// under `read`, each with the instant it names (nanoseconds since the epoch)
+/// when it is a date. Dates come in time order; every other dtype in first
+/// appearance. Under [`TimestampRead::Temporal`] a `Timestamp` column is the
+/// refusal it drew before dates could be categories ("cannot enumerate
+/// distinct values"). Built into a [`super::category_read::CategoryDomain`].
+pub(crate) fn category_domain_entries(
+    batch: &RecordBatch,
+    field: &str,
+    read: TimestampRead,
+) -> Result<Vec<(String, Option<i128>)>, RenderError> {
+    let col = batch.column_by_name(field).ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
+    if let Some((instants, unit)) = timestamp_instants(col.as_ref()) {
+        if read == TimestampRead::Temporal {
+            return Err(unsupported_category_key(field, col.data_type()));
+        }
+        let nanos_per_unit: i128 = match unit {
+            TimeUnit::Second => 1_000_000_000,
+            TimeUnit::Millisecond => 1_000_000,
+            TimeUnit::Microsecond => 1_000,
+            TimeUnit::Nanosecond => 1,
+        };
+        let in_time_order: std::collections::BTreeSet<i64> = instants.into_iter().flatten().collect();
+        return Ok(in_time_order
+            .into_iter()
+            .map(|raw| (timestamp_category_label(raw, unit), Some(i128::from(raw) * nanos_per_unit)))
+            .collect());
+    }
+    Ok(distinct_values_in_order(batch, field)?.into_iter().map(|label| (label, None)).collect())
+}
+
+/// Per-row **object-constancy key** for a `key=` column (GH #93): the raw epoch
+/// text for a `Timestamp` ([`col_as_temporal_epoch_str`]), else the category
+/// reader's string. Injective for every dtype it covers, and unchanged for a
+/// temporal key column when the same column is also read as a category.
+pub(crate) fn col_as_object_key_str(
+    batch: &RecordBatch,
+    field: &str,
+) -> Result<Vec<Option<String>>, RenderError> {
+    col_as_temporal_epoch_str(batch, field).or_else(|_| col_as_ordinal_category_str(batch, field))
 }
 
 /// A numeric extent folded over only the values on one side of zero
@@ -829,7 +934,7 @@ fn unsupported_category_key(field: &str, dtype: &DataType) -> RenderError {
 /// `category_readers_accept_exactly_the_dtypes_ensure_category_keyable_does`
 /// pins this list against both readers, so widening one without the others
 /// fails there rather than reopening the divergence.
-pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType) -> Result<(), RenderError> {
+pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType, read: TimestampRead) -> Result<(), RenderError> {
     let keyable = matches!(
         dtype,
         DataType::Utf8
@@ -849,6 +954,9 @@ pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType) -> Result<(
             // enumerates no category and keys every row to none.
             | DataType::Null
     );
+    // One label per instant, in UTC (`timestamp_category_label`), where the
+    // binding reads dates as categories.
+    let keyable = keyable || (read == TimestampRead::Categories && matches!(dtype, DataType::Timestamp(_, _)));
     if keyable {
         Ok(())
     } else {
@@ -858,7 +966,7 @@ pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType) -> Result<(
 
 /// Enumerate distinct values in encounter order, stringified, from a column
 /// whose dtype is one of `Utf8`, `LargeUtf8`, `Int*`, `UInt*`, `Float32`,
-/// `Float64`, `Boolean`, or `Null` (which has no value to enumerate) — i.e. exactly the set
+/// `Float64`, `Boolean`, `Timestamp`, or `Null` (which has no value to enumerate) — i.e. exactly the set
 /// [`ensure_category_keyable`] admits. Returns `Err(UnsupportedDtype)` for any
 /// other dtype.
 ///
@@ -867,7 +975,9 @@ pub(crate) fn ensure_category_keyable(field: &str, dtype: &DataType) -> Result<(
 /// - Int*/UInt* → `.to_string()`
 /// - Float64/32 → `float_as_ordinal_str` (integer-formatted for whole values)
 /// - Boolean → `"true"` / `"false"`
-pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Result<Vec<String>, RenderError> {
+/// - Timestamp → [`timestamp_category_label`], ordered by time rather than by
+///   encounter (every other dtype keeps encounter order)
+fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Result<Vec<String>, RenderError> {
     let col = batch.column_by_name(field)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
     let mut seen = std::collections::HashSet::<String>::new();
@@ -877,6 +987,11 @@ pub(crate) fn distinct_values_in_order(batch: &RecordBatch, field: &str) -> Resu
             out.push(s);
         }
     };
+    if let Some((instants, unit)) = timestamp_instants(col.as_ref()) {
+        let in_time_order: std::collections::BTreeSet<i64> = instants.into_iter().flatten().collect();
+        for raw in in_time_order { push(timestamp_category_label(raw, unit)); }
+        return Ok(out);
+    }
     // Macro to avoid repeating the downcast-and-stringify loop for each integer type.
     macro_rules! push_int {
         ($t:ty) => {
@@ -1408,21 +1523,189 @@ mod tests {
         assert_eq!(out, vec![Some("5".into()), Some("10".into()), None]);
     }
 
-    /// `col_as_ordinal_category_str` deliberately errors on `Timestamp` — the
-    /// contract `col_as_temporal_epoch_str`'s doc comment relies on.
+    const DAY_MS: i64 = 86_400_000;
+    /// 2020-01-01T00:00:00Z in milliseconds.
+    const JAN_1_2020_MS: i64 = 1_577_836_800_000;
+
+    fn ts_ms_batch(values: Vec<Option<i64>>, tz: Option<&str>) -> RecordBatch {
+        let array = TimestampMillisecondArray::from(values).with_timezone_opt(tz.map(|z| z.to_string()));
+        let schema = Arc::new(Schema::new(vec![Field::new("t", array.data_type().clone(), true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap()
+    }
+
+    /// A midnight value reads its ISO date, any other value its full ISO
+    /// date-time (a fraction only when the value has one), per value.
     #[test]
-    fn col_as_ordinal_category_str_errors_on_timestamp() {
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "t",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-            true,
-        )]));
-        let b = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(TimestampMillisecondArray::from(vec![Some(1_000i64)]))],
+    fn a_timestamp_category_label_is_date_only_at_midnight_and_full_otherwise() {
+        let b = ts_ms_batch(
+            vec![
+                Some(JAN_1_2020_MS),
+                Some(JAN_1_2020_MS + 12 * 3_600_000),
+                Some(JAN_1_2020_MS + 12 * 3_600_000 + 250),
+                Some(JAN_1_2020_MS + 250),
+                None,
+            ],
+            None,
+        );
+        assert_eq!(
+            col_as_ordinal_category_str(&b, "t").unwrap(),
+            vec![
+                Some("2020-01-01".to_string()),
+                Some("2020-01-01T12:00:00".to_string()),
+                Some("2020-01-01T12:00:00.250".to_string()),
+                Some("2020-01-01T00:00:00.250".to_string()),
+                None,
+            ],
+        );
+    }
+
+    /// Every unit reads the same instant as the same label, and a zone never
+    /// shifts it: the label is UTC.
+    #[test]
+    fn a_timestamp_category_label_is_the_same_in_every_unit_and_zone() {
+        let seconds = JAN_1_2020_MS / 1_000;
+        for (dtype, array) in [
+            (
+                DataType::Timestamp(TimeUnit::Second, None),
+                Arc::new(TimestampSecondArray::from(vec![seconds])) as Arc<dyn Array>,
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                Arc::new(TimestampMicrosecondArray::from(vec![seconds * 1_000_000])),
+            ),
+            (
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                Arc::new(TimestampNanosecondArray::from(vec![seconds * 1_000_000_000])),
+            ),
+        ] {
+            let schema = Arc::new(Schema::new(vec![Field::new("t", dtype.clone(), true)]));
+            let b = RecordBatch::try_new(schema, vec![array]).unwrap();
+            assert_eq!(col_as_ordinal_category_str(&b, "t").unwrap(), vec![Some("2020-01-01".to_string())], "{dtype:?}");
+        }
+        let paris = ts_ms_batch(vec![Some(JAN_1_2020_MS)], Some("Europe/Paris"));
+        assert_eq!(col_as_ordinal_category_str(&paris, "t").unwrap(), vec![Some("2020-01-01".to_string())]);
+    }
+
+    /// The domain is the distinct labels in TIME order, whatever the rows'
+    /// order, and equals the per-row labels deduplicated and sorted by time:
+    /// the strings the per-row reader keys bands with.
+    #[test]
+    fn a_timestamp_domain_is_in_time_order_and_matches_the_per_row_labels() {
+        let b = ts_ms_batch(
+            vec![
+                Some(JAN_1_2020_MS + 2 * DAY_MS),
+                Some(JAN_1_2020_MS),
+                None,
+                Some(JAN_1_2020_MS + 12 * 3_600_000),
+                Some(JAN_1_2020_MS),
+                Some(JAN_1_2020_MS + DAY_MS),
+            ],
+            Some("UTC"),
+        );
+        let domain = distinct_values_in_order(&b, "t").unwrap();
+        assert_eq!(domain, vec!["2020-01-01", "2020-01-01T12:00:00", "2020-01-02", "2020-01-03"]);
+        let per_row: std::collections::HashSet<String> =
+            col_as_ordinal_category_str(&b, "t").unwrap().into_iter().flatten().collect();
+        assert_eq!(per_row, domain.iter().cloned().collect());
+    }
+
+    /// An instant outside the calendar range keeps a name of its own, so a
+    /// category is never refused and two instants never share one.
+    #[test]
+    fn an_out_of_range_timestamp_is_still_a_distinct_category() {
+        let b = ts_ms_batch(vec![Some(i64::MAX), Some(i64::MAX - 1), Some(0)], None);
+        let domain = distinct_values_in_order(&b, "t").unwrap();
+        assert_eq!(domain.len(), 3);
+        assert_eq!(domain[0], "1970-01-01");
+    }
+
+    /// An exchanged date lands on a categorical axis only where the owner reads
+    /// its binding as categories: declared nominal or ordinal, a categorical
+    /// caller scale, or an axis of dates; an undeclared date on an axis of text
+    /// is a time axis, which a band axis cannot draw, so it is refused.
+    #[test]
+    fn an_exchanged_date_is_servable_on_a_categorical_axis_only_when_the_owner_reads_categories() {
+        use crate::spec::encoding::{DataType as Declared, EncodingSpec};
+        let ts = DataType::Timestamp(TimeUnit::Millisecond, None);
+        let check = |declared: Option<Declared>, of_dates: bool| {
+            let binding = EncodingSpec { field: "t".into(), type_: declared, ..Default::default() };
+            require_exchanged_column_servable(
+                crate::spec::mark::Mark::Point,
+                &crate::spec::coord::CoordKind::Flip,
+                "x",
+                "t",
+                &ts,
+                &binding,
+                PanelAxisKind::Categorical { of_dates },
+            )
+        };
+        assert!(check(None, false).is_err(), "undeclared on text");
+        assert!(check(Some(Declared::Temporal), false).is_err(), "declared temporal on text");
+        assert!(check(Some(Declared::Nominal), false).is_ok(), "declared nominal");
+        assert!(check(Some(Declared::Ordinal), false).is_ok(), "declared ordinal");
+        assert!(check(None, true).is_ok(), "undeclared on an axis of dates");
+        assert!(check(Some(Declared::Temporal), true).is_ok(), "declared temporal on an axis of dates");
+    }
+
+    /// Under a Temporal read a date is the refusal it drew before dates could be
+    /// categories, in the very words, from the per-row door, the domain door and
+    /// the keyable gate; the identity door reads every date as its label.
+    #[test]
+    fn a_temporal_read_refuses_a_date_in_its_earlier_words_and_the_identity_door_reads_its_label() {
+        let b = ts_ms_batch(vec![Some(JAN_1_2020_MS)], None);
+        let dtype = DataType::Timestamp(TimeUnit::Millisecond, None);
+        let refusal = |dtype_text: String| RenderError::UnsupportedDtype { field: "t".into(), dtype: dtype_text, context: None };
+        assert_eq!(
+            category_strings(&b, "t", TimestampRead::Temporal).unwrap_err(),
+            refusal(format!("{dtype:?} (cannot convert to ordinal category string)")),
+        );
+        assert_eq!(
+            category_domain_entries(&b, "t", TimestampRead::Temporal).unwrap_err(),
+            refusal(format!("{dtype:?} (cannot enumerate distinct values)")),
+        );
+        assert_eq!(
+            ensure_category_keyable("t", &dtype, TimestampRead::Temporal).unwrap_err(),
+            refusal(format!("{dtype:?} (cannot enumerate distinct values)")),
+        );
+        // The identity door partitions rows; it never picks a scale, so a date reads as its label.
+        assert_eq!(col_as_identity_key_str(&b, "t").unwrap(), vec![Some("2020-01-01".to_string())]);
+        assert_eq!(
+            category_strings(&b, "t", TimestampRead::Categories).unwrap(),
+            col_as_identity_key_str(&b, "t").unwrap()
+        );
+    }
+
+    /// A `key=` column keeps its epoch text, while the same column read as a
+    /// category reads labels.
+    #[test]
+    fn an_object_key_reads_a_timestamp_as_its_epoch_and_every_other_dtype_as_a_category() {
+        let b = ts_ms_batch(vec![Some(JAN_1_2020_MS), None], None);
+        assert_eq!(col_as_object_key_str(&b, "t").unwrap(), vec![Some(JAN_1_2020_MS.to_string()), None]);
+        assert_eq!(col_as_ordinal_category_str(&b, "t").unwrap()[0].as_deref(), Some("2020-01-01"));
+        let ints = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("t", DataType::Int64, true)])),
+            vec![Arc::new(arrow::array::Int64Array::from(vec![Some(7i64)]))],
         )
         .unwrap();
-        assert!(col_as_ordinal_category_str(&b, "t").is_err());
+        assert_eq!(col_as_object_key_str(&ints, "t").unwrap(), vec![Some("7".to_string())]);
+    }
+
+    /// Panel and band values of a timestamp column sort by instant; any other
+    /// dtype keeps the order given.
+    #[test]
+    fn timestamp_labels_order_by_instant_and_other_dtypes_keep_their_order() {
+        let b = ts_ms_batch(vec![Some(JAN_1_2020_MS + DAY_MS), Some(JAN_1_2020_MS)], None);
+        let mut values = vec![("2020-01-02".to_string(), 0usize), ("2020-01-01".to_string(), 1)];
+        order_labels_by_instant(&b, "t", &mut values);
+        assert_eq!(values.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>(), ["2020-01-01", "2020-01-02"]);
+        let text = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("t", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec!["b", "a"]))],
+        )
+        .unwrap();
+        let mut values = vec![("b".to_string(), 0usize), ("a".to_string(), 1)];
+        order_labels_by_instant(&text, "t", &mut values);
+        assert_eq!(values.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>(), ["b", "a"]);
     }
 
     /// `col_as_temporal_epoch_str` reads the raw `i64` epoch value — no `f64`
@@ -1721,10 +2004,13 @@ mod tests {
             DataType::Boolean,
             // A column with no dtype of its own: no category to enumerate.
             DataType::Null,
-            // Refused: not category keys. Timestamp is the live one — a
-            // temporal column is a supported *numeric* dtype, so it reaches a
-            // categorical color scale whenever the user declares `type="nominal"`.
+            // One label per instant, any unit, any zone.
+            DataType::Timestamp(TimeUnit::Second, None),
             DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("Europe/Paris".into())),
+            // Refused: not category keys. Date and Duration columns reach the
+            // render layer already cast to `Timestamp(ms)`.
             DataType::Date32,
             DataType::Date64,
             DataType::Duration(TimeUnit::Millisecond),
@@ -1732,20 +2018,27 @@ mod tests {
         let (mut admitted, mut refused) = (0, 0);
         for dtype in &dtypes {
             let batch = one_elem_batch_for_dtype(dtype);
-            let gate = ensure_category_keyable("v", dtype).is_ok();
-            if gate { admitted += 1 } else { refused += 1 }
-            assert_eq!(
-                gate,
-                distinct_values_in_order(&batch, "v").is_ok(),
-                "{dtype:?}: ensure_category_keyable disagrees with the domain builder \
-                 (gate={gate})"
-            );
-            assert_eq!(
-                gate,
-                col_as_ordinal_category_str(&batch, "v").is_ok(),
-                "{dtype:?}: ensure_category_keyable disagrees with the per-row reader \
-                 (gate={gate})"
-            );
+            for read in [TimestampRead::Categories, TimestampRead::Temporal] {
+                let gate = ensure_category_keyable("v", dtype, read).is_ok();
+                if gate { admitted += 1 } else { refused += 1 }
+                assert_eq!(
+                    gate,
+                    category_domain_entries(&batch, "v", read).is_ok(),
+                    "{dtype:?} under {read:?}: ensure_category_keyable disagrees with the domain builder \
+                     (gate={gate})"
+                );
+                assert_eq!(
+                    gate,
+                    category_strings(&batch, "v", read).is_ok(),
+                    "{dtype:?} under {read:?}: ensure_category_keyable disagrees with the per-row reader \
+                     (gate={gate})"
+                );
+                // A Timestamp is a category only where the binding reads it as one; every other dtype
+                // reads the same under both.
+                if matches!(dtype, DataType::Timestamp(_, _)) {
+                    assert_eq!(gate, read == TimestampRead::Categories, "{dtype:?} under {read:?}");
+                }
+            }
         }
         assert!(
             admitted > 0 && refused > 0,
@@ -1754,24 +2047,24 @@ mod tests {
         );
     }
 
-    /// [`col_as_identity_key_str`] is exactly the union of its two readers: it
-    /// delegates unchanged for every dtype the category reader claims, picks up
-    /// `Timestamp` from the temporal reader, and refuses what neither covers.
+    /// [`col_as_identity_key_str`] is the category reader, byte for byte, for
+    /// every dtype it claims (a timestamp included, labelled), and refuses what
+    /// the category reader refuses with the category reader's message.
     ///
-    /// The union is what both callers rely on for different halves.
-    /// `extract_keys` needs the temporal arm (a `key=` column may be a
-    /// timestamp); `apply_stack` needs the delegation to be *byte-exact*, since
-    /// its bins must coincide with the band ladder wherever a ladder exists —
-    /// a union that reformatted anything on the way through would move a stack
-    /// off its bands while still "working".
+    /// `apply_stack`'s bins must coincide with the band ladder wherever a
+    /// ladder exists: a reformat on the way through would move a stack off its
+    /// bands while still "working".
     #[test]
-    fn identity_key_reader_is_the_union_of_the_category_and_temporal_readers() {
-        use arrow::datatypes::TimeUnit;
+    fn identity_key_reader_is_the_category_reader() {
         let delegating = [
             DataType::Utf8, DataType::LargeUtf8,
             DataType::Int64, DataType::Int32, DataType::Int16, DataType::Int8,
             DataType::UInt64, DataType::UInt32, DataType::UInt16, DataType::UInt8,
             DataType::Float64, DataType::Float32, DataType::Boolean,
+            DataType::Timestamp(TimeUnit::Second, None),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
         ];
         for dtype in &delegating {
             let batch = one_elem_batch_for_dtype(dtype);
@@ -1782,29 +2075,13 @@ mod tests {
             );
         }
 
-        // Timestamp: the category reader declines by documented contract, the
-        // temporal reader answers, and the union returns the temporal answer —
-        // the raw epoch, injective past the f64 mantissa.
-        for unit in [TimeUnit::Second, TimeUnit::Millisecond, TimeUnit::Microsecond, TimeUnit::Nanosecond] {
-            let dtype = DataType::Timestamp(unit, None);
-            let batch = one_elem_batch_for_dtype(&dtype);
-            assert!(col_as_ordinal_category_str(&batch, "v").is_err(), "{unit:?}: premise");
-            assert_eq!(
-                col_as_identity_key_str(&batch, "v").unwrap(),
-                col_as_temporal_epoch_str(&batch, "v").unwrap(),
-                "{unit:?}: the identity reader must return the temporal reader's epoch string"
-            );
-        }
-
-        // Neither reader covers these, so the union refuses — and it refuses
-        // with the CATEGORY reader's message, which is the informative one.
         for dtype in [DataType::Duration(TimeUnit::Millisecond), DataType::Date32, DataType::Date64] {
             let batch = one_elem_batch_for_dtype(&dtype);
             let err = col_as_identity_key_str(&batch, "v").unwrap_err();
             assert_eq!(
                 format!("{err}"),
                 format!("{}", col_as_ordinal_category_str(&batch, "v").unwrap_err()),
-                "{dtype:?}: the union must surface the category reader's refusal"
+                "{dtype:?}: the identity reader must surface the category reader's refusal"
             );
         }
     }

@@ -173,8 +173,12 @@ fn resolve_conditional_color_domain(bindings: &LegendBindings<'_>, transformed: 
     let mut out = Vec::<String>::new();
     for name in resolve_conditional_field_names(bindings, ChannelName::Color) {
         // Ignore errors (field not present in batch) — just skip.
-        if let Ok(values) = super::super::arrow_cast::distinct_values_in_order(transformed, &name) {
-            for v in values {
+        if let Ok(values) = super::super::category_read::CategoryDomain::from_column(
+            transformed,
+            &name,
+            super::super::category_read::TimestampRead::Categories,
+        ) {
+            for v in values.labels() {
                 if seen.insert(v.clone()) {
                     out.push(v);
                 }

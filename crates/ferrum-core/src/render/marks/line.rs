@@ -49,7 +49,7 @@
 //! layer's `size` conditional never reaches the line.
 
 use crate::render::color::with_opacity;
-use crate::render::draw::{col_as_f64, col_as_ordinal_category_str, stroke_width_column, x_field, y_field, DrawCtx};
+use crate::render::draw::{col_as_f64, stroke_width_column, x_field, y_field, DrawCtx};
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{build_color_detail_groups, detail_series, grouping_series_values, resolve_row_stroke_dash, series_keys, stroke_dash_column_loader, ColorSeries, SeriesPartition};
 use crate::render::series_keys::{SeriesKey, SplitChannel};
@@ -196,9 +196,9 @@ pub(crate) fn placements<'a>(ctx: &'a DrawCtx<'a>) -> Vec<crate::render::draw::P
 pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
     let spec = ctx.spec;
     let (xf, yf) = (x_field(ctx, spec)?, y_field(ctx, spec)?);
-    let axis_pixels = |scale: &ScaleKind, field: &str| -> Option<Vec<Option<f64>>> {
+    let axis_pixels = |channel: &str, scale: &ScaleKind, field: &str| -> Option<Vec<Option<f64>>> {
         Some(match scale {
-            ScaleKind::Ordinal(_) => col_as_ordinal_category_str(ctx.batch, field)
+            ScaleKind::Ordinal(_) => ctx.category_strings(channel, field)
                 .ok()?
                 .iter()
                 .map(|opt| opt.as_deref().and_then(|s| scale.to_pixel_str(s)))
@@ -210,8 +210,8 @@ pub(crate) fn vertex_pixels(ctx: &DrawCtx) -> Option<Vec<Option<(f64, f64)>>> {
                 .collect(),
         })
     };
-    let xs_pix = axis_pixels(&ctx.scales.x, xf)?;
-    let ys_pix = axis_pixels(&ctx.scales.y, yf)?;
+    let xs_pix = axis_pixels("x", &ctx.scales.x, xf)?;
+    let ys_pix = axis_pixels("y", &ctx.scales.y, yf)?;
     let n_rows = ctx.batch.num_rows();
     if xs_pix.len() != n_rows || ys_pix.len() != n_rows {
         return None;
@@ -3448,7 +3448,7 @@ mod tests {
     }
 
     /// A `Timestamp` `color` under a categorical scale splits the series, one
-    /// per instant, each keyed by its epoch string.
+    /// per instant, each keyed by its label.
     #[test]
     fn a_timestamp_color_splits_the_series() {
         use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
@@ -3456,6 +3456,6 @@ mod tests {
         let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
         assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
-        assert_eq!(keys, vec![Some("1000".to_string()), Some("2000".to_string())]);
+        assert_eq!(keys, vec![Some("1970-01-01T00:00:01".to_string()), Some("1970-01-01T00:00:02".to_string())]);
     }
 }

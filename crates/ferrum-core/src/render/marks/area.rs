@@ -2421,7 +2421,7 @@ mod tests {
     }
 
     /// A `Timestamp` `color` under a categorical scale splits the series, one
-    /// per instant, each keyed by its epoch string.
+    /// per instant, each keyed by its label.
     #[test]
     fn a_timestamp_color_splits_the_series() {
         use crate::render::marks::temporal_key_partition::{temporal_key_partition, TemporalKeyChannel};
@@ -2429,6 +2429,6 @@ mod tests {
         let keys: Vec<Option<String>> = partition.groups.iter().map(|(key, _)| key.clone()).collect();
         let rows: Vec<Vec<usize>> = partition.groups.iter().map(|(_, rows)| rows.clone()).collect();
         assert_eq!(rows, vec![vec![0, 1], vec![2, 3]]);
-        assert_eq!(keys, vec![Some("1000".to_string()), Some("2000".to_string())]);
+        assert_eq!(keys, vec![Some("1970-01-01T00:00:01".to_string()), Some("1970-01-01T00:00:02".to_string())]);
     }
 }

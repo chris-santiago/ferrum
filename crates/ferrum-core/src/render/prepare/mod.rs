@@ -788,11 +788,14 @@ pub struct PreparedInputs {
     /// True when spec.coord == Some(CoordKind::Flip). The draw loop uses this
     /// to know that x/y have already been swapped in each layer's encoding.
     pub coord_flipped: bool,
-    /// Whether a message naming a positional channel of the chart's own axes
-    /// un-flips it back to the one the caller wrote: the chart's coord flips
-    /// and the call did not apply that flip itself ([`layer_names_unflipped`]
-    /// for layer 0, which owns the axes). [`Self::coord_flipped`] keeps
-    /// deciding behavior.
+    /// Whether the caller's own channel letters are exchanged against the
+    /// drawn axes: the chart's coord flips and the call did not apply that
+    /// flip itself ([`layer_names_unflipped`] for layer 0, which owns the
+    /// axes). Two readers act on it: a message naming a positional channel of
+    /// the chart's own axes un-flips it back to the one the caller wrote, and
+    /// annotation placement and `BreakAxis` routing exchange the caller's
+    /// coordinates and break axes onto the drawn axes. [`Self::coord_flipped`]
+    /// keeps deciding the layers' own placement.
     pub names_unflipped: bool,
     /// D13: all per-encoding legend style overrides extracted from
     /// `encoding.color.legend.*`. Grouped here to keep `PreparedInputs`
@@ -3157,9 +3160,12 @@ pub(in crate::render) fn layer_flip_by_call(spec: &ChartSpec, li: usize) -> bool
 /// ([`user_facing_channel`]): the coord flips the channels AND the call did
 /// not apply that flip itself (`flip_by_call`). A flip a figure applied on the
 /// caller's behalf leaves the resolved tokens as the caller's own (the value of
-/// a horizontal call is on `x`), so they are not un-flipped. Only the name a
-/// message prints reads this; layout, scales, position adjustment and `sort=`
-/// tokens read the real flip.
+/// a horizontal call is on `x`), so they are not un-flipped. Readers: the name a
+/// message prints, annotation placement (the caller's coordinates are
+/// exchanged onto the drawn axes) and `BreakAxis` routing (each break's axis
+/// is exchanged onto the drawn axis, and its warnings name the caller's
+/// letter). Layout, scales, position adjustment and `sort=` tokens read the
+/// real flip.
 pub(in crate::render) fn names_unflipped(
     coord: Option<&crate::spec::coord::CoordKind>,
     flip_by_call: bool,
@@ -4810,7 +4816,18 @@ pub(crate) fn refuse_format_temporality_mismatch_field(
     channel: &'static str,
     surface: crate::render::FormatSurface,
 ) -> Result<(), RenderError> {
-    let Some(field) = field_temporality(enc, batch) else {
+    // A legend whose field the owner reads as categories (a date on a shape, a
+    // dash, or a nominal colour) lists labels, one per category, which no
+    // time format applies to: it answers a format as its text twin does.
+    let reads_dates_as_categories = matches!(surface, crate::render::FormatSurface::Legend)
+        && batch.column_by_name(&enc.field).is_some_and(|col| matches!(col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)))
+        && crate::render::category_read::timestamp_read(channel, Some(enc), crate::spec::mark::Mark::Point, false)
+            == crate::render::category_read::TimestampRead::Categories;
+    let Some(field) = (if reads_dates_as_categories {
+        Some(crate::render::format::Temporality::NonTemporal)
+    } else {
+        field_temporality(enc, batch)
+    }) else {
         return Ok(());
     };
     refuse_format_temporality_mismatch(fmt, format_type, field, channel, surface)
@@ -5599,6 +5616,7 @@ fn partition_batch_by_field(
             order.push((v.to_string(), row));
         }
     }
+    crate::render::arrow_cast::order_labels_by_instant(batch, field, &mut order);
     let mut result = Vec::with_capacity(order.len());
     for (value, first_row) in order {
         let mask: BooleanArray = arr
@@ -5691,6 +5709,8 @@ fn partition_batch_by_two_fields(
         }
     }
 
+    crate::render::arrow_cast::order_labels_by_instant(batch, row_field, &mut row_order);
+    crate::render::arrow_cast::order_labels_by_instant(batch, col_field, &mut col_order);
     let mut result = Vec::with_capacity(row_order.len() * col_order.len());
     for (row_v, row_first) in &row_order {
         for (col_v, col_first) in &col_order {
@@ -5950,10 +5970,10 @@ mod grid_partition_tests {
         assert!(arr.is_null(0) && arr.is_null(1));
     }
 
-    /// A dtype the ordinal reader itself cannot stringify (e.g. `Timestamp`)
-    /// refuses, naming the dtype, the accepted dtypes and the cast remedy.
+    /// A `Timestamp` facet field keys by its UTC ISO label: a midnight value
+    /// reads its date.
     #[test]
-    fn facet_key_column_unsupported_dtype_names_the_dtype_and_remedy() {
+    fn facet_key_column_reads_a_timestamp_as_its_label() {
         let schema = Arc::new(Schema::new(vec![Field::new(
             "t",
             DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
@@ -5961,14 +5981,59 @@ mod grid_partition_tests {
         )]));
         let batch = RecordBatch::try_new(
             schema,
-            vec![Arc::new(arrow::array::TimestampMillisecondArray::from(vec![Some(1_000i64)]))],
+            vec![Arc::new(arrow::array::TimestampMillisecondArray::from(vec![Some(86_400_000i64), None]))],
+        )
+        .unwrap();
+        let arr = crate::render::facet_key_column(&batch, "t").expect("a timestamp facets through the ordinal reader");
+        assert_eq!(arr.value(0), "1970-01-02");
+        assert!(arr.is_null(1));
+    }
+
+    /// Panels of a timestamp facet field come out in time order, whatever the
+    /// rows' order; a text field keeps first appearance.
+    #[test]
+    fn partition_by_field_orders_a_timestamp_facet_by_time() {
+        use arrow::array::TimestampMillisecondArray;
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(vec![
+                Some(2 * 86_400_000i64),
+                Some(0),
+                Some(86_400_000),
+                Some(0),
+            ]))],
+        )
+        .unwrap();
+        let partitions = partition_batch_by_field(&batch, "t", &[false; 4]).unwrap();
+        let order: Vec<&str> = partitions.iter().map(|(v, _)| v.as_str()).collect();
+        assert_eq!(order, ["1970-01-01", "1970-01-02", "1970-01-03"]);
+        assert_eq!(partitions[0].1.num_rows(), 2);
+    }
+
+    /// A dtype the ordinal reader itself cannot stringify (e.g. `Duration`)
+    /// refuses, naming the dtype, the accepted dtypes and the cast remedy.
+    #[test]
+    fn facet_key_column_unsupported_dtype_names_the_dtype_and_remedy() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "t",
+            DataType::Duration(arrow::datatypes::TimeUnit::Millisecond),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow::array::DurationMillisecondArray::from(vec![Some(1_000i64)]))],
         )
         .unwrap();
         let err = crate::render::facet_key_column(&batch, "t").unwrap_err();
         match &err {
             RenderError::UnsupportedDtype { field, dtype, context } => {
                 assert_eq!(field, "t");
-                assert!(dtype.contains("Timestamp"), "{dtype}");
+                assert!(dtype.contains("Duration"), "{dtype}");
                 assert!(dtype.contains("cast 't' to a string"), "{dtype}");
                 assert_eq!(*context, Some("facet"));
             }

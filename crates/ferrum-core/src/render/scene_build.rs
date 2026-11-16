@@ -9,7 +9,7 @@ use crate::layout::{AxisLayout, LayoutResult, Rect, ResolveMode, ThemeInputs};
 use crate::spec::axis::AlignAxis;
 use crate::spec::chart::ChartSpec;
 
-use super::arrow_cast::col_as_identity_key_str;
+use super::arrow_cast::col_as_object_key_str;
 use crate::transform::core::FINAL_OUTPUT_KEY;
 use super::chart_config::StructuralSpec;
 use super::config::RenderConfig;
@@ -216,7 +216,7 @@ pub fn build_scene(
     // warnings the per-panel build produces are collected in a scene-level
     // ledger that reports each distinct fact once instead of once per panel.
     let mut break_ledger = BreakWarningLedger::default();
-    let merged_breaks = merge_break_specs(&chart_config.structural, &mut break_ledger);
+    let merged_breaks = merge_break_specs(&chart_config.structural, prep.names_unflipped, &mut break_ledger);
 
     // One render-wide tally of `Mark::Text` ink still crossing the plot
     // frame, noted at every panel-real resolve (shared,
@@ -2944,9 +2944,11 @@ fn build_legend_decorations(
 /// via `float_as_ordinal_str`, Boolean via `"true"`/`"false"`), already used
 /// where `ScaleKind::Ordinal` needs per-row category strings that must match
 /// a domain 1:1 — the same injectivity requirement object-constancy keys
-/// have. It deliberately does not cover `Timestamp` (see its doc), so
-/// temporal columns fall to [`col_as_temporal_epoch_str`]: the raw `i64`
-/// epoch value's `.to_string()`, NOT an `f64` round-trip.
+/// have. A `Timestamp` column is read first through
+/// [`col_as_temporal_epoch_str`] (via [`col_as_object_key_str`]): the raw
+/// `i64` epoch value's `.to_string()`, NOT an `f64` round-trip, so a temporal
+/// key stays the same text whether or not the column is also drawn as a
+/// category.
 ///
 /// **Do not substitute a display formatter such as `format_numeric` here.**
 /// It is not an identity function: it aliases a six-digit database id column
@@ -2982,11 +2984,7 @@ fn extract_keys(
     data_indices: Option<&[usize]>,
 ) -> Option<Vec<String>> {
     let key_enc = encoding.key.as_ref()?;
-    // The category-reader-else-temporal-epoch pairing this function used to
-    // spell inline is `arrow_cast::col_as_identity_key_str`; `apply_stack`
-    // became its second caller (#184), and a second hand-copy is how the two
-    // would have ended up covering different dtype sets.
-    let col = col_as_identity_key_str(batch, &key_enc.field).ok()?;
+    let col = col_as_object_key_str(batch, &key_enc.field).ok()?;
     let indices = data_indices?;
     Some(
         indices
@@ -3990,7 +3988,12 @@ fn qualified_for_partial_panels(entry: PanelFact, panels: usize) -> RenderWarnin
 /// nested, and unsorted gaps, and it is exercised on the union exactly as it
 /// always was on one spec's list.
 struct MergedBreak {
+    /// The drawn axis the break applies to: the spec's axis exchanged once
+    /// under the caller's flip, so every reader below addresses scales,
+    /// indicators and remaps in drawn terms.
     axis: AlignAxis,
+    /// The axis the caller wrote, which every warning about this break names.
+    caller_axis: AlignAxis,
     gaps: Vec<[f64; 2]>,
     /// First declaration wins; `size_conflict` records that a later same-axis
     /// spec asked for a different value, so the dropped knob is named rather
@@ -4002,6 +4005,19 @@ struct MergedBreak {
     style_conflict: bool,
 }
 
+/// The drawn axis a break the caller wrote on `axis` applies to: the caller's
+/// own flip (`names_unflipped`) put the caller's x on the drawn vertical axis,
+/// so the break's axis is exchanged once here, the way annotation coordinates
+/// are exchanged in `build_annotations_through_breaks`. A flip a figure applied
+/// on the caller's behalf is not exchanged (`names_unflipped` is false there).
+fn drawn_break_axis(axis: AlignAxis, names_unflipped: bool) -> AlignAxis {
+    match (names_unflipped, axis) {
+        (false, axis) => axis,
+        (true, AlignAxis::X) => AlignAxis::Y,
+        (true, AlignAxis::Y) => AlignAxis::X,
+    }
+}
+
 /// Merge every same-axis `BreakAxis` in `structural` (see [`MergedBreak`]) and
 /// note each conflicting cosmetic field once.
 ///
@@ -4011,6 +4027,7 @@ struct MergedBreak {
 /// go into the ledger's chart-level bucket.
 fn merge_break_specs(
     structural: &[StructuralSpec],
+    names_unflipped: bool,
     ledger: &mut BreakWarningLedger,
 ) -> Vec<MergedBreak> {
     let mut merged: Vec<MergedBreak> = Vec::new();
@@ -4018,14 +4035,16 @@ fn merge_break_specs(
         let StructuralSpec::BreakAxis(spec_brk) = item else {
             continue;
         };
-        match merged.iter_mut().find(|m| m.axis == spec_brk.axis) {
+        let drawn_axis = drawn_break_axis(spec_brk.axis, names_unflipped);
+        match merged.iter_mut().find(|m| m.axis == drawn_axis) {
             Some(group) => {
                 group.gaps.extend_from_slice(&spec_brk.gaps);
                 group.style_conflict |= spec_brk.break_style != group.break_style;
                 group.size_conflict |= spec_brk.break_size != group.break_size;
             }
             None => merged.push(MergedBreak {
-                axis: spec_brk.axis,
+                axis: drawn_axis,
+                caller_axis: spec_brk.axis,
                 gaps: spec_brk.gaps.clone(),
                 break_size: spec_brk.break_size,
                 size_conflict: false,
@@ -4037,13 +4056,13 @@ fn merge_break_specs(
     for group in &merged {
         if group.style_conflict {
             ledger.note_chart_level(RenderWarning::BreakAxisMergeConflict {
-                axis: group.axis,
+                axis: group.caller_axis,
                 field: "break_style".to_string(),
             });
         }
         if group.size_conflict {
             ledger.note_chart_level(RenderWarning::BreakAxisMergeConflict {
-                axis: group.axis,
+                axis: group.caller_axis,
                 field: "break_size".to_string(),
             });
         }
@@ -4091,7 +4110,7 @@ fn build_panel_breaks(
             // `data_domain()` test).
             ledger.note_panel_fact(group.axis, BreakFact::Ordinal, panel_idx, || {
                 RenderWarning::BreakAxisIneffective {
-                    axis: group.axis,
+                    axis: group.caller_axis,
                     reason: "the axis is ordinal, so its gaps have no numeric \
                              data range to remove"
                         .to_string(),
@@ -4140,7 +4159,7 @@ fn build_panel_breaks(
             let (lo, hi) = (d0.min(d1), d0.max(d1));
             ledger.note_panel_fact(group.axis, BreakFact::NoOverlap, panel_idx, || {
                 RenderWarning::BreakAxisIneffective {
-                    axis: group.axis,
+                    axis: group.caller_axis,
                     reason: format!("no gap overlaps the axis domain ({lo}, {hi})"),
                 }
             });
@@ -4154,7 +4173,7 @@ fn build_panel_breaks(
         if let Some(scale_kind) = nonlinear_scale_kind(scale) {
             ledger.note_panel_fact(group.axis, BreakFact::NonlinearScale, panel_idx, || {
                 RenderWarning::BreakAxisOnNonlinearScale {
-                    axis: group.axis,
+                    axis: group.caller_axis,
                     scale_kind: scale_kind.to_string(),
                 }
             });
@@ -4574,7 +4593,9 @@ fn validate_layer_coord_exchange_is_servable(
             continue;
         };
         let axis = match scale {
-            scale_resolve::ScaleKind::Ordinal(_) => crate::render::arrow_cast::PanelAxisKind::Categorical,
+            scale_resolve::ScaleKind::Ordinal(ordinal) => {
+                crate::render::arrow_cast::PanelAxisKind::Categorical { of_dates: ordinal.of_dates() }
+            }
             _ => crate::render::arrow_cast::PanelAxisKind::Continuous,
         };
         crate::render::arrow_cast::require_exchanged_column_servable(
@@ -4583,6 +4604,7 @@ fn validate_layer_coord_exchange_is_servable(
             channel,
             &enc.field,
             column.data_type(),
+            enc,
             axis,
         )?;
     }
@@ -12324,8 +12346,21 @@ mod tests {
         theme: &ThemeInputs,
         warnings: &mut Vec<RenderWarning>,
     ) -> StructuralOutput {
+        build_structural_nodes_naming(structural, false, scales, plot_area, theme, warnings)
+    }
+
+    /// [`build_structural_nodes`] for a chart whose caller's `CoordFlip` put
+    /// the caller's x on the drawn vertical axis when `names_unflipped`.
+    fn build_structural_nodes_naming(
+        structural: &[StructuralSpec],
+        names_unflipped: bool,
+        scales: &scale_resolve::ResolvedScales,
+        plot_area: &crate::layout::Rect,
+        theme: &ThemeInputs,
+        warnings: &mut Vec<RenderWarning>,
+    ) -> StructuralOutput {
         let mut ledger = BreakWarningLedger::default();
-        let merged = merge_break_specs(structural, &mut ledger);
+        let merged = merge_break_specs(structural, names_unflipped, &mut ledger);
         let PanelBreaks {
             indicators,
             results,
@@ -12973,6 +13008,176 @@ mod tests {
             }
             other => panic!("expected BreakAxisIneffective, got {other:?}"),
         }
+    }
+
+    /// A caller-flipped chart's scales: the caller's categorical x is drawn
+    /// on the vertical axis (ordinal `y` scale) and the caller's numeric y on
+    /// the horizontal one (linear `x` scale over `[0, 100]`).
+    fn flipped_bar_scales() -> scale_resolve::ResolvedScales {
+        use crate::scale::discrete::DiscreteLayout;
+        let ordinal =
+            scale_resolve::ScaleKind::Ordinal(crate::scale::ordinal::OrdinalScale::new_internal(
+                vec!["a".to_string(), "b".to_string()],
+                vec![320.0, 20.0],
+                DiscreteLayout::UNPADDED,
+            ));
+        positional_scales(linear_scale([0.0, 100.0], [20.0, 320.0]), ordinal)
+    }
+
+    fn flipped_structural(
+        structural: &[StructuralSpec],
+        scales: &scale_resolve::ResolvedScales,
+    ) -> (StructuralOutput, Vec<RenderWarning>) {
+        let mut warnings = Vec::new();
+        let out = build_structural_nodes_naming(
+            structural,
+            true,
+            scales,
+            &structural_plot(),
+            &ThemeInputs::default(),
+            &mut warnings,
+        );
+        (out, warnings)
+    }
+
+    /// Under the caller's flip a break on the caller's y breaks the drawn
+    /// horizontal axis (the caller's numeric y) and warns nothing.
+    #[test]
+    fn a_flipped_break_on_the_callers_numeric_y_breaks_the_drawn_horizontal_axis() {
+        let (out, warnings) = flipped_structural(
+            &[break_spec(AlignAxis::Y, vec![[40.0, 60.0]])],
+            &flipped_bar_scales(),
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(out.break_results.len(), 1);
+        assert_eq!(out.break_results[0].0, AlignAxis::X);
+        assert!(!out.extra_annotations.is_empty(), "an effective break draws its indicator");
+    }
+
+    /// The caller's categorical x has no numeric range: the break warns in the
+    /// caller's letter, although the ordinal scale it tested is drawn on `y`.
+    #[test]
+    fn a_flipped_break_on_the_callers_categorical_x_warns_naming_x() {
+        let (out, warnings) = flipped_structural(
+            &[break_spec(AlignAxis::X, vec![[40.0, 60.0]])],
+            &flipped_bar_scales(),
+        );
+        assert!(out.break_results.is_empty());
+        assert!(out.extra_annotations.is_empty());
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::BreakAxisIneffective {
+                axis: AlignAxis::X,
+                reason: "the axis is ordinal, so its gaps have no numeric data range to remove"
+                    .to_string(),
+            }]
+        );
+    }
+
+    /// A gap outside the caller's numeric domain names the caller's letter.
+    #[test]
+    fn a_flipped_break_outside_the_domain_warns_naming_the_callers_letter() {
+        let (out, warnings) = flipped_structural(
+            &[break_spec(AlignAxis::Y, vec![[500.0, 600.0]])],
+            &flipped_bar_scales(),
+        );
+        assert!(out.break_results.is_empty());
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::BreakAxisIneffective {
+                axis: AlignAxis::Y,
+                reason: "no gap overlaps the axis domain (0, 100)".to_string(),
+            }]
+        );
+    }
+
+    /// A nonlinear drawn scale warns in the caller's letter too.
+    #[test]
+    fn a_flipped_break_on_a_nonlinear_scale_warns_naming_the_callers_letter() {
+        let mut scales = flipped_bar_scales();
+        scales.x = scale_resolve::ScaleKind::Log(crate::scale::log::LogScale::new_internal(
+            vec![1.0, 1000.0],
+            vec![20.0, 320.0],
+            10.0,
+            false,
+            false,
+        ));
+        let (_, warnings) =
+            flipped_structural(&[break_spec(AlignAxis::Y, vec![[10.0, 100.0]])], &scales);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            matches!(
+                &warnings[0],
+                RenderWarning::BreakAxisOnNonlinearScale { axis: AlignAxis::Y, .. }
+            ),
+            "{warnings:?}"
+        );
+    }
+
+    /// Two flipped breaks on the caller's y that disagree on `break_style`
+    /// merge onto the drawn horizontal axis and the conflict names the
+    /// caller's axis.
+    #[test]
+    fn flipped_breaks_that_disagree_name_the_callers_axis() {
+        let (out, warnings) = flipped_structural(
+            &[
+                break_spec_styled(AlignAxis::Y, vec![[10.0, 20.0]], 12.0, "gap"),
+                break_spec_styled(AlignAxis::Y, vec![[40.0, 60.0]], 12.0, "slash"),
+            ],
+            &flipped_bar_scales(),
+        );
+        assert_eq!(out.break_results.len(), 1);
+        assert_eq!(out.break_results[0].0, AlignAxis::X);
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::BreakAxisMergeConflict {
+                axis: AlignAxis::Y,
+                field: "break_style".to_string(),
+            }]
+        );
+    }
+
+    /// The `break_size` conflict names the caller's axis too: two flipped
+    /// breaks on the caller's y that disagree on size merge onto the drawn
+    /// horizontal axis, the first declaration's size wins, and the one
+    /// warning names `y`.
+    #[test]
+    fn flipped_breaks_that_disagree_on_size_name_the_callers_axis() {
+        let (out, warnings) = flipped_structural(
+            &[
+                break_spec_styled(AlignAxis::Y, vec![[10.0, 20.0]], 12.0, "slash"),
+                break_spec_styled(AlignAxis::Y, vec![[40.0, 60.0]], 40.0, "slash"),
+            ],
+            &flipped_bar_scales(),
+        );
+        assert_eq!(out.break_results.len(), 1);
+        assert_eq!(out.break_results[0].0, AlignAxis::X);
+        assert_eq!(
+            warnings,
+            vec![RenderWarning::BreakAxisMergeConflict {
+                axis: AlignAxis::Y,
+                field: "break_size".to_string(),
+            }]
+        );
+    }
+
+    /// Specs on the caller's x and y stay two groups after the exchange.
+    #[test]
+    fn flipped_breaks_on_both_caller_axes_stay_separate() {
+        let scales = positional_scales(
+            linear_scale([0.0, 100.0], [20.0, 320.0]),
+            linear_scale([0.0, 1000.0], [320.0, 20.0]),
+        );
+        let (out, warnings) = flipped_structural(
+            &[
+                break_spec(AlignAxis::X, vec![[200.0, 400.0]]),
+                break_spec(AlignAxis::Y, vec![[40.0, 60.0]]),
+            ],
+            &scales,
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let axes: Vec<_> = out.break_results.iter().map(|(axis, _)| *axis).collect();
+        assert_eq!(axes, vec![AlignAxis::Y, AlignAxis::X]);
     }
 
     fn break_spec_styled(

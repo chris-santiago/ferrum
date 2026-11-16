@@ -67,7 +67,7 @@
 
 use crate::render::color::Color;
 use crate::render::draw::{
-    col_as_f64, col_as_ordinal_category_str, resolve_stroke_paint, stroke_width_column, DrawCtx,
+    col_as_f64, resolve_stroke_paint, stroke_width_column, DrawCtx,
 };
 use crate::render::mark_nodes::MarkNodes;
 use crate::render::marks::channels::{
@@ -184,6 +184,7 @@ impl<'a> RuleShape<'a> {
 /// as-is.
 fn positional_pixels(
     ctx: &DrawCtx,
+    channel: &str,
     field: &str,
     scale: &ScaleKind,
 ) -> Result<Vec<Option<f64>>, RenderError> {
@@ -193,7 +194,7 @@ fn positional_pixels(
         // way the ordinal domain was built, and a null row has no band and
         // draws nothing.
         ScaleKind::Ordinal(_) => {
-            let cats = col_as_ordinal_category_str(ctx.batch, field)?;
+            let cats = ctx.category_strings(channel, field)?;
             Ok(cats
                 .iter()
                 .map(|c| c.as_deref().and_then(|v| scale.to_pixel_str(v)))
@@ -371,10 +372,10 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
     let names_unflipped = crate::render::prepare::names_unflipped(spec.coord.as_ref(), spec.flip_by_call);
     let acc = match RuleShape::resolve(&spec.encoding, names_unflipped)? {
         RuleShape::Diagonal { x, y, x2, y2 } => {
-            let xs = positional_pixels(ctx, x, &ctx.scales.x)?;
-            let ys = positional_pixels(ctx, y, &ctx.scales.y)?;
-            let x2s = positional_pixels(ctx, x2, &ctx.scales.x)?;
-            let y2s = positional_pixels(ctx, y2, &ctx.scales.y)?;
+            let xs = positional_pixels(ctx, "x", x, &ctx.scales.x)?;
+            let ys = positional_pixels(ctx, "y", y, &ctx.scales.y)?;
+            let x2s = positional_pixels(ctx, "x2", x2, &ctx.scales.x)?;
+            let y2s = positional_pixels(ctx, "y2", y2, &ctx.scales.y)?;
             let n = xs.len().min(ys.len()).min(x2s.len()).min(y2s.len());
             rule_segments(
                 n,
@@ -390,9 +391,9 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             )
         }
         RuleShape::VerticalSegment { x, y, y2 } => {
-            let xs = positional_pixels(ctx, x, &ctx.scales.x)?;
-            let ys = positional_pixels(ctx, y, &ctx.scales.y)?;
-            let y2s = positional_pixels(ctx, y2, &ctx.scales.y)?;
+            let xs = positional_pixels(ctx, "x", x, &ctx.scales.x)?;
+            let ys = positional_pixels(ctx, "y", y, &ctx.scales.y)?;
+            let y2s = positional_pixels(ctx, "y2", y2, &ctx.scales.y)?;
             let n = xs.len().min(ys.len()).min(y2s.len());
             rule_segments(
                 n,
@@ -404,9 +405,9 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             )
         }
         RuleShape::HorizontalSegment { y, x, x2 } => {
-            let ys = positional_pixels(ctx, y, &ctx.scales.y)?;
-            let xs = positional_pixels(ctx, x, &ctx.scales.x)?;
-            let x2s = positional_pixels(ctx, x2, &ctx.scales.x)?;
+            let ys = positional_pixels(ctx, "y", y, &ctx.scales.y)?;
+            let xs = positional_pixels(ctx, "x", x, &ctx.scales.x)?;
+            let x2s = positional_pixels(ctx, "x2", x2, &ctx.scales.x)?;
             let n = ys.len().min(xs.len()).min(x2s.len());
             rule_segments(
                 n,
@@ -421,7 +422,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
         // no position offset — only the positional end is offset, matching
         // every previous revision of these two modes byte for byte.
         RuleShape::VerticalSpan { x } => {
-            let xs = positional_pixels(ctx, x, &ctx.scales.x)?;
+            let xs = positional_pixels(ctx, "x", x, &ctx.scales.x)?;
             rule_segments(
                 xs.len(),
                 |i| {
@@ -432,7 +433,7 @@ pub fn build(ctx: &DrawCtx) -> Result<crate::render::draw::MarkBuildResult, Rend
             )
         }
         RuleShape::HorizontalSpan { y } => {
-            let ys = positional_pixels(ctx, y, &ctx.scales.y)?;
+            let ys = positional_pixels(ctx, "y", y, &ctx.scales.y)?;
             rule_segments(
                 ys.len(),
                 |i| {

@@ -15,11 +15,13 @@ from typing import TYPE_CHECKING, Literal
 from ferrum._coerce import normalize_for_rust, to_arrow_table
 from ferrum._render_prepare import (
     _axis_label_maps,
+    _check_category_columns,
     _classify_field,
     _collect_label_maps,
     _rename_annotation_categories,
     _rename_through_label_maps,
 )
+from ferrum._warn import user_stacklevel
 from ferrum.encoding.base import ChannelBase, _unset_statistic
 
 if TYPE_CHECKING:
@@ -124,7 +126,7 @@ def _warn_large_chart(mark_count: int) -> None:
         f"Use `.mark_raster()` for efficient rendering, or set "
         f"`raster=False` to suppress this warning.",
         UserWarning,
-        stacklevel=5,
+        stacklevel=user_stacklevel(),
     )
 
 
@@ -153,7 +155,7 @@ def _warn_bin_excluded(mark_count: int) -> None:
         f"beside `x=fm.X('field', bin=True)`), or set `raster=False` to "
         f"suppress this warning.",
         UserWarning,
-        stacklevel=5,
+        stacklevel=user_stacklevel(),
     )
 
 
@@ -176,7 +178,7 @@ def _warn_channel_aggregate_excluded(mark_count: int, channels: list[str]) -> No
         f"column with no aggregate= of its own, or set `raster=False` to "
         f"suppress this warning.",
         UserWarning,
-        stacklevel=5,
+        stacklevel=user_stacklevel(),
     )
 
 
@@ -226,7 +228,7 @@ def _warn_categorical_color_excluded(
             else ""
         ),
         UserWarning,
-        stacklevel=5,
+        stacklevel=user_stacklevel(),
     )
 
 
@@ -530,7 +532,7 @@ class _RenderMixin:
                 f"({mark_count:,} marks > threshold {threshold:,}). "
                 f"Pass raster=False to .show()/.save() to disable.",
                 UserWarning,
-                stacklevel=4,
+                stacklevel=user_stacklevel(),
             )
 
         return substituted
@@ -646,7 +648,9 @@ class _RenderMixin:
         else:
             raise TypeError(f"Unknown structural feature type: {type(feat)}")
 
-    def _render_inputs(self, *, _auto_tooltips: bool = False) -> tuple:
+    def _render_inputs(
+        self, *, _auto_tooltips: bool = False, _check_categories: bool = True
+    ) -> tuple:
         import json
 
         from ferrum._core import ChartSpec
@@ -663,6 +667,8 @@ class _RenderMixin:
 
             override_payload = build_payload(chart._overrides)
         spec = chart.to_spec(_override_payload=override_payload)
+        if _check_categories:
+            _check_category_columns(spec, chart._data)
         if _auto_tooltips:
             kw = json.loads(spec.to_json())
             kw = chart._inject_auto_tooltips(kw)
@@ -695,6 +701,20 @@ class _RenderMixin:
             viewport = apply_properties(viewport, override_payload)
             emit_deprecations(override_payload)
         return spec, data, viewport, theme_dict, chart_config_dict
+
+    def _check_category_bindings(self) -> None:
+        """Run the category-column check on this chart as a render would build it.
+
+        A caller that lowers the chart's members one by one (the static ``LayerChart``
+        overlay) checks the merged chart once here and lowers the members with the check off,
+        so it checks exactly the bindings the single merged render checks.
+        """
+        with warnings.catch_warnings():
+            # The render this stands in for owns the guidance warnings of these steps.
+            warnings.simplefilter("ignore")
+            chart = self._with_polars_data()._resolve_pending()._apply_auto_raster()
+            spec = chart.to_spec()
+        _check_category_columns(spec, chart._data)
 
     def to_svg(self, *, raster: bool | None = None) -> str:
         """Return the chart rendered as an SVG string.

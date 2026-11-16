@@ -88,6 +88,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // How the render reads a column's dtype as categorical, so the Python bar
     // zero-anchor picks the same value channel the bar builders draw along.
     m.add_function(wrap_pyfunction!(render::binding::column_reads_categorical, m)?)?;
+    m.add_function(wrap_pyfunction!(render::category_read::category_read_fields, m)?)?;
     // The positional gate's unknown-column refusal text, so a Python check
     // that knows a layer's schema raises the gate's words, not a copy.
     m.add_function(wrap_pyfunction!(render::binding::layer_unknown_column_message, m)?)?;

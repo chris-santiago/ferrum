@@ -34,6 +34,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import itertools
+import warnings
 
 import polars as pl
 import pytest
@@ -452,4 +453,418 @@ def test_integer_category_columns_under_the_ordinal_union_is_byte_identical(rout
     assert (
         _control_hash(route, bar, point)
         == _ORDINAL_UNION_CONTROL_HASHES["integer_category_ordinal_union"][route]
+    )
+
+
+# ---------------------------------------------------------------------------
+# A temporal date layer beside a TEXT category axis keeps every outcome it had.
+#
+# A date layer beside a text category axis is not a date category axis: the
+# date stays a time value (a later layer's undeclared, or ``:T``, date column is
+# never read as categories there), so the whole table below is the v0.25.0
+# outcome on every mark, declaration, door and output: a recorded digest of the
+# svg (or the scene) with its ordered warnings, or the refusal's full text.
+# Those include v0.25.0's own route split (a rule refuses on ``+``,
+# ``Chart.layer`` and both interactive overlays and renders on the static
+# overlay) and its silent empty draws. Measured on the v0.25.0 build.
+# ---------------------------------------------------------------------------
+
+_BESIDE_STAMPS = pl.DataFrame(
+    {
+        "when": [datetime.datetime(2020, month, 1) for month in (1, 2, 3)],
+        "v2": [4.0, 5.0, 6.0],
+        "v3": [5.0, 6.0, 7.0],
+        "lab": ["p", "q", "r"],
+    }
+)
+_BESIDE_CAT = pl.DataFrame({"cat": ["a", "b", "c"], "v": [1.0, 2.0, 3.0]})
+
+# mark -> the encoding its date layer writes beside the text axis (``{x}`` is the x binding)
+_BESIDE_MARKS: dict[str, dict[str, object]] = {
+    "line": {"y": "v2"},
+    "point": {"y": "v2"},
+    "bar": {"y": "v2"},
+    "area": {"y": "v2"},
+    "tick": {},
+    "text": {"y": "v2", "text": "lab"},
+    "rect": {"y": "v2", "y2": "v3"},
+    "rule": {},
+}
+_BESIDE_X = {"undeclared": lambda: "when", "T": lambda: fm.X("when", type_="T")}
+_BESIDE_DOORS = ["+", "Chart.layer", "fm.layer", "LayerChart"]
+_BESIDE_OUTPUTS = ["static", "interactive"]
+
+
+def _beside_chart(mark: str, declared: str, door: str):
+    bar = fm.Chart(_BESIDE_CAT).mark_bar().encode(x=fm.X("cat", type_="N"), y="v")
+    encoding = {"x": _BESIDE_X[declared](), **_BESIDE_MARKS[mark]}
+    later = getattr(fm.Chart(_BESIDE_STAMPS), f"mark_{mark}")().encode(**encoding)
+    if door == "+":
+        return bar + later
+    if door == "Chart.layer":
+        return bar.layer(fm.Layer(mark=mark, data=_BESIDE_STAMPS, encoding=encoding))
+    if door == "fm.layer":
+        return fm.layer(bar, later)
+    return fm.LayerChart(bar, later)
+
+
+def _beside_outcome(mark: str, declared: str, door: str, output: str) -> tuple:
+    """``("refused", full text)`` or ``("drawn", digest of the output, ordered warnings)``."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            chart = _beside_chart(mark, declared, door)
+            out = chart.to_svg() if output == "static" else chart.interactive().scene_json
+        except ValueError as refusal_:
+            return ("refused", str(refusal_))
+    return ("drawn", _sha16(out), tuple(str(w.message) for w in caught))
+
+
+_BESIDE_AT_V025: dict[tuple[str, str, str, str], tuple] = {
+    ("area", "T", "+", "static"): (
+        "drawn",
+        "1a8ac40fe0c24787",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the scale's explicit "
+            "domain, so they are not drawn; widen the domain, or pass "
+            "clamp=True to draw them at the axis edge",
+        ),
+    ),
+    ("area", "T", "+", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the scale's "
+            "explicit domain, so they are not drawn; widen the domain, "
+            "or pass clamp=True to draw them at the axis edge",
+        ),
+    ),
+    ("area", "T", "Chart.layer", "static"): (
+        "drawn",
+        "1a8ac40fe0c24787",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the scale's "
+            "explicit domain, so they are not drawn; widen the "
+            "domain, or pass clamp=True to draw them at the axis "
+            "edge",
+        ),
+    ),
+    ("area", "T", "Chart.layer", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the "
+            "scale's explicit domain, so they are not drawn; "
+            "widen the domain, or pass clamp=True to draw them "
+            "at the axis edge",
+        ),
+    ),
+    ("area", "T", "fm.layer", "static"): ("drawn", "19211423d0f5b8c4", ()),
+    ("area", "T", "fm.layer", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the scale's "
+            "explicit domain, so they are not drawn; widen the "
+            "domain, or pass clamp=True to draw them at the axis "
+            "edge",
+        ),
+    ),
+    ("area", "T", "LayerChart", "static"): ("drawn", "19211423d0f5b8c4", ()),
+    ("area", "T", "LayerChart", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the "
+            "scale's explicit domain, so they are not drawn; "
+            "widen the domain, or pass clamp=True to draw them "
+            "at the axis edge",
+        ),
+    ),
+    ("area", "undeclared", "+", "static"): (
+        "drawn",
+        "1a8ac40fe0c24787",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the scale's "
+            "explicit domain, so they are not drawn; widen the "
+            "domain, or pass clamp=True to draw them at the axis "
+            "edge",
+        ),
+    ),
+    ("area", "undeclared", "+", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the "
+            "scale's explicit domain, so they are not drawn; "
+            "widen the domain, or pass clamp=True to draw them "
+            "at the axis edge",
+        ),
+    ),
+    ("area", "undeclared", "Chart.layer", "static"): (
+        "drawn",
+        "1a8ac40fe0c24787",
+        (
+            "x scale: 3 row(s) of 'when' fall outside the "
+            "scale's explicit domain, so they are not "
+            "drawn; widen the domain, or pass clamp=True "
+            "to draw them at the axis edge",
+        ),
+    ),
+    ("area", "undeclared", "Chart.layer", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside "
+            "the scale's explicit domain, so they are "
+            "not drawn; widen the domain, or pass "
+            "clamp=True to draw them at the axis "
+            "edge",
+        ),
+    ),
+    ("area", "undeclared", "fm.layer", "static"): ("drawn", "19211423d0f5b8c4", ()),
+    ("area", "undeclared", "fm.layer", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside "
+            "the scale's explicit domain, so they are "
+            "not drawn; widen the domain, or pass "
+            "clamp=True to draw them at the axis edge",
+        ),
+    ),
+    ("area", "undeclared", "LayerChart", "static"): ("drawn", "19211423d0f5b8c4", ()),
+    ("area", "undeclared", "LayerChart", "interactive"): (
+        "drawn",
+        "54765f470858906e",
+        (
+            "x scale: 3 row(s) of 'when' fall outside "
+            "the scale's explicit domain, so they are "
+            "not drawn; widen the domain, or pass "
+            "clamp=True to draw them at the axis "
+            "edge",
+        ),
+    ),
+    ("bar", "T", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("bar", "T", "+", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "T", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("bar", "T", "Chart.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "T", "fm.layer", "static"): ("drawn", "1c19c5df157d891b", ()),
+    ("bar", "T", "fm.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "T", "LayerChart", "static"): ("drawn", "1c19c5df157d891b", ()),
+    ("bar", "T", "LayerChart", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("bar", "undeclared", "+", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("bar", "undeclared", "Chart.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "fm.layer", "static"): ("drawn", "1c19c5df157d891b", ()),
+    ("bar", "undeclared", "fm.layer", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("bar", "undeclared", "LayerChart", "static"): ("drawn", "1c19c5df157d891b", ()),
+    ("bar", "undeclared", "LayerChart", "interactive"): ("drawn", "a1eba7e11319a68e", ()),
+    ("line", "T", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("line", "T", "+", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "T", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("line", "T", "Chart.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "T", "fm.layer", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
+    ("line", "T", "fm.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "T", "LayerChart", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
+    ("line", "T", "LayerChart", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("line", "undeclared", "+", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("line", "undeclared", "Chart.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "fm.layer", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
+    ("line", "undeclared", "fm.layer", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("line", "undeclared", "LayerChart", "static"): ("drawn", "9f112fc7ec2f70f0", ()),
+    ("line", "undeclared", "LayerChart", "interactive"): ("drawn", "374f5ba1bc1ce13f", ()),
+    ("point", "T", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("point", "T", "+", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "T", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("point", "T", "Chart.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "T", "fm.layer", "static"): ("drawn", "e32fb45e04ea221f", ()),
+    ("point", "T", "fm.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "T", "LayerChart", "static"): ("drawn", "e32fb45e04ea221f", ()),
+    ("point", "T", "LayerChart", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "+", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("point", "undeclared", "+", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "Chart.layer", "static"): ("drawn", "1a8ac40fe0c24787", ()),
+    ("point", "undeclared", "Chart.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "fm.layer", "static"): ("drawn", "e32fb45e04ea221f", ()),
+    ("point", "undeclared", "fm.layer", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("point", "undeclared", "LayerChart", "static"): ("drawn", "e32fb45e04ea221f", ()),
+    ("point", "undeclared", "LayerChart", "interactive"): ("drawn", "dea5975c7876446a", ()),
+    ("rect", "T", "+", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
+    ("rect", "T", "+", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "T", "Chart.layer", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
+    ("rect", "T", "Chart.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "T", "fm.layer", "static"): (
+        "drawn",
+        "9dc80c4da0d9303c",
+        (
+            "rect layer 0 drew nothing: mark_rect() needs an ordinal x "
+            "or y axis to size its band-relative width, but the "
+            "resolved scale is continuous",
+        ),
+    ),
+    ("rect", "T", "fm.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "T", "LayerChart", "static"): (
+        "drawn",
+        "9dc80c4da0d9303c",
+        (
+            "rect layer 0 drew nothing: mark_rect() needs an ordinal "
+            "x or y axis to size its band-relative width, but the "
+            "resolved scale is continuous",
+        ),
+    ),
+    ("rect", "T", "LayerChart", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "+", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
+    ("rect", "undeclared", "+", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "Chart.layer", "static"): ("drawn", "ebfa7c2d9d1d407a", ()),
+    ("rect", "undeclared", "Chart.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "fm.layer", "static"): (
+        "drawn",
+        "9dc80c4da0d9303c",
+        (
+            "rect layer 0 drew nothing: mark_rect() needs an "
+            "ordinal x or y axis to size its band-relative "
+            "width, but the resolved scale is continuous",
+        ),
+    ),
+    ("rect", "undeclared", "fm.layer", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rect", "undeclared", "LayerChart", "static"): (
+        "drawn",
+        "9dc80c4da0d9303c",
+        (
+            "rect layer 0 drew nothing: mark_rect() needs "
+            "an ordinal x or y axis to size its "
+            "band-relative width, but the resolved scale is "
+            "continuous",
+        ),
+    ),
+    ("rect", "undeclared", "LayerChart", "interactive"): ("drawn", "9aa5654c99b2fb9f", ()),
+    ("rule", "T", "+", "static"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported dtype: "
+        "Timestamp(Millisecond, None) (cannot convert to ordinal category "
+        "string)",
+    ),
+    ("rule", "T", "+", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported dtype: "
+        "Timestamp(Millisecond, None) (cannot convert to ordinal "
+        "category string)",
+    ),
+    ("rule", "T", "Chart.layer", "static"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported "
+        "dtype: Timestamp(Millisecond, None) (cannot convert to "
+        "ordinal category string)",
+    ),
+    ("rule", "T", "Chart.layer", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported "
+        "dtype: Timestamp(Millisecond, None) (cannot "
+        "convert to ordinal category string)",
+    ),
+    ("rule", "T", "fm.layer", "static"): ("drawn", "82bd7514e404d178", ()),
+    ("rule", "T", "fm.layer", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported "
+        "dtype: Timestamp(Millisecond, None) (cannot convert "
+        "to ordinal category string)",
+    ),
+    ("rule", "T", "LayerChart", "static"): ("drawn", "82bd7514e404d178", ()),
+    ("rule", "T", "LayerChart", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported "
+        "dtype: Timestamp(Millisecond, None) (cannot convert "
+        "to ordinal category string)",
+    ),
+    ("rule", "undeclared", "+", "static"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported dtype: "
+        "Timestamp(Millisecond, None) (cannot convert to ordinal "
+        "category string)",
+    ),
+    ("rule", "undeclared", "+", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has unsupported "
+        "dtype: Timestamp(Millisecond, None) (cannot convert "
+        "to ordinal category string)",
+    ),
+    ("rule", "undeclared", "Chart.layer", "static"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has "
+        "unsupported dtype: Timestamp(Millisecond, "
+        "None) (cannot convert to ordinal category "
+        "string)",
+    ),
+    ("rule", "undeclared", "Chart.layer", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has "
+        "unsupported dtype: Timestamp(Millisecond, "
+        "None) (cannot convert to ordinal category "
+        "string)",
+    ),
+    ("rule", "undeclared", "fm.layer", "static"): ("drawn", "82bd7514e404d178", ()),
+    ("rule", "undeclared", "fm.layer", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has "
+        "unsupported dtype: Timestamp(Millisecond, "
+        "None) (cannot convert to ordinal category "
+        "string)",
+    ),
+    ("rule", "undeclared", "LayerChart", "static"): ("drawn", "82bd7514e404d178", ()),
+    ("rule", "undeclared", "LayerChart", "interactive"): (
+        "refused",
+        "layer 1: mark_rule: column 'when' has "
+        "unsupported dtype: Timestamp(Millisecond, "
+        "None) (cannot convert to ordinal category "
+        "string)",
+    ),
+    ("text", "T", "+", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
+    ("text", "T", "+", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "T", "Chart.layer", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
+    ("text", "T", "Chart.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "T", "fm.layer", "static"): ("drawn", "ae61410c6236d75f", ()),
+    ("text", "T", "fm.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "T", "LayerChart", "static"): ("drawn", "ae61410c6236d75f", ()),
+    ("text", "T", "LayerChart", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "+", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
+    ("text", "undeclared", "+", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "Chart.layer", "static"): ("drawn", "0d8eb0b7e86cd5f5", ()),
+    ("text", "undeclared", "Chart.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "fm.layer", "static"): ("drawn", "ae61410c6236d75f", ()),
+    ("text", "undeclared", "fm.layer", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("text", "undeclared", "LayerChart", "static"): ("drawn", "ae61410c6236d75f", ()),
+    ("text", "undeclared", "LayerChart", "interactive"): ("drawn", "190d8613aaede355", ()),
+    ("tick", "T", "+", "static"): ("drawn", "230f8a2223a2e55e", ()),
+    ("tick", "T", "+", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "T", "Chart.layer", "static"): ("drawn", "230f8a2223a2e55e", ()),
+    ("tick", "T", "Chart.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "T", "fm.layer", "static"): ("drawn", "f148000c6632e781", ()),
+    ("tick", "T", "fm.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "T", "LayerChart", "static"): ("drawn", "f148000c6632e781", ()),
+    ("tick", "T", "LayerChart", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "+", "static"): ("drawn", "230f8a2223a2e55e", ()),
+    ("tick", "undeclared", "+", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "Chart.layer", "static"): ("drawn", "230f8a2223a2e55e", ()),
+    ("tick", "undeclared", "Chart.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "fm.layer", "static"): ("drawn", "f148000c6632e781", ()),
+    ("tick", "undeclared", "fm.layer", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+    ("tick", "undeclared", "LayerChart", "static"): ("drawn", "f148000c6632e781", ()),
+    ("tick", "undeclared", "LayerChart", "interactive"): ("drawn", "03d3cec4d4872def", ()),
+}
+
+
+@pytest.mark.parametrize("output", _BESIDE_OUTPUTS)
+@pytest.mark.parametrize("door", _BESIDE_DOORS)
+@pytest.mark.parametrize("declared", sorted(_BESIDE_X))
+@pytest.mark.parametrize("mark", sorted(_BESIDE_MARKS))
+def test_a_temporal_date_layer_beside_a_text_category_axis_matches_head(
+    mark: str, declared: str, door: str, output: str
+) -> None:
+    assert (
+        _beside_outcome(mark, declared, door, output)
+        == _BESIDE_AT_V025[(mark, declared, door, output)]
     )

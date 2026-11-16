@@ -370,20 +370,31 @@ def test_a_temporal_layer_field_beside_a_categorical_axis_renders():
 def test_a_genuinely_unreadable_axis_column_still_refuses():
     """The skip is for a LAYER's contribution, not for the axis's own column.
 
-    The same `Timestamp` column bound as a nominal axis — i.e. as the thing the
-    ladder is made of — must still raise, naming the column. This is the half that
-    keeps F2's fix from being a blanket swallow: only the layer-contribution read
-    is gated, and only by a property (can this be a category key at all) that
-    makes the skip lossless.
+    A column no reader can key (a time of day) bound as a nominal axis, i.e. as the thing the
+    ladder is made of, must still raise, naming the column. This is the half that keeps F2's
+    fix from being a blanket swallow: only the layer-contribution read is gated, and only by a
+    property (can this be a category key at all) that makes the skip lossless.
     """
+    clocks = pl.DataFrame({"when": [datetime.time(1), datetime.time(2)], "v2": [4.0, 5.0]})
+    with pytest.raises(ValueError) as refusal:
+        fm.Chart(clocks).mark_bar().encode(x=fm.X("when", type_="N"), y="v2").to_svg()
+    assert str(refusal.value) == (
+        "column 'when' has unsupported dtype: Time64(Nanosecond) (cannot enumerate distinct values)"
+    )
+
+
+def test_a_timestamp_axis_column_declared_nominal_is_the_ladder_one_band_per_date():
+    """The same `Timestamp` column bound as a nominal axis is readable: it is the ladder itself,
+    one band per date in time order, labelled by its ISO text."""
     stamps = pl.DataFrame(
         {
-            "when": [datetime.datetime(2020, 1, 1), datetime.datetime(2020, 2, 1)],
-            "v2": [4.0, 5.0],
+            "when": [datetime.datetime(2020, m, 1) for m in (3, 1, 2)],
+            "v2": [4.0, 5.0, 6.0],
         }
     )
-    with pytest.raises(ValueError, match="when"):
-        fm.Chart(stamps).mark_bar().encode(x=fm.X("when", type_="N"), y="v2").to_svg()
+    svg = fm.Chart(stamps).mark_bar().encode(x=fm.X("when", type_="N"), y="v2").to_svg()
+    assert axis_tick_labels(svg, axis="x") == ["2020-01-01", "2020-02-01", "2020-03-01"]
+    assert len(data_bar_rects(mark_layer(svg))) == 3
 
 
 def test_a_quantitative_layer_column_the_ladder_can_serve_still_bands_and_draws():

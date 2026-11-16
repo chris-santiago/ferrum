@@ -41,6 +41,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+import warnings
 
 import polars as pl
 import pytest
@@ -494,9 +495,10 @@ class TestEverySurfaceAnswersAMalformedPairAlike:
             chart.to_svg()
 
 
-#: The surfaces whose field can be temporal. A shape or stroke-dash legend
-#: cannot be built over a temporal field at all: scale resolution refuses the
-#: dtype ("cannot enumerate distinct values") before any legend format is read.
+#: The surfaces whose field can be temporal. A shape or stroke-dash legend lists its categories
+#: as text (a date reads as its ISO label), so it is a category surface, not a temporal one: a
+#: date there answers every format as the same legend over the ISO label text does (pinned by
+#: ``test_a_date_category_legend_answers_a_format_as_its_label_text_twin``).
 TEMPORAL_CAPABLE = sorted(set(REFUSABLE) - {"shape_legend", "stroke_dash_legend"})
 
 #: The ordinal-on-temporal refusal, per surface: the mirror of ``REFUSED_ON``.
@@ -588,12 +590,64 @@ class TestTheLastTwoCellsGiveOneAnswer:
         )
         assert _refusal(chart).startswith('invalid format spec "%b": unrecognized token "b"')
 
-    @pytest.mark.parametrize("surface", ["shape_legend", "stroke_dash_legend"])
-    def test_a_shape_or_stroke_dash_legend_over_a_temporal_field_refuses_earlier(self, surface):
-        """Invariant guard for the exclusion above: these legends never reach
-        a temporal field's format, since the field itself is refused first."""
-        with pytest.raises(ValueError, match=r"cannot enumerate distinct values"):
-            REFUSABLE[surface]("d:T", "__ordinal__", None).to_svg()
+
+def _date_legend_chart(frame: pl.DataFrame, channel: str, field: str, fmt, fmt_type) -> fm.Chart:
+    """A legend over *field* of *frame* on *channel*, carrying the format pair (shape and dash
+    over a mark that draws them)."""
+    legend = fm.Legend(**_format_kwargs(fmt, fmt_type))
+    base = fm.Chart(frame)
+    if channel == "color":
+        return base.mark_point().encode(
+            x="n:Q", y="n:Q", color=fm.Color(field, type_="N", legend=legend)
+        )
+    if channel == "shape":
+        return base.mark_point().encode(x="n:Q", y="n:Q", shape=fm.Shape(field, legend=legend))
+    return base.mark_line().encode(
+        x="n:Q", y="n:Q", stroke_dash=fm.StrokeDash(field, legend=legend)
+    )
+
+
+def _outcome(chart: fm.Chart) -> tuple:
+    """``("refused", full text)`` or ``("drawn", svg, ordered warnings)``."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            svg = chart.to_svg()
+        except ValueError as refusal:
+            return ("refused", str(refusal))
+    return ("drawn", svg, [str(w.message) for w in caught])
+
+
+_DATE_LEGEND_FORMATS = [
+    pytest.param("%Y", "time", id="time_typed_pattern"),
+    pytest.param("%Y", None, id="untyped_pattern"),
+    pytest.param("__ordinal__", None, id="ordinal"),
+    pytest.param(".2f", None, id="number"),
+]
+
+
+@pytest.mark.parametrize("fmt,fmt_type", _DATE_LEGEND_FORMATS)
+@pytest.mark.parametrize(
+    "channel,field",
+    [
+        pytest.param("color", "d", id="colour_nominal"),
+        pytest.param("shape", "d", id="shape_untyped"),
+        pytest.param("shape", "d:T", id="shape_declared_temporal"),
+        pytest.param("stroke_dash", "d", id="stroke_dash_untyped"),
+        pytest.param("stroke_dash", "d:T", id="stroke_dash_declared_temporal"),
+    ],
+)
+def test_a_date_category_legend_answers_a_format_as_its_label_text_twin(
+    channel: str, field: str, fmt, fmt_type
+):
+    """A date on a colour, shape or stroke_dash legend is a category, so its legend answers every
+    format pair exactly as the same legend over the dates' ISO label text does: the same full
+    refusal text, or the same bytes and ordered warnings (a time format is never silently
+    dropped by one and refused by the other)."""
+    labels = YEARLY.with_columns(d=pl.col("d").dt.strftime("%Y-%m-%d"))
+    outcome = _outcome(_date_legend_chart(YEARLY, channel, field, fmt, fmt_type))
+    twin = _outcome(_date_legend_chart(labels, channel, "d", fmt, fmt_type))
+    assert outcome == twin
 
 
 def _colorbar_chart(mark: str = "point", **color_kwargs):

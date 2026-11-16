@@ -56,8 +56,10 @@ pub(in crate::render) use self::color::{color_split, require_binnable};
 // (`render::composite`), which unions per-channel domains across a composite
 // tree's leaves through the same facet mechanism (`domain` is a private
 // submodule, so the pub(in crate::render) fns need a reachable path here).
+#[cfg(test)]
+pub(in crate::render) use self::domain::axis_of_dates;
 pub(in crate::render) use self::domain::{
-    add_distinct_source, admitted_aux_reads, admitted_color_reads, batch_carrying, binned_color_sources, finite_sorted, chart_sort_rows, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
+    add_distinct_source, admitted_aux_reads, admitted_color_reads, establishing_axis_read, layer_flips, batch_carrying, binned_color_sources, finite_sorted, chart_sort_rows, color_grouping_area, aux_category_union, aux_numeric_union, aux_reads, establishing_sort_rows, explicit_ordinal_domain, layer_sort_rows, is_categorical_scale, with_primary_y_owner, AuxRead, ColorReads, LocatedColumn, SortRows,
     apply_sort_to_domain, column_reads_categorical, dtype_reads_categorical, establishing_caller_scale, locate_field, locate_seed_field, numeric_domain_union_over,
     positional_category_union, require_layers_placeable_on_caller_scale, sided_aux_numeric_union, warn_layers_off_caller_scale, warn_members_off_caller_scale, AxisMember, AxisMembers, FacetExtentPolicy, LayerUnion,
     SortContext, text_edge_rows, primary_axis_text_rows, TextEdgeRows, resolved_explicit_scale, whole_frame_batch,
@@ -1852,19 +1854,6 @@ pub(super) fn union_panel_with_global_extent_at(
     let (g_lo, g_hi) = numeric_extent(col.as_ref());
     let (p_lo, p_hi) = panel_extent;
     (p_lo.min(g_lo), p_hi.max(g_hi))
-}
-
-/// First-appearance-order distinct string values of `field` (nulls dropped),
-/// the categorical-domain primitive shared by the color/shape scale builders.
-///
-/// `pub(in crate::render)` so the composite resolve pass (`render::composite`)
-/// can union a leaf's shared categorical color domain through the same primitive
-/// the categorical color path uses (10-pre-b).
-pub(in crate::render) fn distinct_values_in_order(
-    batch: &RecordBatch,
-    field: &str,
-) -> Result<Vec<String>, RenderError> {
-    super::arrow_cast::distinct_values_in_order(batch, field)
 }
 
 /// T4: per-channel "shared faceted positional scale" flags `(x_shared, y_shared)`.

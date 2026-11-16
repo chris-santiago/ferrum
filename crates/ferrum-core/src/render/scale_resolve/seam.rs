@@ -294,8 +294,9 @@ pub(crate) enum SharedDomain {
     /// resolver treats it). The consuming auto path decides Linear vs Time from
     /// the leaf's own column dtype; this only supplies the shared extent.
     Numeric { lo: f64, hi: f64 },
-    /// Ordinal/nominal domain in first-appearance order across the group.
-    Ordinal(Vec<String>),
+    /// Ordinal/nominal domain across the group: first appearance, with dates
+    /// in time order ([`CategoryDomain`]).
+    Ordinal(crate::render::category_read::CategoryDomain),
     /// A binned color with derived edges (`Color(bin=...)`, a `bin-ordinal`
     /// scale carrying `bin` and no `bins`): the field it bins, its bin
     /// parameters, and the distinct sources of the finite values it cuts its
@@ -308,6 +309,14 @@ pub(crate) enum SharedDomain {
     /// its own scale; the variant lets a shared group check it merges into
     /// one scale with the others, and is never assigned to a leaf.
     FixedBins { field: String, bins: Vec<f64> },
+}
+
+#[cfg(test)]
+impl SharedDomain {
+    /// An ordinal domain of plain labels, kept in the order given.
+    pub(crate) fn ordinal<I: IntoIterator<Item = String>>(labels: I) -> Self {
+        Self::Ordinal(crate::render::category_read::CategoryDomain::from_labels(labels))
+    }
 }
 
 /// Everything a composite parent imposes on ONE leaf: the resolved shared

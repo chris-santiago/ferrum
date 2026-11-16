@@ -15,8 +15,9 @@ use ferrum_scene::{categorical_slot_dash, STROKE_DASH_LEGACY_SLOTS};
 use crate::render::RenderError;
 use crate::spec::encoding::{Encoding, EncodingSpec, ScaleSpec};
 
+use crate::render::category_read::{timestamp_read, CategoryDomain};
 use super::domain::{admitted_aux_reads, aux_category_union, sided_aux_numeric_union, apply_sort_to_domain, explicit_ordinal_domain, explicit_ordinal_range, legend_sort_context, AuxRead};
-use super::{distinct_values_in_order, infer_spec_type, shared_categorical_batch, sided_min_max_f64, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, StrokeWidthScale, SHAPE_PALETTE};
+use super::{infer_spec_type, shared_categorical_batch, sided_min_max_f64, OpacityScale, ScaleKind, ShapeKind, ShapeScale, SharedDomain, SizeScale, StrokeDashScale, StrokeWidthScale, SHAPE_PALETTE};
 
 /// The channels whose scale maps a quantitative field onto a bounded output
 /// interval: the one gate [`numeric_aux_scale`] answers for.
@@ -382,6 +383,8 @@ fn numeric_aux_scale_kind(
 #[allow(clippy::too_many_arguments)]
 fn sorted_categorical_domain(
     encoding: &Encoding,
+    channel: &'static str,
+    binding: &crate::spec::encoding::EncodingSpec,
     field: &str,
     explicit_domain: Option<Vec<String>>,
     sort: Option<&serde_json::Value>,
@@ -409,19 +412,22 @@ fn sorted_categorical_domain(
         Some(lead) => lead.locate(batch, transform_outputs).map(|located| (lead.field(), located.col)),
         None => batch.column_by_name(field).map(|col| (field, col.as_ref())),
     };
+    // Whether a date reads as categories here is the owner's answer: a shape or
+    // dash always does.
+    let read = timestamp_read(channel, Some(binding), crate::spec::mark::Mark::Point, false);
     if let (true, Some((name, col))) = (establishing_draws, establishing) {
-        crate::render::arrow_cast::ensure_category_keyable(name, col.data_type())?;
+        crate::render::arrow_cast::ensure_category_keyable(name, col.data_type(), read)?;
     }
     // A layered spec's every read draws its field, so the union is `None`
     // only for an unlayered spec, which reads its one batch.
-    let (layer_categories, domain_batch, lead) = match aux_category_union(layer_reads, batch, transform_outputs, facet_shared)? {
+    let (layer_categories, domain_batch, lead) = match aux_category_union(layer_reads, channel, batch, transform_outputs, facet_shared)? {
         Some((categories, first_batch, read)) => (Some(categories), first_batch, Some(read)),
         None => (None, shared_categorical_batch(batch, field, transform_outputs, facet_shared), None),
     };
     let mut distinct = match (explicit_domain, layer_categories) {
         (Some(declared), _) => declared,
-        (None, Some(categories)) => categories,
-        (None, None) => distinct_values_in_order(domain_batch, field)?,
+        (None, Some(categories)) => categories.labels(),
+        (None, None) => CategoryDomain::from_column(domain_batch, field, read)?.labels(),
     };
 
     let mut warnings: Vec<crate::render::RenderWarning> = Vec::new();
@@ -664,6 +670,8 @@ pub fn build_shape_scale(
     // comment for why this is unconditional, unlike color's range-gated D1.
     let (distinct, mut warnings) = sorted_categorical_domain(
         encoding,
+        "shape",
+        shape_enc,
         &shape_enc.field,
         explicit_ordinal_domain(shape_enc),
         shape_enc.sort.as_ref(),
@@ -917,6 +925,8 @@ pub fn build_stroke_dash_scale(
     // override threads through.
     let (distinct, sort_warnings) = sorted_categorical_domain(
         encoding,
+        "stroke_dash",
+        dash_enc,
         &dash_enc.field,
         explicit_ordinal_domain(dash_enc),
         dash_enc.sort.as_ref(),

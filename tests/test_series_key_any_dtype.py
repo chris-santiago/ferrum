@@ -14,9 +14,9 @@ in the ordered full list of warnings (under ``action="always"``), and every comp
 number of series drawn, so two sides that break together (one series on both) cannot pass.
 
 What stays as it was: a partition key of another dtype draws the same bytes and raises the same
-warnings (digests below), a temporal ``color``, ``shape`` or ``stroke_dash`` is refused with the text
-it always had, and a temporal column on a positional band axis is read as a band, not as a
-partition.
+warnings (digests below). A date that a ``color``, ``shape``, ``stroke_dash`` or positional band
+axis names as categories draws one category per date, in time order, labelled by its ISO text (the
+text twin of the labels draws the same marks); an untyped date colour stays a continuous scale.
 """
 
 from __future__ import annotations
@@ -150,10 +150,16 @@ def _text(millis: Sequence[int | None]) -> pl.Series:
     return pl.Series("d", [None if m is None else f"i{m}" for m in millis], dtype=pl.Utf8)
 
 
+def _label_of(millis: int) -> str:
+    """The category label of an instant: its ISO date at midnight UTC, else its full ISO date-time."""
+    value = dt.datetime(1970, 1, 1) + dt.timedelta(milliseconds=millis)
+    return value.date().isoformat() if value.time() == dt.time(0) else value.isoformat()
+
+
 def _text_of_the_keys(millis: Sequence[int]) -> pl.Series:
-    """Text that spells each instant as the engine keys it (epoch milliseconds): a categorical
-    scale built over it lists exactly the keys of the temporal column drawn beside it."""
-    return pl.Series("d", [str(m) for m in millis], dtype=pl.Utf8)
+    """Text that spells each instant as a date column's category is labelled: a scale built over
+    it lists exactly the categories of the temporal column drawn beside it, in the same text."""
+    return pl.Series("d", [_label_of(m) for m in millis], dtype=pl.Utf8)
 
 
 def _frame(key: pl.Series, *, panels: Sequence[str] = ()) -> pl.DataFrame:
@@ -717,13 +723,15 @@ def test_a_temporal_colour_on_a_series_mark_is_what_a_numeric_colour_is(mark: st
     ]
 
 
-_TEMPORAL_REFUSAL = _unenumerable_refusal()
-
-
 def _refused(chart: Any, output: _Output) -> str:
     with pytest.raises(ValueError) as refusal:
         chart.to_svg() if output == "static" else chart.interactive().scene_json
     return str(refusal.value)
+
+
+def _labelled(millis: Sequence[int]) -> pl.Series:
+    """The label-text twin of a date column: each instant spelled as its category label."""
+    return _text_of_the_keys(millis)
 
 
 @pytest.mark.parametrize("output", _OUTPUTS)
@@ -740,25 +748,75 @@ def _refused(chart: Any, output: _Output) -> str:
     ],
 )
 @pytest.mark.parametrize("mark", ["point", "line", "area", "ribbon", "bar", "tick", "rule", "text"])
-def test_a_temporal_colour_shape_or_dash_that_names_categories_is_still_refused(
+def test_a_date_that_names_categories_draws_as_its_label_text_twin_does(
     mark: str, channel: dict[str, Any], output: _Output
 ):
-    chart = _chart(mark, _frame(_temporal("Date", _MIDNIGHTS)), **channel)
-    assert _refused(chart, output) == _TEMPORAL_REFUSAL
+    """A date on a nominal or ordinal colour, or on a shape or stroke_dash, is read as categories:
+    every mark draws the chart its ISO label text draws, with the same ordered warnings (the notice
+    that a mark does not draw the channel included)."""
+    extra = {"text": "t"} if mark == "text" else {}
+
+    def build(key: pl.Series) -> Any:
+        return _chart(mark, _frame(key), **channel, **extra)
+
+    drawn, messages = _route_draw(build(_temporal("Date", _MIDNIGHTS)), output)
+    twin, twin_messages = _route_draw(build(_labelled(_MIDNIGHTS)), output)
+    assert drawn == twin
+    assert messages == twin_messages
+    if output == "static" and not messages:
+        # the channel is drawn: its legend lists the two dates
+        assert [t for t in text_runs(drawn) if t.startswith("2024-")] == [
+            _label_of(m) for m in _MIDNIGHTS
+        ]
+
+
+@pytest.mark.parametrize(
+    "channel",
+    [
+        pytest.param({"color": fm.Color("d", type_="N")}, id="colour"),
+        pytest.param({"shape": "d"}, id="shape"),
+        pytest.param({"stroke_dash": "d"}, id="dash"),
+    ],
+)
+def test_a_date_legend_lists_the_dates_in_time_order_whatever_the_row_order(
+    channel: dict[str, Any],
+):
+    """The rows hold the dates out of time order; the legend lists them by time."""
+    millis = _three_keys("Date")
+    svg = _chart("point", _frame(_temporal("Date", millis)), **channel).to_svg()
+    assert [t for t in text_runs(svg) if t.startswith("2024-")] == [
+        _label_of(m) for m in sorted(millis)
+    ]
 
 
 @pytest.mark.parametrize("output", _OUTPUTS)
-def test_an_area_coloured_by_an_untyped_date_is_still_refused(output: _Output):
-    chart = _chart("area", _frame(_temporal("Date", _MIDNIGHTS)), color="d")
-    assert _refused(chart, output) == _TEMPORAL_REFUSAL
+def test_an_area_coloured_by_an_untyped_date_draws_as_its_label_text_twin_does(output: _Output):
+    """An area that draws colour reads it as categories whatever the dtype: an untyped date is as
+    categorical as its text."""
+    build = lambda key: _chart("area", _frame(key), color="d")  # noqa: E731
+    drawn, messages = _route_draw(build(_temporal("Date", _MIDNIGHTS)), output)
+    twin, twin_messages = _route_draw(build(_labelled(_MIDNIGHTS)), output)
+    assert drawn == twin
+    assert messages == twin_messages == []
 
 
 @pytest.mark.parametrize("mark", ["bar", "point"])
-def test_a_temporal_ordinal_position_is_still_a_band_refusal_not_a_partition(mark: str):
-    """Band placement reads a category column by its own rule: a date on a band axis is refused
-    with the text it always had."""
-    chart = _chart(mark, _frame(_temporal("Date", _MIDNIGHTS)), x=fm.X("d", type_="O"))
-    assert _refused(chart, "static") == _TEMPORAL_REFUSAL
+def test_a_temporal_ordinal_position_is_a_band_per_date(mark: str):
+    """Band placement reads a date column declared ordinal as categories: one band per date, the
+    chart its label text draws, the ticks in time order."""
+    millis = sorted(_three_keys("Date"))
+
+    def build(key: pl.Series) -> str:
+        return _chart(mark, _frame(key), x=fm.X("d", type_="O")).to_svg()
+
+    drawn = build(_temporal("Date", millis))
+    assert drawn == build(_labelled(millis))
+    assert [t for t in text_runs(drawn) if t.startswith("2024-")] == [_label_of(m) for m in millis]
+    # rows listed out of time order still draw the bands in time order
+    unsorted = build(_temporal("Date", _three_keys("Date")))
+    assert [t for t in text_runs(unsorted) if t.startswith("2024-")] == [
+        _label_of(m) for m in millis
+    ]
 
 
 _PER_ROW_DETAIL_MARKS = ["point", "bar", "tick", "rule", "text"]
@@ -932,23 +990,17 @@ def test_a_nominal_colour_on_a_column_no_key_reader_takes_is_refused_as_well(dty
 
 
 # ---------------------------------------------------------------------------
-# A date under a categorical scale another layer establishes is read as its twin is
+# A date under a categorical scale another layer establishes
 # ---------------------------------------------------------------------------
 #
 # A layer whose own frame holds a date, drawn beside a layer whose text column has already
-# established a categorical colour (or stroke_dash) scale, reads that date as a category: the
-# date's Int64 epoch twin draws the same marks, with the same notice that the layer's scale
-# differs from the established one. The first layer's text spells the keys as the engine keys a
-# date (epoch milliseconds), so the date layer's marks map through distinct entries of that scale.
-# The text twin has no such notice (its scale agrees), so it is compared on the marks it draws,
-# not on its bytes.
+# established a categorical colour (or stroke_dash) scale. An untyped date colour or dash is not
+# a declared category: its Int64 epoch twin draws the same marks, with the same notice that the
+# layer's scale differs from the established one. A date that names categories (a nominal or
+# ordinal colour, a shape, a stroke_dash scale of the first layer's text spelled as the date
+# labels) maps through the entries the label text maps through.
 
 _ROUTE_DOORS = ["plus", "chart-layer", "layer-chart"]
-# The type a kind reaches the engine as, as a refusal spells it.
-_ENGINE_TYPE_TEXT = {
-    "Date": "Timestamp(Millisecond, None)",
-    "Datetime-Paris": 'Timestamp(Millisecond, Some("Europe/Paris"))',
-}
 _ROUTE_KINDS = ["Date", "Datetime-Paris"]
 # mark -> (the mark method, its encoding beside the channel under test)
 _ROUTE_MARKS: dict[str, tuple[str, dict[str, Any]]] = {
@@ -1073,35 +1125,53 @@ def test_a_date_colour_on_a_rule_tick_or_segment_draws_as_its_epoch_twin_does(
 @pytest.mark.parametrize("output", _OUTPUTS)
 @pytest.mark.parametrize("kind", _ROUTE_KINDS)
 @pytest.mark.parametrize("door", _ROUTE_DOORS)
-def test_a_date_colour_on_an_area_under_a_sibling_colour_is_still_refused(
+def test_a_date_colour_on_an_area_under_a_sibling_colour_draws_as_its_label_text_does(
     door: str, kind: str, output: _Output
 ):
-    text = _frame(_text_of_the_keys(_two_keys(kind)))
-    date = _frame(_temporal(kind, _two_keys(kind)))
+    """An area reads its colour as categories, so the date joins the scale the first layer's text
+    establishes and draws what its label text draws."""
+    millis = _two_keys(kind)
     encoding = {"x": "t", "y": "v", "color": "d"}
-    first = fm.Chart(text).mark_area().encode(**encoding)
-    if door == "plus":
-        chart = first + fm.Chart(date).mark_area().encode(**encoding)
-    elif door == "chart-layer":
-        chart = first.layer(fm.Layer(mark="area", data=date, encoding=encoding))
-    else:
-        chart = fm.LayerChart(first, fm.Chart(date).mark_area().encode(**encoding))
-    assert _refused(chart, output) == _sibling_refusal(door, _ENGINE_TYPE_TEXT[kind], output)
+
+    def build(key: pl.Series) -> Any:
+        first = fm.Chart(_frame(_text_of_the_keys(millis))).mark_area().encode(**encoding)
+        later = _frame(key)
+        if door == "plus":
+            return first + fm.Chart(later).mark_area().encode(**encoding)
+        if door == "chart-layer":
+            return first.layer(fm.Layer(mark="area", data=later, encoding=encoding))
+        return fm.LayerChart(first, fm.Chart(later).mark_area().encode(**encoding))
+
+    drawn, messages = _route_draw(build(_temporal(kind, millis)), output)
+    twin, twin_messages = _route_draw(build(_text_of_the_keys(millis)), output)
+    assert drawn == twin
+    assert messages == twin_messages == []
 
 
 @pytest.mark.parametrize("output", _OUTPUTS)
 @pytest.mark.parametrize("kind", _ROUTE_KINDS)
 @pytest.mark.parametrize("door", _ROUTE_DOORS)
 @pytest.mark.parametrize("mark", ["point", "line", "ribbon", "bar", "rect", "rule", "segment-rule"])
-def test_a_date_stroke_dash_under_a_sibling_dash_scale_draws_as_its_epoch_twin_does(
+def test_a_date_stroke_dash_under_a_sibling_dash_scale_draws_as_its_label_text_twin_does(
     mark: str, door: str, kind: str, output: _Output
 ):
-    _assert_route_draws_like_its_twins(
-        lambda text, date: _route_chart(door, mark, {"stroke_dash": "d"}, text, date),
-        _two_keys(kind),
-        kind,
-        output,
-    )
+    """A stroke_dash reads categories whatever its declaration, so a layer's date joins the sibling
+    layer's dash scale (its labels extend the scale) and draws what the same layer over the dates'
+    label text draws, with the same ordered warnings (none). Its Int64 epoch twin is a number, which
+    stays out of that scale: it is not the twin."""
+    millis = _two_keys(kind)
+
+    def draw(key: pl.Series) -> tuple[Any, list[str]]:
+        chart = _route_chart(
+            door, mark, {"stroke_dash": "d"}, _frame(pl.Series("d", ["a", "b"])), _frame(key)
+        )
+        return _route_draw(chart, output)
+
+    drawn, messages = draw(_temporal(kind, millis))
+    twin, twin_messages = draw(_text_of_the_keys(millis))
+    assert drawn == twin
+    assert messages == twin_messages
+    assert messages == []
 
 
 def _sibling_refusal(door: str, arrow_type: str, output: _Output) -> str:
@@ -1131,25 +1201,29 @@ def _later_point_layer(
 @pytest.mark.parametrize("kind", _ROUTE_KINDS)
 @pytest.mark.parametrize("door", _ROUTE_DOORS)
 @pytest.mark.parametrize("lead_domain", [False, True], ids=["plain", "explicit-domain"])
-def test_a_later_layers_date_shape_under_a_sibling_shape_scale_is_refused_as_when_it_establishes_it(
+def test_a_later_layers_date_shape_joins_a_sibling_shape_scale_as_its_label_text_does(
     lead_domain: bool, door: str, kind: str, output: _Output
 ):
-    """A shape scale reads every drawing layer's column as categories, so a later layer's date is
-    refused with the text it gets as the first layer; its Int64 twin joins the scale and draws."""
+    """A shape scale reads every drawing layer's column as categories, so a later layer's date
+    joins the scale the first layer's text establishes: twelve marks (six circles and six squares)
+    under a legend of the two dates, as the label text draws them."""
     millis = _two_keys(kind)
     text = _frame(_text_of_the_keys(millis))
-    shape = _explicit_scale("shape", [str(ms) for ms in millis]) if lead_domain else "d"
+    labels = [_label_of(ms) for ms in millis]
+    shape = _explicit_scale("shape", labels) if lead_domain else "d"
     lead = fm.Chart(text).mark_point().encode(x="t", y="v", shape=shape)
     encoding = {"x": "t", "y": "v", "shape": "d"}
-    date = _later_point_layer(door, lead, _frame(_temporal(kind, millis)), encoding)
-    assert _refused(date, output) == _sibling_refusal(door, _ENGINE_TYPE_TEXT[kind], output)
-    twin = _later_point_layer(door, lead, _frame(_epoch(millis)), encoding)
-    drawn, messages = _route_draw(twin, output)
-    assert messages == []
+    drawn, messages = _route_draw(
+        _later_point_layer(door, lead, _frame(_temporal(kind, millis)), encoding), output
+    )
+    twin, twin_messages = _route_draw(
+        _later_point_layer(door, lead, _frame(_text_of_the_keys(millis)), encoding), output
+    )
+    assert drawn == twin
+    assert messages == twin_messages == []
     if output == "static":
-        # twelve marks (six circles and six squares): the legend lists both keys
         assert len(re.findall(r"<circle", mark_layer(drawn))) == 6
-        assert {str(ms) for ms in millis} <= set(text_runs(drawn))
+        assert set(labels) <= set(text_runs(drawn))
     else:
         assert Counter(node["type"] for node in drawn) == {"circle": 6, "rect": 6}
 
@@ -1174,16 +1248,16 @@ def test_a_later_layers_unreadable_dash_or_shape_is_refused_by_its_scale(
 @pytest.mark.parametrize("output", _OUTPUTS)
 @pytest.mark.parametrize("kind", _ROUTE_KINDS)
 @pytest.mark.parametrize("door", _ROUTE_DOORS)
-def test_a_later_layers_date_dash_beside_an_explicit_domain_stays_out_and_splits(
+def test_a_later_layers_date_dash_beside_an_explicit_domain_joins_it_and_splits(
     door: str, kind: str, output: _Output
 ):
-    """The lead's text dash carries an explicit domain; the later layer's date dash reads as
-    numbers, stays out of that scale with the notice, and splits its line by instant as the Int64
-    twin's does: four polylines in all."""
+    """The lead's text dash carries an explicit domain of the dates' labels; the later layer's date
+    dash names categories that scale lists, so its marks draw through it and split its line by
+    date as its label text does (four polylines in all), raising nothing, as the text does."""
     millis = _two_keys(kind)
     text = _frame(_text_of_the_keys(millis))
     lead_dash = fm.StrokeDash(
-        "d", type_="N", scale=fm.OrdinalScale(domain=[str(ms) for ms in millis])
+        "d", type_="N", scale=fm.OrdinalScale(domain=[_label_of(ms) for ms in millis])
     )
     lead = fm.Chart(text).mark_line().encode(x="t", y="v", stroke_dash=lead_dash)
     encoding = {"x": "t", "y": "v", "stroke_dash": "d"}
@@ -1192,14 +1266,79 @@ def test_a_later_layers_date_dash_beside_an_explicit_domain_stays_out_and_splits
         return _route_draw(_later_point_layer(door, lead, _frame(key), encoding, "line"), output)
 
     drawn, messages = draw(_temporal(kind, millis))
-    twin, twin_messages = draw(_epoch(millis))
+    twin, twin_messages = draw(_text_of_the_keys(millis))
     assert drawn == twin
-    assert messages == twin_messages
-    assert messages == [_scale_excluded("stroke_dash")]
+    assert messages == twin_messages == []
     if output == "static":
         assert _series_drawn(drawn, "line") == 4
     else:
         assert len([n for n in drawn if n["type"] == "polyline"]) == 4
+
+
+@pytest.mark.parametrize("output", _OUTPUTS)
+@pytest.mark.parametrize("door", _ROUTE_DOORS)
+@pytest.mark.parametrize("domain", ["data_read", "explicit"])
+@pytest.mark.parametrize("order", ["text_first", "date_first"])
+@pytest.mark.parametrize("channel", ["stroke_dash", "shape"])
+def test_a_later_layers_date_dash_or_shape_joins_a_sibling_scale_without_a_notice_in_either_order(
+    channel: str, order: str, domain: str, door: str, output: _Output
+):
+    """A shape and a stroke_dash read categories whatever their declaration, so a layer's date joins
+    the scale a sibling layer's labels establish, and the scale's domain (read from the data or
+    written) does not change that: the chart is the label-text twin's, with no notice, whichever
+    layer comes first."""
+    millis = _two_keys("Date")
+    labels = [_label_of(ms) for ms in millis]
+    mark = "line" if channel == "stroke_dash" else "point"
+    encoding = {"x": "t", "y": "v", channel: "d"}
+    lead_channel = _explicit_scale(channel, labels) if domain == "explicit" else "d"
+    lead_encoding = {"x": "t", "y": "v", channel: lead_channel}
+
+    def chart(date_key: pl.Series) -> Any:
+        text, date = _frame(_text_of_the_keys(millis)), _frame(date_key)
+        lead_frame, later_frame = (text, date) if order == "text_first" else (date, text)
+        lead = getattr(fm.Chart(lead_frame), f"mark_{mark}")().encode(**lead_encoding)
+        return _later_point_layer(door, lead, later_frame, encoding, mark)
+
+    drawn, messages = _route_draw(chart(_temporal("Date", millis)), output)
+    twin, twin_messages = _route_draw(chart(_text_of_the_keys(millis)), output)
+    assert drawn == twin
+    assert messages == twin_messages == []
+
+
+@pytest.mark.parametrize("output", _OUTPUTS)
+@pytest.mark.parametrize("door", _ROUTE_DOORS)
+@pytest.mark.parametrize("domain", ["data_read", "explicit"])
+def test_an_untyped_date_colour_stays_out_of_a_text_colour_scale_with_its_notice(
+    domain: str, door: str, output: _Output
+):
+    """An untyped date colour is a continuous scale, not categories: beside a text colour scale,
+    written with or without an explicit domain, it stays out of that scale with the one notice
+    (its label-text twin joins the scale and raises none), and its marks map their keys through the
+    panel's scale all the same: the twin's paints."""
+    millis = _two_keys("Date")
+    labels = [_label_of(ms) for ms in millis]
+    lead_colour = (
+        _explicit_scale("color", labels) if domain == "explicit" else fm.Color("d", type_="N")
+    )
+    lead = (
+        fm.Chart(_frame(_text_of_the_keys(millis)))
+        .mark_point()
+        .encode(x="t", y="v", color=lead_colour)
+    )
+    encoding = {"x": "t", "y": "v", "color": "d"}
+
+    def draw(key: pl.Series) -> Any:
+        return _route_draw(_later_point_layer(door, lead, _frame(key), encoding), output)
+
+    drawn, messages = draw(_temporal("Date", millis))
+    twin, twin_messages = draw(_text_of_the_keys(millis))
+    assert messages == [_scale_excluded("color")]
+    assert twin_messages == []
+    if output == "static":
+        assert _paints(drawn) == _paints(twin)
+    else:
+        assert [n["type"] for n in drawn] == [n["type"] for n in twin]
 
 
 def _paints(svg: str) -> list[str]:
@@ -1225,10 +1364,8 @@ def _paints(svg: str) -> list[str]:
 def test_a_date_layer_maps_each_key_through_the_scale_a_sibling_lists_it_in(
     mark: str, channel: str, door: str, kind: str
 ):
-    """The first layer's text spells the two keys, so the scale lists them and the date layer's
-    marks take two distinct paints from it, in the order the epoch twin's marks take them. (The
-    legend then spells the dates differently, so the bytes are not compared, only each mark's
-    paint.)"""
+    """The first layer's text spells the two dates' labels, so the scale lists them and the date
+    layer's marks take two distinct paints from it, the ones its label text takes."""
     millis = _two_keys(kind)
     text = _frame(_text_of_the_keys(millis))
 
@@ -1237,7 +1374,7 @@ def test_a_date_layer_maps_each_key_through_the_scale_a_sibling_lists_it_in(
         return _paints(_render_capturing(chart.to_svg)[0])
 
     drawn = paints(_temporal(kind, millis))
-    assert drawn == paints(_epoch(millis))
+    assert drawn == paints(_text_of_the_keys(millis))
     # not vacuous: one key for both rows takes other paints than two keys do
     assert drawn != paints(_temporal(kind, [millis[0], millis[0]]))
 
@@ -1306,7 +1443,6 @@ def test_a_polygon_layers_rings_take_the_paints_of_the_instants_their_colour_hol
     drawn = paints(_temporal(kind, millis))
     assert len(drawn) == 2
     assert drawn[0] != drawn[1]
-    assert drawn == paints(_epoch(millis))
     assert drawn == paints(_text_of_the_keys(millis))
 
 
@@ -1333,10 +1469,11 @@ def test_a_date_colour_on_a_polygon_layer_under_a_sibling_colour_draws_as_its_ep
 # ---------------------------------------------------------------------------
 #
 # A categorical stroke_dash, shape or colour scale reads its column as categories. A column nothing
-# can key as one (a date, a datetime, a duration, a decimal, a time, binary or nested values) is
-# refused when the scale is resolved, with or without an explicit ``domain=``, on every door: the
-# declared domain does not stand in for the column's values. The Int64 twin of the same column
-# draws, a line splitting by it.
+# can key as one (a decimal, a time, binary or nested values) is refused when the scale is
+# resolved, with or without an explicit ``domain=``, on every door: the declared domain does not
+# stand in for the column's values. The Int64 twin of the same column draws, a line splitting by
+# it. A date or datetime is a category, labelled by its ISO text, so a domain of those labels
+# orders it.
 
 
 def _explicit_scale(channel: str, domain: list[str], type_: str | None = "N") -> Any:
@@ -1441,29 +1578,42 @@ _DATE_DOMAIN_CASES = [
 
 @pytest.mark.parametrize("output", _OUTPUTS)
 @pytest.mark.parametrize("door", _EXPLICIT_DOORS)
-@pytest.mark.parametrize("spelling", ["iso", "epoch"])
+@pytest.mark.parametrize("spelling", ["label", "iso"])
 @pytest.mark.parametrize("kind", _ROUTE_KINDS)
 @pytest.mark.parametrize(
     "channel,mark,type_", _DATE_DOMAIN_CASES, ids=[f"{c}-{m}-{t}" for c, m, t in _DATE_DOMAIN_CASES]
 )
-def test_an_explicit_domain_does_not_make_a_temporal_colour_dash_or_shape_a_category(
+def test_an_explicit_domain_of_date_labels_orders_a_date_colour_dash_or_shape(
     channel: str, mark: str, type_: str | None, kind: str, spelling: str, door: str, output: _Output
 ):
-    """A date, datetime or Paris datetime under an explicit domain (spelled as dates or as the
-    epoch milliseconds the engine keys them by) is refused as it is without one: where the chart
-    used to draw every mark in the default dash or glyph under a legend of the domain's."""
+    """A date, datetime or Paris datetime under an explicit domain is a category, so the domain
+    names its labels (a midnight reads ``YYYY-MM-DD``, any other value its full ISO date-time): the
+    chart draws what the label text draws under the same domain, on every door. The ``iso``
+    spelling writes each instant as a full ISO date-time: for a ``Date`` (midnights) that names
+    no category, as it names none of the text's, and the date draws what the text draws; for the
+    Paris date-times (not midnights) it is the label itself, so that case is a label domain
+    listing the earliest instant first."""
     millis = _two_keys(kind)
-    domain = [_iso(ms) if spelling == "iso" else str(ms) for ms in millis]
     panels = ("p", "q") if door.startswith("facet") else ()
-    chart = _explicit_door(
-        door,
-        mark,
-        channel,
-        _frame(_temporal(kind, millis), panels=panels),
-        domain=domain,
-        type_=type_,
-    )
-    assert _refused(chart, output) == _explicit_refusal(door, _ENGINE_TYPE_TEXT[kind], output)
+
+    def draw(key: pl.Series, domain: list[str]) -> tuple[Any, list[str]]:
+        chart = _explicit_door(
+            door, mark, channel, _frame(key, panels=panels), domain=domain, type_=type_
+        )
+        return _route_draw(chart, output)
+
+    labels = [_label_of(ms) for ms in millis]
+    # the label spelling lists the dates latest first, so the domain, not the rows, sets the order
+    domain = labels[::-1] if spelling == "label" else [_iso(ms) for ms in millis]
+    drawn, messages = draw(_temporal(kind, millis), domain)
+    twin, twin_messages = draw(_text_of_the_keys(millis), domain)
+    assert drawn == twin
+    assert messages == twin_messages
+    if spelling == "label" and channel != "color":
+        # not vacuous: the domain is what orders the categories, so the earliest-first domain
+        # draws another chart (a colour scale's domain does not reorder its text twin either)
+        other, _ = draw(_temporal(kind, millis), labels)
+        assert drawn != other
 
 
 @pytest.mark.parametrize("output", _OUTPUTS)

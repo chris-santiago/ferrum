@@ -70,8 +70,8 @@ const COLOR_COLUMNS: [&str; 4] = ["c_utf8", "c_i64", "c_f64", "c_bool"];
 /// Four rows, two of each category, on two x positions.
 ///
 /// `t` and `v_nan` serve the *numeric*-keyed color rows below rather than the
-/// categorical table: `t` is the one dtype that is a supported numeric column
-/// and not a supported category key, and `v_nan` carries a non-finite value in
+/// categorical table: `t` is a supported numeric column that a nominal binding
+/// also reads as a category (by its date label), and `v_nan` carries a non-finite value in
 /// an otherwise ordinary quantitative column.
 fn parity_batch() -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
@@ -355,16 +355,11 @@ const LINE_NOMINAL_TS: &str = r#"{"data":{"kind":"named","name":"default"},"mark
 /// The same nominal-temporal encoding carrying an explicit ordinal `domain` +
 /// `range`, as `fm.Color("t", type="nominal", scale=fm.OrdinalScale(domain=[…],
 /// range=["red","blue","green","orange"]))` lowers it. The four domain entries
-/// are `t`'s four epoch-millisecond values, so the declared domain is a *valid*
-/// domain for the column — the scale that used to resolve here was well-formed,
-/// which is precisely why nothing downstream noticed the column was unkeyable.
-///
-/// This is the shape that skips the domain builder: `scale.domain` supersedes
-/// `distinct_values_in_order`, so before the `ensure_category_keyable` gate the
-/// column was never read at scale-resolution time.
-const POINT_NOMINAL_TS_EXPLICIT_RANGE: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y"},"color":{"field":"t","type":"nominal","scale":{"type":"ordinal","domain":["0","86400000","172800000","259200000"],"range":["red","blue","green","orange"],"padding":0.0}}}}"#;
+/// are the labels of `t`'s four midnight values, the strings a date category is
+/// named by.
+const POINT_NOMINAL_TS_EXPLICIT_RANGE: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"x"},"y":{"field":"y"},"color":{"field":"t","type":"nominal","scale":{"type":"ordinal","domain":["1970-01-01","1970-01-02","1970-01-03","1970-01-04"],"range":["red","blue","green","orange"],"padding":0.0}}}}"#;
 /// The same explicit-`domain`+`range` encoding on `mark_rule`.
-const RULE_NOMINAL_TS_EXPLICIT_RANGE: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"rule","encoding":{"x":{"field":"x"},"y":{"field":"y"},"color":{"field":"t","type":"nominal","scale":{"type":"ordinal","domain":["0","86400000","172800000","259200000"],"range":["red","blue","green","orange"],"padding":0.0}}}}"#;
+const RULE_NOMINAL_TS_EXPLICIT_RANGE: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"rule","encoding":{"x":{"field":"x"},"y":{"field":"y"},"color":{"field":"t","type":"nominal","scale":{"type":"ordinal","domain":["1970-01-01","1970-01-02","1970-01-03","1970-01-04"],"range":["red","blue","green","orange"],"padding":0.0}}}}"#;
 
 fn colors_of(spec_json: &str) -> Result<Vec<String>, crate::render::RenderError> {
     let spec: ChartSpec = serde_json::from_str(spec_json).expect("lowered spec parses");
@@ -450,96 +445,54 @@ fn non_finite_row_on_a_continuous_color_scale_takes_the_constant_paint_not_black
 }
 
 /// The category-keyed counterpart, recorded as a policy row: a *nominal*
-/// temporal color column is refused at **scale resolution**, uniformly, before
-/// any mark builder runs.
+/// temporal color column is a category column. Every mark paints it the same
+/// way, one palette color per distinct date in time order, whether the scale's
+/// domain is read from the column or declared.
 ///
-/// This is what closes the "fatal here, silent there" question the numeric case
-/// raised. `build_color_scale`'s categorical branch gates on
-/// `ensure_category_keyable`, which admits exactly the dtypes both category
-/// readers accept, so a column `row_colors_from_scale`'s category branch cannot
-/// key on never reaches a mark builder — on any mark.
+/// `build_color_scale`'s categorical branch gates on `ensure_category_keyable`,
+/// which admits exactly the dtypes both category readers accept (a `Timestamp`
+/// among them, keyed by its UTC ISO label), so a column that gate admits is one
+/// `row_colors_from_scale`'s category branch can key on, on any mark.
 ///
-/// The fourth row is the shape that made the *old* version of this invariant
-/// false while this test still passed: an explicit `scale.domain` supersedes
-/// `distinct_values_in_order`, so a chart declaring `domain=` **and** `range=`
-/// resolved a well-formed `Categorical` scale over a column nothing could key.
-/// `rule`/`segment` then raised at mark build while `point`/`bar` swallowed the
-/// same error and painted every element one color under a four-swatch legend.
-/// Every spec here was bare until then, which is why the branch that skips the
-/// builder went untested.
-///
-/// The wording assertion is what pins *where* the refusal happens: the resolver
-/// says "cannot enumerate distinct values", the per-row reader says "cannot
-/// convert to ordinal category string". Accepting either would let the fix
-/// regress to a mark-build refusal — fatal on two marks, silent on the rest —
-/// without failing this test.
+/// The fourth row is the shape that skips the domain builder: an explicit
+/// `scale.domain` supersedes `distinct_values_in_order`, so the declared
+/// domain's entries are what the per-row labels are looked up in.
 #[test]
-fn nominal_timestamp_color_is_refused_at_scale_resolution_for_every_mark() {
+fn nominal_timestamp_color_draws_one_palette_color_per_date_on_every_mark() {
+    let rule = colors_of(RULE_NOMINAL_TS).expect("rule draws a nominal temporal color");
     for (name, spec) in [
         ("rule", RULE_NOMINAL_TS),
         ("point", POINT_NOMINAL_TS),
-        ("line", LINE_NOMINAL_TS),
         ("point + explicit domain/range", POINT_NOMINAL_TS_EXPLICIT_RANGE),
     ] {
-        let err = colors_of(spec).expect_err(
-            "a nominal temporal color column has no category keys; it must refuse, \
-             and it must refuse on every mark alike",
-        );
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("Timestamp"),
-            "{name}: the refusal must name the offending dtype; got {msg}"
-        );
-        assert!(
-            msg.contains("cannot enumerate distinct values"),
-            "{name}: the refusal must come from scale resolution, not from a mark \
-             builder's per-row read (which says `cannot convert to ordinal category \
-             string` and is reached on only two of the marks); got {msg}"
-        );
+        let colors = colors_of(spec).unwrap_or_else(|e| panic!("{name}: a nominal temporal color must draw: {e:?}"));
+        // The four dates are in time order in the rows, so each takes the next
+        // colour of the scale's domain, which is time order too.
+        let expected: [&str; 4] = if name == "point + explicit domain/range" {
+            ["#ff0000", "#0000ff", "#008000", "#ffa500"]
+        } else {
+            ["#2563eb", "#dc2626", "#d4a017", "#0f766e"]
+        };
+        assert_eq!(colors, expected, "{name}: one palette colour per date, in domain order");
     }
+    assert_eq!(
+        colors_of(POINT_NOMINAL_TS).unwrap(),
+        rule,
+        "rule and point must paint one encoding the same way"
+    );
+    // A line splits into one series per date and has no per-element fill to read.
+    colors_of(LINE_NOMINAL_TS).expect("line: a nominal temporal color must draw");
 }
 
-/// The explicit-`domain`+`range` shape refuses *uniformly* — it does not paint
-/// a legend the marks contradict.
-///
-/// The RED companion to the fourth row above, stated as the design review's
-/// probe: before the `ensure_category_keyable` gate, `point` rendered four
-/// circles all in the theme fill (`#2563eb`) beneath a legend carrying the four
-/// declared range colors, while `rule` raised — one encoding, two outcome
-/// classes, and the rendering one lying. This asserts both halves: `point` must
-/// not render at all, and when both refuse it must be with the *same* refusal.
+/// The explicit-`domain`+`range` shape paints each date the range color its
+/// label's position in the domain names, identically on `point` and `rule`
+/// (the legend enumerates those four range colors, and the marks agree with it).
 #[test]
-fn explicit_domain_and_range_on_a_temporal_color_refuses_uniformly_rather_than_lying() {
-    let point = colors_of(POINT_NOMINAL_TS_EXPLICIT_RANGE);
-    let rule = colors_of(RULE_NOMINAL_TS_EXPLICIT_RANGE);
-
-    match (point, rule) {
-        (Err(point_err), Err(rule_err)) => assert_eq!(
-            format!("{point_err:?}"),
-            format!("{rule_err:?}"),
-            "both marks must refuse the same way; a split here is the divergence \
-             this shape reintroduces"
-        ),
-        (Ok(colors), rule) => {
-            let distinct: std::collections::BTreeSet<&String> = colors.iter().collect();
-            panic!(
-                "point must refuse a nominal temporal color column, not render one: it \
-                 painted {} element(s) in {} distinct color(s) ({colors:?}) while the \
-                 legend enumerates the four declared range colors — NF-A3's signature. \
-                 rule on the identical encoding: {}",
-                colors.len(),
-                distinct.len(),
-                match rule {
-                    Ok(c) => format!("rendered {c:?}"),
-                    Err(e) => format!("refused with {e:?}"),
-                }
-            )
-        }
-        (Err(point_err), Ok(colors)) => panic!(
-            "point refused ({point_err:?}) but rule rendered {colors:?} — the two marks \
-             must reach the same outcome for one encoding"
-        ),
-    }
+fn explicit_domain_and_range_on_a_temporal_color_paints_the_declared_colors_on_every_mark() {
+    let point = colors_of(POINT_NOMINAL_TS_EXPLICIT_RANGE).expect("point draws");
+    let rule = colors_of(RULE_NOMINAL_TS_EXPLICIT_RANGE).expect("rule draws");
+    assert_eq!(point, rule, "one encoding, one outcome on both marks");
+    assert_eq!(point, ["#ff0000", "#0000ff", "#008000", "#ffa500"], "each date takes its declared range colour in domain order");
 }
 
 // ── The layer seam ──────────────────────────────────────────────────────────

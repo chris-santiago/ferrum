@@ -92,8 +92,8 @@ pub(crate) type ColorColumnPair = (Option<Vec<Option<String>>>, Option<Vec<Optio
 /// every row: each mark then fell back to the palette's first color while the
 /// legend — built from the dtype-wide `distinct_values_in_order` — enumerated
 /// every category. `col_as_identity_key_str` is a strict superset (identical
-/// on every dtype the category reader takes, and it also keys a `Timestamp`
-/// by its epoch value, as the series partitions do) and stringifies exactly
+/// on every dtype the category reader takes, a `Timestamp` included, keyed by
+/// its UTC ISO label) and stringifies exactly
 /// the way `distinct_values_in_order` builds the domain, so the per-row key
 /// matches a domain entry. Utf8 columns are byte-identical.
 ///
@@ -157,7 +157,7 @@ fn color_columns(ctx: &DrawCtx) -> Result<ColorColumns, RenderError> {
 /// - [`ColorInput::Category`] → the [`col_as_identity_key_str`] column,
 ///   resolved via [`ColorScale::lookup`]. `Int*`/`Float*`/`Bool` category
 ///   columns resolve to their real colors instead of collapsing to the theme
-///   stroke, and a `Timestamp` column keys by its epoch value; `Utf8` is
+///   stroke, and a `Timestamp` column keys by its UTC ISO label; `Utf8` is
 ///   byte-identical (NF-A3, spec §4.4).
 /// - [`ColorInput::Numeric`] → the [`col_as_f64`] column, finite-filtered,
 ///   resolved via [`ColorScale::lookup_f64`]. Two things ride on reading the
@@ -198,10 +198,10 @@ fn color_columns(ctx: &DrawCtx) -> Result<ColorColumns, RenderError> {
 /// [`ensure_category_keyable`](crate::render::arrow_cast::ensure_category_keyable)
 /// before it resolves a domain from any source), so this refusal is the
 /// per-mark backstop for a column that scale did not see. A `Timestamp` column
-/// is not in that class: it keys by its epoch value, so a later layer's date
+/// is not in that class: it keys by its UTC ISO label, so a later layer's date
 /// color under another layer's categorical scale draws on `rule`, `tick` and
-/// `segment` as its integer twin does (its keys match no domain entry, so
-/// those rows keep the constant stroke).
+/// `segment` as its label text does (a key that matches no domain entry
+/// keeps the constant stroke).
 pub(crate) fn row_colors_from_scale(
     ctx: &DrawCtx,
 ) -> Result<Option<Vec<Option<Color>>>, RenderError> {
@@ -1066,7 +1066,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     }
 
     /// A statistic's grouping series over a `Timestamp` column reads the
-    /// column's epoch strings, so the series splits where two instants differ.
+    /// column's label strings, so the series splits where two instants differ.
     #[test]
     fn grouping_series_values_read_a_timestamp_column() {
         let theme = ThemeInputs::default();
@@ -1082,7 +1082,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         mark_style.group.series = vec!["k".to_string()];
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let values = grouping_series_values(&ctx);
-        assert_eq!(values, vec![("k".to_string(), vec![sv("1000"), sv("1000"), sv("2000"), sv("2000")])]);
+        assert_eq!(values, vec![("k".to_string(), vec![sv("1970-01-01T00:00:01"), sv("1970-01-01T00:00:01"), sv("1970-01-01T00:00:02"), sv("1970-01-01T00:00:02")])]);
     }
 
     /// A per-row mark's `color` read splits on a `Timestamp` column under a
@@ -1099,7 +1099,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         spec.encoding.color = enc_field("k");
         let batch = timestamp_key_batch();
         let scales = scales_with_color(Some(ColorScale::Categorical {
-            domain: vec!["1000".into(), "2000".into()],
+            domain: vec!["1970-01-01T00:00:01".into(), "1970-01-01T00:00:02".into()],
             palette: Cow::Owned(vec![]),
         }));
         let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
@@ -1125,7 +1125,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         spec.encoding.shape = enc_field("k");
         let batch = timestamp_key_batch();
         let mut scales = scales_with_color(None);
-        scales.shape = Some(ShapeScale { domain: vec!["1000".into(), "2000".into()], shapes: vec![] });
+        scales.shape = Some(ShapeScale { domain: vec!["1970-01-01T00:00:01".into(), "1970-01-01T00:00:02".into()], shapes: vec![] });
         let mark_style = resolve_mark_style(None, &theme, &Mark::Point).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let partition = per_row_mark_groups(&ctx);
@@ -1148,12 +1148,12 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         spec.encoding.stroke_dash = enc_field("k");
         let batch = timestamp_key_batch();
         let mut scales = scales_with_color(None);
-        scales.stroke_dash = Some(StrokeDashScale { domain: vec!["1000".into(), "2000".into()], patterns: vec![vec![], vec![4.0, 4.0]] });
+        scales.stroke_dash = Some(StrokeDashScale { domain: vec!["1970-01-01T00:00:01".into(), "1970-01-01T00:00:02".into()], patterns: vec![vec![], vec![4.0, 4.0]] });
         let mark_style = resolve_mark_style(None, &theme, &Mark::Line).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         assert_eq!(
             stroke_dash_column_loader(&ctx).categorical,
-            Some(vec![sv("1000"), sv("1000"), sv("2000"), sv("2000")]),
+            Some(vec![sv("1970-01-01T00:00:01"), sv("1970-01-01T00:00:01"), sv("1970-01-01T00:00:02"), sv("1970-01-01T00:00:02")]),
         );
     }
 
@@ -1201,7 +1201,7 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         }
         let spec = ChartSpec { mark: mark.clone(), encoding, ..Default::default() };
         let scales = scales_with_color(Some(ColorScale::Categorical {
-            domain: vec!["1000".into(), "2000".into()],
+            domain: vec!["1970-01-01T00:00:01".into(), "1970-01-01T00:00:02".into()],
             palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
         }));
         let mark_style = resolve_mark_style(None, &theme, &mark).unwrap();
@@ -1212,17 +1212,16 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     }
 
     /// A date colour under another layer's categorical scale draws on `rule`,
-    /// `tick` and `segment` exactly as the same instants as integers do,
-    /// where the per-row colour read refused the column.
+    /// `tick` and `segment` exactly as the instants' label text does.
     #[test]
-    fn a_timestamp_color_draws_on_rule_tick_and_segment_as_its_integer_twin_does() {
-        use arrow::array::{Int64Array, TimestampMillisecondArray};
+    fn a_timestamp_color_draws_on_rule_tick_and_segment_as_its_label_text_does() {
+        use arrow::array::{StringArray, TimestampMillisecondArray};
         for mark in [Mark::Rule, Mark::Tick, Mark::Segment] {
             let date = colored_batch(Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])));
-            let twin = colored_batch(Arc::new(Int64Array::from(vec![1_000i64, 1_000, 2_000, 2_000])));
+            let twin = colored_batch(Arc::new(StringArray::from(vec!["1970-01-01T00:00:01", "1970-01-01T00:00:01", "1970-01-01T00:00:02", "1970-01-01T00:00:02"])));
             let drawn = build_under_sibling_scale(mark.clone(), &date);
             let expected = build_under_sibling_scale(mark.clone(), &twin);
-            assert!(expected.is_ok(), "{mark:?}: the integer twin draws: {expected:?}");
+            assert!(expected.is_ok(), "{mark:?}: the text twin draws: {expected:?}");
             assert_eq!(drawn.map_err(|e| e.to_string()), expected.map_err(|e| e.to_string()), "{mark:?}");
         }
     }
@@ -1416,27 +1415,26 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
     }
 
     /// The per-row colour read every other mark shares keys a date colour by
-    /// its epoch value under a categorical scale a sibling layer establishes:
-    /// each key maps through the scale, as the same instants as integers do,
-    /// where the unreadable column left every row in the first key's paint.
+    /// its label under a categorical scale a sibling layer establishes:
+    /// each key maps through the scale, as the instants' label text does.
     #[test]
     fn a_timestamp_color_maps_each_key_through_the_scale_on_point_bar_and_rect() {
-        use arrow::array::{Int64Array, TimestampMillisecondArray};
+        use arrow::array::{StringArray, TimestampMillisecondArray};
         for mark in [Mark::Point, Mark::Bar, Mark::Rect] {
             let date = colored_batch(Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])));
-            let twin = colored_batch(Arc::new(Int64Array::from(vec![1_000i64, 1_000, 2_000, 2_000])));
+            let twin = colored_batch(Arc::new(StringArray::from(vec!["1970-01-01T00:00:01", "1970-01-01T00:00:01", "1970-01-01T00:00:02", "1970-01-01T00:00:02"])));
             let drawn = build_under_sibling_scale(mark.clone(), &date).map_err(|e| e.to_string());
             let expected = build_under_sibling_scale(mark.clone(), &twin).map_err(|e| e.to_string());
-            assert!(expected.is_ok(), "{mark:?}: the integer twin draws: {expected:?}");
+            assert!(expected.is_ok(), "{mark:?}: the text twin draws: {expected:?}");
             assert_eq!(drawn, expected, "{mark:?}");
         }
     }
 
     /// `arc` and every consumer of `color_column_loader` read the same
     /// per-row keys: a `Timestamp` column under a categorical scale loads as
-    /// its epoch strings.
+    /// its label strings.
     #[test]
-    fn the_color_loader_keys_a_timestamp_column_by_its_epoch_value() {
+    fn the_color_loader_keys_a_timestamp_column_by_its_label() {
         use arrow::array::TimestampMillisecondArray;
         let batch = colored_batch(Arc::new(TimestampMillisecondArray::from(vec![1_000i64, 1_000, 2_000, 2_000])));
         let theme = ThemeInputs::default();
@@ -1448,13 +1446,13 @@ transform: crate::render::scale_resolve::ColorTransform::Linear,
         let mut spec = color_spec();
         spec.encoding.color = enc_field("k");
         let scales = scales_with_color(Some(ColorScale::Categorical {
-            domain: vec!["1000".into(), "2000".into()],
+            domain: vec!["1970-01-01T00:00:01".into(), "1970-01-01T00:00:02".into()],
             palette: Cow::Owned(vec![Color::new(200, 0, 0, 255), Color::new(0, 0, 200, 255)]),
         }));
         let mark_style = resolve_mark_style(None, &theme, &Mark::Arc).unwrap();
         let ctx = DrawCtx { spec: &spec, panel: &panel, theme: &theme, scales: &scales, batch: &batch, mark_style: &mark_style };
         let (categories, numeric) = color_column_loader(&ctx);
-        assert_eq!(categories, Some(vec![sv("1000"), sv("1000"), sv("2000"), sv("2000")]));
+        assert_eq!(categories, Some(vec![sv("1970-01-01T00:00:01"), sv("1970-01-01T00:00:01"), sv("1970-01-01T00:00:02"), sv("1970-01-01T00:00:02")]));
         assert!(numeric.is_none());
     }
 }

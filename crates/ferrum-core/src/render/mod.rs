@@ -3,6 +3,7 @@
 
 pub(crate) mod annotation;
 pub(crate) mod arrow_cast;
+pub(crate) mod category_read;
 pub(crate) mod chart_config;
 pub(crate) mod config_apply;
 pub(crate) mod config;
@@ -4821,13 +4822,13 @@ pub fn render_scene_json(
 /// The facet field `field` of `batch` as every facet reader reads it: a
 /// `StringArray`, refused otherwise (`UnknownColumn` when absent). A `Utf8`
 /// column is read as-is (zero-copy clone); Int/UInt/Float/Boolean and an
-/// all-null `Null`-typed column key through the same ordinal-category
+/// all-null `Null`-typed column, and a `Timestamp` column (keyed by its
+/// UTC ISO label) key through the same ordinal-category
 /// reader a dodge/stack `by=` column reads
 /// ([`crate::render::arrow_cast::col_as_ordinal_category_str`]), so a facet
 /// field of one of those dtypes renders with its panels keyed by that
-/// reader's labels, rather than refusing. Any other dtype (e.g.
-/// `Timestamp`) still refuses with the one message every
-/// such column gets. The one reader of the panel split
+/// reader's labels, rather than refusing. Any other dtype still refuses
+/// with the one message every such column gets. The one reader of the panel split
 /// ([`filter_batch_by_facet`]), the prepare pass's facet value scans and
 /// null-row checks, and the stack preview's per-panel split
 /// (`position::position_preview`), so every site splits rows into the same
@@ -4842,16 +4843,16 @@ pub(crate) fn facet_key_column(
     if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
         return Ok(arr.clone());
     }
-    let strs = crate::render::arrow_cast::col_as_ordinal_category_str(batch, field).map_err(|err| match err {
+    let strs = crate::render::category_read::category_strings(batch, field, crate::render::category_read::TimestampRead::Categories).map_err(|err| match err {
         // The reader's own dtype detail, re-voiced with the facet
         // context and a remedy: a facet field reads strings, integers,
-        // floats, booleans or an all-null column, and every other
-        // dtype (`Date32`, `Timestamp`, ...) is refused naming the
+        // floats, booleans, timestamps or an all-null column, and every
+        // other dtype (`Duration`, a nested column, ...) is refused naming the
         // actual dtype and the remedy, never a bare "must be Utf8".
         RenderError::UnsupportedDtype { context: None, .. } => RenderError::UnsupportedDtype {
             field: field.to_string(),
             dtype: format!(
-                "{:?} (a facet field holds strings, integers, floats or booleans; cast \
+                "{:?} (a facet field holds strings, integers, floats, booleans or dates; cast \
                  '{field}' to a string to facet by it)",
                 col.data_type()
             ),

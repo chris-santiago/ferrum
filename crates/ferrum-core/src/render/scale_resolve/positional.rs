@@ -18,12 +18,12 @@ use crate::spec::encoding::DataType as SpecDataType;
 use crate::render::{RenderError, RenderWarning, ScaleDomainSurface};
 
 use super::domain::{
-    apply_sort_to_domain, establishing_categories, locate_seed_field, numeric_domain_union,
+    apply_sort_to_domain, axis_of_dates, establishing_categories, locate_seed_field, numeric_domain_union,
     numeric_domain_union_over, positional_category_union,
     LayerUnion, SortContext,
 };
 use super::{
-    column_min_max_f64, distinct_values_in_order, infer_spec_type, ScaleKind, SharedDomain,
+    column_min_max_f64, infer_spec_type, ScaleKind, SharedDomain,
 };
 use crate::transform::core::FINAL_OUTPUT_KEY;
 
@@ -135,6 +135,15 @@ pub(in crate::render) fn coord_exempts_channel(coord: Option<&crate::spec::coord
             }
         }
         _ => false,
+    }
+}
+
+/// `scale` recording whether its categories are instants, when it is a
+/// categorical scale.
+fn with_of_dates(scale: ScaleKind, of_dates: bool) -> ScaleKind {
+    match scale {
+        ScaleKind::Ordinal(ordinal) => ScaleKind::Ordinal(ordinal.with_of_dates(of_dates)),
+        other => other,
     }
 }
 
@@ -443,7 +452,8 @@ pub(in crate::render) fn build_axis_scale(
             Ok((extent, tally))
         };
         let data_categories = || {
-            establishing_categories(channel, &enc.field, spec, primary_batch, transform_outputs, include_final)
+            establishing_categories(channel, enc, spec, primary_batch, transform_outputs, include_final)
+                .map(|domain| domain.labels())
         };
         // `channel` here is the RESOLVED (post-`CoordFlip`) token
         // `build_from_scale_spec` validated against, same as every other
@@ -460,7 +470,9 @@ pub(in crate::render) fn build_axis_scale(
         // `AxisConfig` error through here could not have it un-flipped by
         // mistake; it would fall to the `other` arm unchanged instead.
         let axis_name = log_axis_name(enc, log_reads.statistic_field(enc));
+        let of_dates = axis_of_dates(channel, enc, spec, primary_batch, transform_outputs);
         return build_from_scale_spec(channel, scale_spec, enc, seed.batch, pr, &sort_ctx, names_unflipped, &data_extent, &data_categories, text_demand, axis_name.as_deref(), warnings)
+            .map(|scale| with_of_dates(scale, of_dates))
             .map_err(|error| match error {
                 RenderError::InvalidBandPadding { channel, error: e, .. } => {
                     RenderError::InvalidBandPadding { channel, error: e, coord_flipped: names_unflipped }
@@ -480,7 +492,19 @@ pub(in crate::render) fn build_axis_scale(
             });
     }
 
-    if let Some(scale) = shared.and_then(|shared| shared_domain_axis_scale(&dtype, shared, pr, text_demand, warnings)) {
+    // A member whose own binding is temporal takes the group's categorical axis
+    // when that axis is one of dates (the owner reads its dates as categories
+    // there; `composite::promote_dates_to_the_groups_date_axis` made its domain
+    // categorical), so it resolves as the nominal member it is read as.
+    let (shared_dtype, shared_pr) = match shared {
+        Some(SharedDomain::Ordinal(cats)) if dtype == SpecDataType::Temporal && cats.of_dates() => {
+            (SpecDataType::Nominal, axis_pixel_range(channel, &SpecDataType::Nominal, pixel_range))
+        }
+        _ => (dtype, pr),
+    };
+    if let Some(scale) =
+        shared.and_then(|shared| shared_domain_axis_scale(&shared_dtype, shared, shared_pr, text_demand, warnings))
+    {
         return Ok(scale);
     }
 
@@ -504,14 +528,16 @@ pub(in crate::render) fn build_axis_scale(
             // resolves byte-identically; a cross-DataFrame `a + b` merge,
             // whose RHS column is renamed, stops losing the RHS categories
             // (and with them every RHS mark, for want of a band).
-            let mut domain = positional_category_union(
+            let union = positional_category_union(
                 channel,
-                &enc.field,
+                enc,
                 primary_batch,
                 transform_outputs,
                 spec,
                 include_final,
             )?;
+            let of_dates = union.of_dates();
+            let mut domain = union.labels();
             // For data-aware sort forms (`"-y"`, `"y"`, `{field, op, order}`),
             // `apply_sort_to_domain` computes a per-category aggregate from
             // `sort_ctx.batch`. When the channel resolves Shared
@@ -533,7 +559,8 @@ pub(in crate::render) fn build_axis_scale(
             let categories = domain.len();
             let scale = OrdinalScale::new_internal(
                 domain, vec![pr.0, pr.1], DiscreteLayout::UNPADDED,
-            );
+            )
+            .with_of_dates(of_dates);
             warn_if_ordinal_cardinality_degenerate(&scale, categories, warnings);
             Ok(ScaleKind::Ordinal(scale))
         }
@@ -578,7 +605,8 @@ fn shared_domain_axis_scale(
             TimeScale::new_internal(vec![*lo, *hi], vec![inset.0, inset.1], false, false),
         )),
         (SpecDataType::Ordinal | SpecDataType::Nominal, SharedDomain::Ordinal(cats)) => {
-            let scale = OrdinalScale::new_internal(cats.clone(), vec![pr.0, pr.1], DiscreteLayout::UNPADDED);
+            let scale = OrdinalScale::new_internal(cats.labels(), vec![pr.0, pr.1], DiscreteLayout::UNPADDED)
+                .with_of_dates(cats.of_dates());
             warn_if_ordinal_cardinality_degenerate(&scale, cats.len(), warnings);
             Some(ScaleKind::Ordinal(scale))
         }
@@ -620,7 +648,7 @@ pub(in crate::render) fn imposed_axis_scale(
     let (dtype, column): (arrow::datatypes::DataType, arrow::array::ArrayRef) = match shared {
         Some(SharedDomain::Ordinal(categories)) => (
             arrow::datatypes::DataType::Utf8,
-            std::sync::Arc::new(arrow::array::StringArray::from(categories.clone())),
+            std::sync::Arc::new(arrow::array::StringArray::from(categories.labels())),
         ),
         Some(SharedDomain::Numeric { lo, hi }) => {
             (arrow::datatypes::DataType::Float64, std::sync::Arc::new(arrow::array::Float64Array::from(vec![*lo, *hi])))
@@ -657,13 +685,20 @@ pub(in crate::render) fn imposed_axis_scale(
             )
         }),
     };
-    let data_categories = || distinct_values_in_order(&batch, &binding.field);
+    let (categories, of_dates) = match shared {
+        Some(SharedDomain::Ordinal(domain)) => (domain.labels(), domain.of_dates()),
+        _ => (Vec::new(), false),
+    };
+    let data_categories = || Ok(categories.clone());
     // An imposed member draws nothing of its own on this channel (see the
     // `shared_domain_axis_scale` call above), so it contributes no text
     // rows either, and it names no statistic field of its own: the
     // establishing member's tally names the axis.
     let axis_name = log_axis_name(binding, None);
-    Some(build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, false, &data_extent, &data_categories, &Default::default(), axis_name.as_deref(), warnings))
+    Some(
+        build_from_scale_spec(channel, scale, binding, &batch, pr, &sort_ctx, false, &data_extent, &data_categories, &Default::default(), axis_name.as_deref(), warnings)
+            .map(|scale| with_of_dates(scale, of_dates)),
+    )
 }
 
 /// Resolve a numeric/temporal axis extent: the leaf's own facet-union-aware
@@ -2070,7 +2105,7 @@ mod tests {
                 )
             })
         };
-        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, false, &data_extent, &|| super::distinct_values_in_order(&batch, "cat"), &Default::default(), None, &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, &batch, (0.0, 500.0), &sort_ctx, false, &data_extent, &|| crate::render::category_read::CategoryDomain::from_column(&batch, "cat", crate::render::category_read::TimestampRead::Categories).map(|d| d.labels()), &Default::default(), None, &mut warnings)
     }
 
     /// A zero-padding `ScaleSpec::Point` over `explicit_domain`, resolved.
@@ -2571,7 +2606,7 @@ mod tests {
         // This harness has no lineage to ask, so it names the axis exactly
         // as a primitive (non-statistic) layer does: the raw field.
         let axis_name = super::log_axis_name(&enc, None);
-        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, false, &data_extent, &|| super::distinct_values_in_order(batch, field), &Default::default(), axis_name.as_deref(), &mut warnings)
+        super::build_from_scale_spec("x", spec, &enc, batch, pr, &sort_ctx, false, &data_extent, &|| crate::render::category_read::CategoryDomain::from_column(batch, field, crate::render::category_read::TimestampRead::Categories).map(|d| d.labels()), &Default::default(), axis_name.as_deref(), &mut warnings)
     }
 
     fn resolve_scale(

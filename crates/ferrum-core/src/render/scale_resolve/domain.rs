@@ -6,6 +6,7 @@ use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 
 use super::{sided_min_max_f64, LeftOutTally, SidedExtent};
+use crate::render::category_read::{establishes_dates, timestamp_read, CategoryDomain, TimestampRead};
 use crate::render::position::AdjustedRows;
 use crate::render::prepare::LayerPrepared;
 use crate::render::{RenderError, RenderWarning};
@@ -969,6 +970,39 @@ impl<'a> AuxRead<'a> {
             .or_else(|| self.column_batch(primary_batch, transform_outputs, facet_shared))
     }
 
+    /// Whether this read is a `Timestamp` column.
+    fn is_timestamp_column(&self, primary_batch: &RecordBatch, transform_outputs: &HashMap<String, RecordBatch>) -> bool {
+        matches!(self.kind, AuxReadKind::Column { .. })
+            && self
+                .source
+                .locate(self.field, primary_batch, transform_outputs)
+                .is_some_and(|located| matches!(located.col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)))
+    }
+
+    /// How this read's binding reads a `Timestamp` column on `channel`
+    /// ([`timestamp_read`]); a raster image's cells are numbers, never dates.
+    pub(in crate::render) fn timestamp_read(&self, channel: &str, of_dates: bool) -> TimestampRead {
+        match self.kind {
+            AuxReadKind::Column { binding } => timestamp_read(channel, Some(binding), self.mark, of_dates),
+            AuxReadKind::RasterCells { .. } => TimestampRead::Temporal,
+        }
+    }
+
+    /// [`Self::reads_categorical`], with a `Timestamp` column also read as
+    /// categories where [`timestamp_read`] says its binding does on `channel`
+    /// (`of_dates`: the scale on that channel is a date-category scale).
+    fn reads_categorical_on(
+        &self,
+        channel: &str,
+        of_dates: bool,
+        primary_batch: &RecordBatch,
+        transform_outputs: &HashMap<String, RecordBatch>,
+    ) -> bool {
+        self.reads_categorical(primary_batch, transform_outputs)
+            || (self.is_timestamp_column(primary_batch, transform_outputs)
+                && self.timestamp_read(channel, of_dates) == TimestampRead::Categories)
+    }
+
     /// Whether this read's values read as categories: a column by its
     /// binding's declared type or its dtype ([`column_reads_categorical`]);
     /// a raster image's cells never, they are numbers.
@@ -1290,6 +1324,23 @@ pub(in crate::render) fn color_grouping_area(chart_mark: Mark, reads: &[AuxRead<
     }
 }
 
+/// Whether the establishing (first) read of a chart-level `channel` scale is a
+/// date its binding reads as categories, which makes the scale one of dates:
+/// a later layer's date on it reads as categories too.
+fn lead_reads_dates_as_categories(
+    reads: &[AuxRead<'_>],
+    channel: &str,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> bool {
+    reads.first().is_some_and(|lead| match lead.kind {
+        AuxReadKind::Column { binding } => {
+            establishes_dates(channel, binding, lead.mark, lead.is_timestamp_column(primary_batch, transform_outputs))
+        }
+        AuxReadKind::RasterCells { .. } => false,
+    })
+}
+
 /// The reads a chart-level `channel` scale admits into its domain: those whose
 /// column reads as the scale does, categorical when `scale_reads_categorical`.
 /// The establishing-scale rule of the layered axes ([`AxisMembers`]): the
@@ -1311,7 +1362,8 @@ pub(in crate::render) fn admitted_aux_reads<'a>(
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
-    let reads_categorical = |read: &AuxRead<'a>| read.reads_categorical(primary_batch, transform_outputs);
+    let of_dates = lead_reads_dates_as_categories(reads, channel, primary_batch, transform_outputs);
+    let reads_categorical = |read: &AuxRead<'a>| read.reads_categorical_on(channel, of_dates, primary_batch, transform_outputs);
     let reads_kind = ReadsKind { scale_reads_categorical, reads_categorical: &reads_categorical };
     admit_reads(reads, channel, reads_kind, None, primary_batch, transform_outputs, warnings)
 }
@@ -1352,7 +1404,8 @@ pub(in crate::render) fn admitted_color_reads<'a>(
     transform_outputs: &HashMap<String, RecordBatch>,
     warnings: &mut Vec<RenderWarning>,
 ) -> Result<Vec<AuxRead<'a>>, RenderError> {
-    let column_kind = |read: &AuxRead<'a>| read.reads_categorical(primary_batch, transform_outputs);
+    let of_dates = lead_reads_dates_as_categories(reads, "color", primary_batch, transform_outputs);
+    let column_kind = |read: &AuxRead<'a>| read.reads_categorical_on("color", of_dates, primary_batch, transform_outputs);
     let dtype_kind = |read: &AuxRead<'a>| {
         read.locate(primary_batch, transform_outputs)
             .is_some_and(|located| dtype_reads_categorical(located.col.data_type()))
@@ -1501,11 +1554,13 @@ pub(in crate::render) fn sided_aux_numeric_union(
 }
 
 /// The categorical domain of a chart-level color, shape or stroke-dash on a
-/// layered spec: each read's distinct values in first-appearance order,
-/// unioned in layer order, as [`positional_category_union`] unions an axis's
-/// categories. A read of
-/// the chart's data takes the all-panels batch on a faceted chart
-/// ([`super::shared_categorical_batch`]). Returns the domain, the first
+/// layered spec: each read's distinct values, unioned in layer order, as
+/// [`positional_category_union`] unions an axis's categories (dates in time
+/// order whichever frame holds them). Each read's dates read as its own
+/// binding reads them on `channel` ([`timestamp_read`]); the establishing read
+/// being a date category makes the scale one of dates, so a later read's dates
+/// join it. A read of the chart's data takes the all-panels batch on a faceted
+/// chart ([`super::shared_categorical_batch`]). Returns the domain, the first
 /// contributing batch and that batch's read, whose own pre-statistic rows a
 /// data-aware `sort=` reads instead of aggregating over the domain batch
 /// ([`legend_sort_context`]); `None` for no reads (an unlayered spec, which
@@ -1513,20 +1568,19 @@ pub(in crate::render) fn sided_aux_numeric_union(
 #[allow(clippy::type_complexity)]
 pub(in crate::render) fn aux_category_union<'b>(
     reads: &[AuxRead<'b>],
+    channel: &str,
     primary_batch: &'b RecordBatch,
     transform_outputs: &'b HashMap<String, RecordBatch>,
     facet_shared: bool,
-) -> Result<Option<(Vec<String>, &'b RecordBatch, AuxRead<'b>)>, RenderError> {
-    let mut union: Option<(Vec<String>, &'b RecordBatch, AuxRead<'b>)> = None;
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+) -> Result<Option<(CategoryDomain, &'b RecordBatch, AuxRead<'b>)>, RenderError> {
+    let mut union: Option<(CategoryDomain, &'b RecordBatch, AuxRead<'b>)> = None;
     for read in reads {
         let Some(batch) = read.column_batch(primary_batch, transform_outputs, facet_shared) else { continue };
-        let values = super::distinct_values_in_order(batch, read.field)?;
-        let (domain, ..) = union.get_or_insert_with(|| (Vec::new(), batch, *read));
-        for value in values {
-            if seen.insert(value.clone()) {
-                domain.push(value);
-            }
+        let of_dates = union.as_ref().is_some_and(|(domain, ..)| domain.of_dates());
+        let domain = CategoryDomain::from_column(batch, read.field, read.timestamp_read(channel, of_dates))?;
+        match union.as_mut() {
+            Some((united, ..)) => united.join(&domain),
+            None => union = Some((domain, batch, *read)),
         }
     }
     Ok(union)
@@ -1637,7 +1691,7 @@ fn channel_slots<'a>(encoding: &'a crate::spec::encoding::Encoding, flipped: boo
 }
 
 /// Whether `layer`'s effective coord exchanges its positional channels.
-fn layer_flips(layer: &Layer, chart_coord: Option<&crate::spec::coord::CoordKind>) -> bool {
+pub(in crate::render) fn layer_flips(layer: &Layer, chart_coord: Option<&crate::spec::coord::CoordKind>) -> bool {
     crate::spec::coord::flips_positional_channels(layer.effective_coord(chart_coord))
 }
 
@@ -3571,8 +3625,9 @@ fn distinct_positional_categories_shared(
     transform_outputs: &HashMap<String, RecordBatch>,
     include_final: bool,
     global_key: &str,
-) -> Result<Vec<String>, RenderError> {
-    let panel_domain = crate::render::arrow_cast::distinct_values_in_order(panel_batch, field)?;
+    read: TimestampRead,
+) -> Result<CategoryDomain, RenderError> {
+    let panel_domain = CategoryDomain::from_column(panel_batch, field, read)?;
     if !include_final {
         return Ok(panel_domain);
     }
@@ -3584,14 +3639,10 @@ fn distinct_positional_categories_shared(
     }
     // Global first-appearance order is the shared domain: a superset of every
     // panel, so it is identical across panels and preserves the global order.
-    let mut domain = crate::render::arrow_cast::distinct_values_in_order(global_batch, field)?;
+    let mut domain = CategoryDomain::from_column(global_batch, field, read)?;
     // Defensive union: append any panel category absent from the global set so a
     // category can never disappear from a panel's scale (no-op in practice).
-    for cat in panel_domain {
-        if !domain.contains(&cat) {
-            domain.push(cat);
-        }
-    }
+    domain.join(&panel_domain);
     Ok(domain)
 }
 
@@ -3609,19 +3660,18 @@ fn distinct_positional_categories_shared(
 /// layers'.
 pub(in crate::render) fn establishing_categories(
     channel: &str,
-    field: &str,
+    binding: &crate::spec::encoding::EncodingSpec,
     spec: &ChartSpec,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     include_final: bool,
-) -> Result<Vec<String>, RenderError> {
+) -> Result<CategoryDomain, RenderError> {
+    let field = binding.field.as_str();
     let seed = locate_seed_field(channel, field, spec, primary_batch, transform_outputs)
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
-    let source = spec
-        .layers
-        .as_deref()
-        .and_then(|layers| establishing_axis_layer(spec, layers, channel))
-        .map(|(_, layer)| LayerSource::of(layer));
+    let establisher = spec.layers.as_deref().and_then(|layers| establishing_axis_layer(spec, layers, channel));
+    let source = establisher.map(|(_, layer)| LayerSource::of(layer));
+    let mark = establisher.map_or(spec.mark, |(_, layer)| layer.mark);
     let reads_chart_rows = source.is_none_or(LayerSource::is_chart);
     distinct_positional_categories_shared(
         seed.batch,
@@ -3629,6 +3679,56 @@ pub(in crate::render) fn establishing_categories(
         transform_outputs,
         include_final && reads_chart_rows,
         source.map_or(FINAL_OUTPUT_KEY, LayerSource::all_panel_key),
+        timestamp_read(channel, Some(binding), mark, false),
+    )
+}
+
+/// The binding, mark and `data_source` of the read that establishes the axis on
+/// the rendering (post-flip) `channel`: the first layer that draws it
+/// ([`establishing_axis_layer`]) with its own binding, else the chart-level one
+/// it inherits; an unlayered spec's own binding. The one statement of "which
+/// read decides whether the axis is one of dates", read by the engine
+/// ([`axis_of_dates`]) and by the binding set published to Python
+/// ([`crate::render::category_read::category_read_fields`]).
+pub(in crate::render) fn establishing_axis_read<'a>(
+    spec: &'a ChartSpec,
+    channel: &str,
+) -> Option<(&'a crate::spec::encoding::EncodingSpec, Mark, Option<&'a str>)> {
+    use crate::spec::layer::PositionalChannel::{X, Y};
+    let layers = spec.layers.as_deref().unwrap_or_default();
+    let (flips, mark, own, source) = if spec.is_layered() {
+        let (_, layer) = establishing_axis_layer(spec, layers, channel)?;
+        (layer_flips(layer, spec.coord.as_ref()), layer.mark, Some(&layer.encoding), layer.data_source.as_deref())
+    } else {
+        (crate::spec::coord::flips_positional_channels(spec.coord.as_ref()), spec.mark, None, None)
+    };
+    let slot = match (channel, flips) {
+        ("x", false) | ("y", true) => X,
+        ("y", false) | ("x", true) => Y,
+        _ => return None,
+    };
+    let binding = own.and_then(|enc| slot.slot(enc).as_ref()).or(slot.slot(&spec.encoding).as_ref())?;
+    Some((binding, mark, source))
+}
+
+/// Whether the axis on `channel` is a date-category axis: the read that
+/// establishes it ([`establishing_axis_read`]) is a `Timestamp` column its
+/// binding reads as categories ([`establishes_dates`]). The fact the resolved
+/// scale records ([`crate::scale::ordinal::OrdinalScale::of_dates`]).
+pub(in crate::render) fn axis_of_dates(
+    channel: &str,
+    binding: &crate::spec::encoding::EncodingSpec,
+    spec: &ChartSpec,
+    primary_batch: &RecordBatch,
+    transform_outputs: &HashMap<String, RecordBatch>,
+) -> bool {
+    let Some(seed) = locate_seed_field(channel, &binding.field, spec, primary_batch, transform_outputs) else { return false };
+    let (establishing, mark, _) = establishing_axis_read(spec, channel).unwrap_or((binding, spec.mark, None));
+    establishes_dates(
+        channel,
+        establishing,
+        mark,
+        matches!(seed.col.data_type(), arrow::datatypes::DataType::Timestamp(_, _)),
     )
 }
 
@@ -3693,16 +3793,17 @@ pub(in crate::render) fn establishing_categories(
 /// nulls) open no band.
 pub(in crate::render) fn positional_category_union(
     channel: &str,
-    field: &str,
+    binding: &crate::spec::encoding::EncodingSpec,
     primary_batch: &RecordBatch,
     transform_outputs: &HashMap<String, RecordBatch>,
     spec: &ChartSpec,
     include_final: bool,
-) -> Result<Vec<String>, RenderError> {
+) -> Result<CategoryDomain, RenderError> {
+    let field = binding.field.as_str();
     // Unlayered ([`ChartSpec::is_layered`]): the chart's own categories.
     let layers = spec.layers.as_deref().unwrap_or_default();
     if !spec.is_layered() {
-        return establishing_categories(channel, field, spec, primary_batch, transform_outputs, include_final);
+        return establishing_categories(channel, binding, spec, primary_batch, transform_outputs, include_final);
     }
     // The precondition [`establishing_categories`] checks for an unlayered
     // spec: the locator the caller types this axis with finds the bound field
@@ -3711,15 +3812,7 @@ pub(in crate::render) fn positional_category_union(
         .ok_or_else(|| RenderError::UnknownColumn { name: field.to_string() })?;
     // Membership set rather than `Vec::contains`: the ladder can run to hundreds
     // of categories and every layer would re-scan it.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut domain: Vec<String> = Vec::new();
-    let mut join = |cats: Vec<String>| {
-        for cat in cats {
-            if seen.insert(cat.clone()) {
-                domain.push(cat);
-            }
-        }
-    };
+    let mut domain = CategoryDomain::default();
     // The seed: the bound field from the establishing layer's batch, then each
     // field a later layer inherits from the chart's data ([`seed_reads`]), in
     // that order. Only the chart's data takes in the facet-shared all-panels
@@ -3727,20 +3820,34 @@ pub(in crate::render) fn positional_category_union(
     // is a later layer's column, so a column that cannot be a category key
     // contributes nothing, as it does from that layer's own binding below.
     let seeds = seed_reads(spec, layers, channel, (field, None), &AxisReads::unstacked(layers));
-    for seed in &seeds {
+    for (position, seed) in seeds.iter().enumerate() {
         let Some(located) = seed.source.locate(seed.field, primary_batch, transform_outputs) else { continue };
+        // The establishing seed reads as the rendering binding does; a later
+        // layer's inherited field reads as the chart's binding does on that
+        // layer's mark, on a scale of dates once dates established it.
+        let mark = match seed.inheritor {
+            Some(layer) => layers.get(layer).map_or(spec.mark, |layer| layer.mark),
+            None => establishing_axis_layer(spec, layers, channel).map_or(spec.mark, |(_, layer)| layer.mark),
+        };
+        let read = timestamp_read(channel, Some(binding), mark, position > 0 && domain.of_dates());
         if seed.inheritor.is_some()
-            && crate::render::arrow_cast::ensure_category_keyable(seed.field, located.col.data_type()).is_err()
+            && crate::render::arrow_cast::ensure_category_keyable(seed.field, located.col.data_type(), read).is_err()
         {
             continue;
         }
-        join(distinct_positional_categories_shared(
+        let seeded = distinct_positional_categories_shared(
             located.batch,
             seed.field,
             transform_outputs,
             include_final && seed.source.is_chart(),
             seed.source.all_panel_key(),
-        )?);
+            read,
+        )?;
+        let establishes = domain.is_empty();
+        domain.join(&seeded);
+        if establishes {
+            domain = domain.with_of_dates(seeded.of_dates());
+        }
     }
     for layer in layers {
         // An `independent_y` layer owns its own y axis (GH #52) and must not
@@ -3828,17 +3935,17 @@ pub(in crate::render) fn positional_category_union(
         // column (`x="yr"` over `Int64`, which infers Quantitative) is the same
         // shape — both would silently lose every mark, which is the defect this
         // function exists to prevent.
-        if crate::render::arrow_cast::ensure_category_keyable(layer_field, located.col.data_type())
-            .is_err()
-        {
+        let read = timestamp_read(channel, Some(layer_enc), layer.mark, domain.of_dates());
+        if crate::render::arrow_cast::ensure_category_keyable(layer_field, located.col.data_type(), read).is_err() {
             continue;
         }
-        join(distinct_positional_categories_shared(
+        domain.join(&distinct_positional_categories_shared(
             located.batch,
             layer_field,
             transform_outputs,
             include_final && source.is_chart(),
             source.all_panel_key(),
+            read,
         )?);
     }
     Ok(domain)
@@ -3850,6 +3957,19 @@ mod tests {
     use arrow::array::{Float64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use std::sync::Arc;
+
+    /// [`positional_category_union`] over a bare binding of `field`, as labels.
+    fn category_union_labels(
+        channel: &str,
+        field: &str,
+        primary: &RecordBatch,
+        outputs: &HashMap<String, RecordBatch>,
+        spec: &ChartSpec,
+        include_final: bool,
+    ) -> Result<Vec<String>, RenderError> {
+        let binding = crate::spec::encoding::EncodingSpec { field: field.into(), ..Default::default() };
+        positional_category_union(channel, &binding, primary, outputs, spec, include_final).map(|domain| domain.labels())
+    }
 
     fn group_batch(groups: Vec<&str>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("group", DataType::Utf8, true)]));
@@ -3867,7 +3987,7 @@ mod tests {
         let outputs = HashMap::new();
         let ladder = |layers: Option<Vec<Layer>>| {
             let spec = ChartSpec { layers, ..Default::default() };
-            positional_category_union("x", "group", &primary, &outputs, &spec, false)
+            category_union_labels("x", "group", &primary, &outputs, &spec, false)
                 .expect("the bound column enumerates")
         };
         assert_eq!(ladder(None), ["A", "B"]);
@@ -5716,7 +5836,7 @@ mod tests {
             serde_json::from_str(spec_json).expect("lowered spec JSON must deserialize");
         let batch = merged_category_batch();
         let outputs = HashMap::from([("_ident_0".to_string(), batch.clone())]);
-        positional_category_union(channel, field, &batch, &outputs, &spec, false)
+        category_union_labels(channel, field, &batch, &outputs, &spec, false)
             .expect("every category column in the fixture is Utf8")
     }
 
@@ -5880,31 +6000,64 @@ mod tests {
     /// since the per-row keyer admits exactly the dtypes the gate does.
     #[test]
     fn a_layer_field_that_cannot_be_a_category_key_is_skipped_not_raised() {
-        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        use arrow::array::{DurationMillisecondArray, Float64Array};
         let schema = Arc::new(Schema::new(vec![
             Field::new("cat", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
-            Field::new(
-                "when",
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                true,
-            ),
+            Field::new("when", DataType::Duration(arrow::datatypes::TimeUnit::Millisecond), true),
         ]));
         let batch = RecordBatch::try_new(
             schema,
             vec![
                 Arc::new(StringArray::from(vec![Some("c"), Some("a")])),
                 Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
-                Arc::new(TimestampMillisecondArray::from(vec![Some(0_i64), Some(86_400_000)])),
+                Arc::new(DurationMillisecondArray::from(vec![Some(0_i64), Some(86_400_000)])),
             ],
         )
         .unwrap();
-        const TEMPORAL_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"line","encoding":{"x":{"field":"when","type":"temporal"},"y":{"field":"val"}}}]}"#;
-        let spec: ChartSpec = serde_json::from_str(TEMPORAL_LAYER).unwrap();
+        const DURATION_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"line","encoding":{"x":{"field":"when","type":"temporal"},"y":{"field":"val"}}}]}"#;
+        let spec: ChartSpec = serde_json::from_str(DURATION_LAYER).unwrap();
         assert_eq!(
-            positional_category_union("x", "cat", &batch, &HashMap::new(), &spec, false)
-                .expect("a temporal layer field must skip, not refuse the whole ladder"),
+            category_union_labels("x", "cat", &batch, &HashMap::new(), &spec, false)
+                .expect("an unkeyable layer field must skip, not refuse the whole ladder"),
             vec!["c".to_string(), "a".to_string()],
+        );
+    }
+
+    /// A layer whose own column is a `Timestamp` can be a category key, so it
+    /// contributes its labels in time order when it declares the column categorical, as an integer layer column does. A layer that leaves the date temporal opens no bands.
+    #[test]
+    fn a_timestamp_layer_field_joins_the_ladder_only_when_declared_categorical() {
+        use arrow::array::{Float64Array, TimestampMillisecondArray};
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cat", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("when", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("c"), Some("a")])),
+                Arc::new(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+                Arc::new(TimestampMillisecondArray::from(vec![Some(86_400_000_i64), Some(0)])),
+            ],
+        )
+        .unwrap();
+        let layered = |declared: &str| -> ChartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"data":{{"kind":"named","name":"default"}},"mark":"bar","encoding":{{"x":{{"field":"cat","type":"nominal"}},"y":{{"field":"val"}}}},"layers":[{{"mark":"bar","encoding":{{"x":{{"field":"cat","type":"nominal"}},"y":{{"field":"val"}}}}}},{{"mark":"line","encoding":{{"x":{{"field":"when","type":"{declared}"}},"y":{{"field":"val"}}}}}}]}}"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            category_union_labels("x", "cat", &batch, &HashMap::new(), &layered("temporal"), false).unwrap(),
+            vec!["c".to_string(), "a".to_string()],
+            "a temporal-declared date layer opens no bands"
+        );
+        let spec = layered("nominal");
+        assert_eq!(
+            category_union_labels("x", "cat", &batch, &HashMap::new(), &spec, false).unwrap(),
+            vec!["c".to_string(), "a".to_string(), "1970-01-01".to_string(), "1970-01-02".to_string()],
         );
     }
 
@@ -5934,7 +6087,7 @@ mod tests {
         const QUANTITATIVE_LAYER: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}},"layers":[{"mark":"bar","encoding":{"x":{"field":"cat","type":"nominal"},"y":{"field":"val"}}},{"mark":"point","encoding":{"x":{"field":"n","type":"quantitative"},"y":{"field":"val"}}}]}"#;
         let spec: ChartSpec = serde_json::from_str(QUANTITATIVE_LAYER).unwrap();
         assert_eq!(
-            positional_category_union("x", "cat", &batch, &HashMap::new(), &spec, false)
+            category_union_labels("x", "cat", &batch, &HashMap::new(), &spec, false)
                 .unwrap(),
             vec!["c".to_string(), "a".to_string(), "10".to_string(), "20".to_string()],
         );
@@ -6204,7 +6357,7 @@ mod tests {
     fn each_layers_categories_come_from_its_own_batch() {
         let spec = spec_from(OPERAND_CATEGORIES_SPEC_JSON);
         let (merged, outputs) = operand_category_batches();
-        let ladder = positional_category_union("x", "g", &merged, &outputs, &spec, false)
+        let ladder = category_union_labels("x", "g", &merged, &outputs, &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["a", "b", "c", "x", "y", "z"]));
     }
@@ -6241,7 +6394,7 @@ mod tests {
         let spec = spec_from(NON_DRAWING_LEAD_SPEC_JSON);
         let (merged, outputs) =
             non_drawing_lead_batches(opt_str_col(&[Some("a"), Some("b"), Some("c")]));
-        let ladder = positional_category_union("x", "g", &merged, &outputs, &spec, false)
+        let ladder = category_union_labels("x", "g", &merged, &outputs, &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["a", "b"]));
     }
@@ -6421,7 +6574,7 @@ mod tests {
             ("rhs".to_string(), rhs),
             (FINAL_OUTPUT_KEY.to_string(), lhs.clone()),
         ]);
-        let ladder = positional_category_union("x", "cat", &lhs, &outputs, &spec, false)
+        let ladder = category_union_labels("x", "cat", &lhs, &outputs, &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["a", "b", "c"]));
     }
@@ -6451,12 +6604,12 @@ mod tests {
             (key.clone(), own_all.clone()),
             (panel_key(&key), own_panel),
         ]);
-        let shared = positional_category_union("x", "g", &panel, &outputs, &spec, true).unwrap();
+        let shared = category_union_labels("x", "g", &panel, &outputs, &spec, true).unwrap();
         assert_eq!(shared, strings(&["a", "p", "q"]), "a shared axis spans the moved layer's all-panel rows, never the dropped `r`");
-        let independent = positional_category_union("x", "g", &panel, &outputs, &spec, false).unwrap();
+        let independent = category_union_labels("x", "g", &panel, &outputs, &spec, false).unwrap();
         assert_eq!(independent, strings(&["a", "p"]), "an independent axis spans this panel's slice of the moved layer");
         let whole = HashMap::from([(FINAL_OUTPUT_KEY.to_string(), panel.clone()), (key, own_all)]);
-        let whole = positional_category_union("x", "g", &panel, &whole, &spec, false).unwrap();
+        let whole = category_union_labels("x", "g", &panel, &whole, &spec, false).unwrap();
         assert_eq!(whole, strings(&["a", "p", "q"]), "a pass that publishes no panel slice reads the moved layer's rows whole");
     }
 
@@ -6472,7 +6625,7 @@ mod tests {
             ("h", opt_str_col(&[Some("r"), Some("s")])),
             ("v", opt_f64_col(&[Some(1.0), Some(2.0)])),
         ]);
-        let ladder = positional_category_union("x", "g", &batch, &HashMap::new(), &spec, false)
+        let ladder = category_union_labels("x", "g", &batch, &HashMap::new(), &spec, false)
             .expect("every category column is Utf8");
         assert_eq!(ladder, strings(&["p", "q", "r", "s"]));
     }
@@ -6485,7 +6638,7 @@ mod tests {
         const PHANTOM_SEED: &str = r#"{"data":{"kind":"named","name":"default"},"mark":"point","encoding":{"x":{"field":"nowhere","type":"nominal"},"y":{"field":"v"}},"layers":[{"mark":"point","encoding":{"x":{"field":"nowhere","type":"nominal"},"y":{"field":"v"}}}]}"#;
         let spec = spec_from(PHANTOM_SEED);
         let batch = columns_batch(vec![("v", f64_col(&[1.0, 2.0]))]);
-        let err = positional_category_union("x", "nowhere", &batch, &HashMap::new(), &spec, false)
+        let err = category_union_labels("x", "nowhere", &batch, &HashMap::new(), &spec, false)
             .expect_err("a bound field no batch holds is refused");
         assert_eq!(err, RenderError::UnknownColumn { name: "nowhere".to_string() });
     }
@@ -6546,6 +6699,174 @@ mod tests {
         let outputs = HashMap::new();
         let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
         assert_eq!(reads.iter().map(AuxRead::layer).collect::<Vec<_>>(), [0, 3]);
+    }
+
+    /// A layer binding a date column to `stroke_dash` joins a dash scale a text
+    /// column establishes, and a text layer joins one a date establishes, with no
+    /// notice either way: a dash is a category.
+    #[test]
+    fn a_date_dash_joins_a_sibling_dash_scale_without_a_notice() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use arrow::array::TimestampMillisecondArray;
+        let dash = |field: &str| Encoding {
+            stroke_dash: Some(EncodingSpec { field: field.into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("date", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["2024-01-01"])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_704_067_200_000_i64])),
+            ],
+        )
+        .unwrap();
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "stroke_dash").expect("stroke_dash");
+        let outputs = HashMap::new();
+        let chart = Encoding::default();
+        for (first, second) in [("text", "date"), ("date", "text")] {
+            let layers = vec![
+                Layer { mark: Mark::Line, encoding: dash(first), ..Default::default() },
+                Layer { mark: Mark::Line, encoding: dash(second), ..Default::default() },
+            ];
+            let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+            assert_eq!(reads.len(), 2);
+            let mut warnings = Vec::new();
+            let admitted = admitted_aux_reads(&reads, "stroke_dash", true, &rows, &outputs, &mut warnings).unwrap();
+            assert_eq!(admitted.iter().map(AuxRead::layer).collect::<Vec<_>>(), [0, 1], "{first} then {second}");
+            assert!(warnings.is_empty(), "{first} then {second}: a layer that joins is not reported as staying out: {warnings:?}");
+        }
+    }
+
+    /// A later layer's UNDECLARED date colour stays out of a text colour scale
+    /// with its notice, with or without a stated domain; declared nominal it
+    /// joins; and it joins a scale a declared date colour establishes (a scale
+    /// of dates).
+    #[test]
+    fn an_untyped_date_color_stays_out_of_a_text_color_scale_with_its_notice() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use arrow::array::TimestampMillisecondArray;
+        let color = |field: &str, type_: Option<crate::spec::encoding::DataType>, domain: bool| Encoding {
+            color: Some(EncodingSpec {
+                field: field.into(),
+                type_,
+                scale: domain.then(|| serde_json::from_str(r#"{"type":"ordinal","domain":["2024-01-01"]}"#).unwrap()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("text", DataType::Utf8, true),
+                Field::new("date", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["2024-01-01"])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_704_067_200_000_i64])),
+            ],
+        )
+        .unwrap();
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
+        let chart = Encoding::default();
+        let outputs = HashMap::new();
+        let nominal = Some(crate::spec::encoding::DataType::Nominal);
+        let admitted_with = |lead: Encoding, lead_field: &str, later: Encoding| {
+            let layers = vec![
+                Layer { mark: Mark::Point, encoding: lead.clone(), ..Default::default() },
+                Layer { mark: Mark::Point, encoding: later, ..Default::default() },
+            ];
+            let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+            let establishing = lead.color.clone().expect("a colour lead");
+            assert_eq!(establishing.field, lead_field);
+            let mut warnings = Vec::new();
+            let kind = ColorReads::Kind { categorical: true };
+            let admitted = admitted_color_reads(&reads, &establishing, kind, &rows, &outputs, &mut warnings).unwrap();
+            (admitted.len(), warnings.len())
+        };
+        // Undeclared date beside text, with and without a stated domain: out, one notice.
+        for domain in [false, true] {
+            assert_eq!(admitted_with(color("text", None, domain), "text", color("date", None, false)), (1, 1), "domain={domain}");
+        }
+        // Declared nominal: joins.
+        assert_eq!(admitted_with(color("text", None, false), "text", color("date", nominal, false)), (2, 0));
+        // A date colour declared nominal establishes a scale of dates: a later undeclared date joins.
+        assert_eq!(admitted_with(color("date", nominal, false), "date", color("date", None, false)), (2, 0));
+    }
+
+    /// A later layer's UNDECLARED date joins a date-category scale (one a declared
+    /// date colour established) with no notice: an instant on an axis of instants
+    /// names a category.
+    #[test]
+    fn a_later_undeclared_date_joins_a_date_category_scale_without_a_notice() {
+        use crate::spec::encoding::{Encoding, EncodingSpec, AUXILIARY_SCALE_CHANNELS};
+        use arrow::array::TimestampMillisecondArray;
+        let color = |type_: Option<crate::spec::encoding::DataType>| Encoding {
+            color: Some(EncodingSpec { field: "date".into(), type_, ..Default::default() }),
+            ..Default::default()
+        };
+        let rows = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "date",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                true,
+            )])),
+            vec![Arc::new(TimestampMillisecondArray::from(vec![1_704_067_200_000_i64]))],
+        )
+        .unwrap();
+        let layers = vec![
+            Layer { mark: Mark::Point, encoding: color(Some(crate::spec::encoding::DataType::Nominal)), ..Default::default() },
+            Layer { mark: Mark::Point, encoding: color(None), ..Default::default() },
+        ];
+        let channel = AUXILIARY_SCALE_CHANNELS.into_iter().find(|c| c.name == "color").expect("color");
+        let (chart, outputs) = (Encoding::default(), HashMap::new());
+        let reads = aux_reads(&layers, &chart, channel, &rows, &outputs);
+        let establishing = layers[0].encoding.color.clone().expect("a colour lead");
+        let mut warnings = Vec::new();
+        let admitted =
+            admitted_color_reads(&reads, &establishing, ColorReads::Kind { categorical: true }, &rows, &outputs, &mut warnings)
+                .unwrap();
+        assert_eq!(admitted.len(), 2);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Its dates join the domain in time order beside the lead's.
+        let union = aux_category_union(&admitted, "color", &rows, &outputs, false).unwrap().expect("two reads");
+        assert!(union.0.of_dates());
+        assert_eq!(union.0.labels(), ["2024-01-01"]);
+    }
+
+    /// The ladder an axis of dates establishes is in time order across frames
+    /// and records that its categories are instants; a later undeclared date
+    /// layer joins it, and a date layer beside a TEXT ladder does not.
+    #[test]
+    fn a_date_ladder_is_in_time_order_across_layers_and_records_its_dates() {
+        use arrow::array::TimestampMillisecondArray;
+        let batch = |days: &[i64]| {
+            RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new(
+                    "g",
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
+                    true,
+                )])),
+                vec![Arc::new(TimestampMillisecondArray::from(days.iter().map(|d| d * 86_400_000).collect::<Vec<_>>()))],
+            )
+            .unwrap()
+        };
+        let layered = |first: &str| -> ChartSpec {
+            serde_json::from_str(&format!(
+                r#"{{"data":{{"kind":"named","name":"default"}},"mark":"bar","encoding":{{"x":{{"field":"g","type":"{first}"}}}},"layers":[{{"mark":"bar","encoding":{{"x":{{"field":"g","type":"nominal"}}}}}},{{"mark":"point","encoding":{{"x":{{"field":"g"}}}},"data_source":"later"}}]}}"#
+            ))
+            .unwrap()
+        };
+        let outputs = HashMap::from([("later".to_string(), batch(&[1, 4]))]);
+        let binding = crate::spec::encoding::EncodingSpec {
+            field: "g".into(),
+            type_: Some(crate::spec::encoding::DataType::Nominal),
+            ..Default::default()
+        };
+        let domain = positional_category_union("x", &binding, &batch(&[3, 0]), &outputs, &layered("nominal"), false).unwrap();
+        assert_eq!(domain.labels(), ["1970-01-01", "1970-01-02", "1970-01-04", "1970-01-05"]);
+        assert!(domain.of_dates());
     }
 
     /// A layered channel's reads list only the layers that draw it: a layer

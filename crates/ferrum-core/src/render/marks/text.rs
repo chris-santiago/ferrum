@@ -35,7 +35,6 @@
 
 use arrow::record_batch::RecordBatch;
 use crate::layout::TextAnchor;
-use crate::render::arrow_cast::col_as_ordinal_category_str;
 use crate::render::draw::{
     col_as_f64, col_as_str, resolve_contrast_fill_color,
     resolve_fill_color, x_field, y_field, ClearablePaint, DrawCtx, PaintSource,
@@ -400,7 +399,7 @@ fn value_angles(ctx: &DrawCtx<'_>, placement: &PolarLabels<'_>) -> Option<RowAng
     };
     let turn = |pixel: f64| scene_build::polar_projection_turn(channel, pixel, &area) * std::f64::consts::TAU;
     if matches!(scale, ScaleKind::Ordinal(_)) {
-        let categories = col_as_ordinal_category_str(ctx.batch, placement.theta_field).ok()?;
+        let categories = ctx.category_strings_of_field(placement.theta_field).ok()?;
         let angles = categories.iter().map(|c| scale.to_pixel_str(c.as_deref()?).map(&turn)).collect();
         Some(RowAngles { angles, fallback_labels: categories })
     } else {
@@ -426,7 +425,7 @@ fn wedge_angles(
     let mid = |wedge: &Option<(f64, f64)>| wedge.map(|(start, end)| (start + end) / 2.0);
     if categorical {
         // The arc's own category reader, so both marks key the same bands.
-        let categories = col_as_ordinal_category_str(ctx.batch, placement.theta_field).ok()?;
+        let categories = ctx.category_strings_of_field(placement.theta_field).ok()?;
         let wedges = arc::band_wedges(&categories, geom.start_angle, geom.pad_angle);
         Some(RowAngles { angles: wedges.iter().map(mid).collect(), fallback_labels: categories })
     } else {
@@ -499,11 +498,11 @@ fn cartesian_anchors(ctx: &DrawCtx<'_>) -> Option<LabelAnchors> {
     let xs_f: Option<Vec<Option<f64>>> =
         if !x_ordinal { col_as_f64(ctx.batch, xf).ok() } else { None };
     let xs_s: Option<Vec<Option<String>>> =
-        if x_ordinal { col_as_ordinal_category_str(ctx.batch, xf).ok() } else { None };
+        if x_ordinal { ctx.category_strings("x", xf).ok() } else { None };
     let ys_f: Option<Vec<Option<f64>>> =
         if !y_ordinal { col_as_f64(ctx.batch, yf).ok() } else { None };
     let ys_s: Option<Vec<Option<String>>> =
-        if y_ordinal { col_as_ordinal_category_str(ctx.batch, yf).ok() } else { None };
+        if y_ordinal { ctx.category_strings("y", yf).ok() } else { None };
 
     let n_x = match (&xs_f, &xs_s) {
         (Some(v), _) => v.len(),
