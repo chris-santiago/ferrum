@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use super::core::{scale_spec_to_py_dict, validate_band_point_range};
 use super::discrete::{check_align, check_point_padding, DiscreteLayout, DEFAULT_POINT_PADDING};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR, extract_scale_values};
 
 #[derive(Debug, Clone, PartialEq)]
 struct PointScaleData {
@@ -110,10 +111,7 @@ impl PointScale {
     }
 }
 
-#[pymethods]
 impl PointScale {
-    #[new]
-    #[pyo3(signature = (*, domain = None, padding = None, align = 0.5, reverse = false, range = None))]
     fn new(
         domain: Option<Vec<String>>,
         padding: Option<f64>,
@@ -142,6 +140,22 @@ impl PointScale {
             },
             range: r,
         })
+    }
+}
+
+#[pymethods]
+impl PointScale {
+    #[new]
+    #[pyo3(signature = (*, domain = None, padding = None, align = 0.5, reverse = false, range = None))]
+    fn py_new(
+        domain: Option<Vec<String>>,
+        padding: Option<f64>,
+        align: f64,
+        reverse: bool,
+        range: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let range = range.map(|v| extract_scale_values("PointScale", "range", PAIR, v)).transpose()?;
+        Self::new(domain, padding, align, reverse, range)
     }
 
     /// Map a category label to its point pixel coordinate.

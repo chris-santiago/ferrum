@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 
 use super::core::{scale_spec_to_py_dict, validate_finite};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR, extract_scale_values};
 
 /// Sequential color-mapping scale.
 ///
@@ -48,10 +49,7 @@ impl SequentialScale {
     }
 }
 
-#[pymethods]
 impl SequentialScale {
-    #[new]
-    #[pyo3(signature = (*, scheme = None, domain = None, reverse = false))]
     fn new(
         scheme: Option<String>,
         domain: Option<Vec<f64>>,
@@ -77,6 +75,20 @@ impl SequentialScale {
             None => None,
         };
         Ok(SequentialScale { scheme, domain: d, reverse })
+    }
+}
+
+#[pymethods]
+impl SequentialScale {
+    #[new]
+    #[pyo3(signature = (*, scheme = None, domain = None, reverse = false))]
+    fn py_new(
+        scheme: Option<String>,
+        domain: Option<&Bound<'_, PyAny>>,
+        reverse: bool,
+    ) -> PyResult<Self> {
+        let domain = domain.map(|v| extract_scale_values("SequentialScale", "domain", PAIR, v)).transpose()?;
+        Self::new(scheme, domain, reverse)
     }
 
     /// Name of the sequential color scheme, or ``None`` for theme default.

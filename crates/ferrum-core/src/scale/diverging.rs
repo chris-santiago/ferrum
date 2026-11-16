@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 
 use super::core::{scale_spec_to_py_dict, validate_finite, DEGENERATE_DOMAIN_MESSAGE};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR_OR_TRIPLE, extract_scale_values};
 
 /// Diverging color-mapping scale.
 ///
@@ -48,10 +49,7 @@ impl DivergingScale {
     }
 }
 
-#[pymethods]
 impl DivergingScale {
-    #[new]
-    #[pyo3(signature = (*, scheme = None, domain = None, domain_mid = None))]
     fn new(
         scheme: Option<String>,
         domain: Option<Vec<f64>>,
@@ -91,6 +89,20 @@ impl DivergingScale {
             None => None,
         };
         Ok(DivergingScale { scheme, domain: d, domain_mid })
+    }
+}
+
+#[pymethods]
+impl DivergingScale {
+    #[new]
+    #[pyo3(signature = (*, scheme = None, domain = None, domain_mid = None))]
+    fn py_new(
+        scheme: Option<String>,
+        domain: Option<&Bound<'_, PyAny>>,
+        domain_mid: Option<f64>,
+    ) -> PyResult<Self> {
+        let domain = domain.map(|v| extract_scale_values("DivergingScale", "domain", PAIR_OR_TRIPLE, v)).transpose()?;
+        Self::new(scheme, domain, domain_mid)
     }
 
     /// Name of the diverging color scheme, or ``None`` for theme default.

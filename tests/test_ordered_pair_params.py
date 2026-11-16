@@ -704,3 +704,122 @@ def test_a_huge_range_is_refused_by_the_window_frame_reader_too():
         "transform_window: frame must be a (preceding, following) pair of row offsets, "
         "each an integer or None; got range(0, 1000000000000000000000000000000)"
     )
+
+
+# --- scale constructors: domain= and range= read a pair the same way -----------------------
+
+#: The kinds a scale's pair parameter refuses unread (the shape refusal of every other pair door).
+_SCALE_REFUSED_KINDS = [
+    entry
+    for entry in _REFUSED_KINDS
+    if entry[0]
+    in {
+        "set",
+        "frozenset",
+        "bytes",
+        "bytearray",
+        "memoryview",
+        "str",
+        "dict",
+        "generator",
+        "iterator",
+    }
+]
+
+#: (voice, parameter, constructor taking the pair). Every continuous scale reads a
+#: ``(lo, hi)`` pair on each of these; a log scale's pair is positive.
+_SCALE_PAIRS: list[tuple[str, str, Callable[[Any], Any]]] = [
+    (cls, param, lambda v, cls=cls, param=param: getattr(fm, cls)(**{param: v}))
+    for cls in ("LinearScale", "LogScale", "PowScale", "SqrtScale", "SymlogScale", "TimeScale")
+    for param in ("domain", "range")
+] + [
+    ("DivergingScale", "domain", lambda v: fm.DivergingScale(domain=v)),
+    ("SequentialScale", "domain", lambda v: fm.SequentialScale(domain=v)),
+    ("BandScale", "range", lambda v: fm.BandScale(domain=["a", "b"], range=v)),
+    ("PointScale", "range", lambda v: fm.PointScale(domain=["a", "b"], range=v)),
+]
+_SCALE_IDS = [f"{voice}.{param}" for voice, param, _ in _SCALE_PAIRS]
+
+
+@pytest.mark.parametrize(("voice", "param", "build"), _SCALE_PAIRS, ids=_SCALE_IDS)
+@pytest.mark.parametrize(
+    ("kind", "make", "suffix"),
+    _SCALE_REFUSED_KINDS,
+    ids=[k for k, _, _ in _SCALE_REFUSED_KINDS],
+)
+def test_a_scale_pair_refuses_unordered_and_byte_kinds_in_the_shape_words(
+    voice, param, build, kind, make, suffix
+):
+    value = make()
+    with pytest.raises(ValueError) as caught:
+        build(value)
+    expected = _shape(voice, param, value, suffix)
+    if voice == "DivergingScale":
+        # A diverging domain is a (lo, hi) pair or a (lo, mid, hi) triple.
+        expected = expected.replace(
+            "must be a (lo, hi) pair of numbers",
+            "must be a (lo, hi) pair or (lo, mid, hi) triple of numbers",
+        )
+    assert str(caught.value) == expected
+
+
+@pytest.mark.parametrize("domain", [[0, 10], (0, 10), [0, 4, 10], (0, 4, 10)])
+def test_a_diverging_domain_reads_a_list_like_a_tuple_of_two_or_three_values(domain):
+    scale = fm.DivergingScale(domain=domain)
+    assert scale.domain == ([0.0, 5.0, 10.0] if len(domain) == 2 else [0.0, 4.0, 10.0])
+
+
+def _scale_state(scale: Any) -> tuple[str, Any, Any]:
+    """A scale's repr with its domain and range (a band or point repr omits its range)."""
+    return repr(scale), getattr(scale, "domain", None), getattr(scale, "range", None)
+
+
+@pytest.mark.parametrize(("voice", "param", "build"), _SCALE_PAIRS, ids=_SCALE_IDS)
+def test_a_scale_pair_reads_a_list_like_a_tuple_and_keeps_a_reversed_order(voice, param, build):
+    assert _scale_state(build([1, 9])) == _scale_state(build((1, 9)))
+    assert _scale_state(build((9, 1))) == _scale_state(build([9, 1]))
+    assert _scale_state(build((9, 1))) != _scale_state(build((1, 9)))
+
+
+@pytest.mark.parametrize(("voice", "param", "build"), _SCALE_PAIRS, ids=_SCALE_IDS)
+def test_a_scale_pair_generator_is_refused_without_being_read(voice, param, build):
+    pair = iter([1, 9])
+    with pytest.raises(ValueError):
+        build(pair)
+    assert list(pair) == [1, 9]
+
+
+# --- BreakAxis.gap: a list of two bounds is the pair a tuple of two bounds is ---------------
+
+
+def test_break_axis_gap_list_pair_equals_the_tuple_pair():
+    assert fm.BreakAxis(axis="y", gap=[400, 900]) == fm.BreakAxis(axis="y", gap=(400, 900))
+    assert fm.BreakAxis(axis="y", gap=[400, 900]).gap == (400.0, 900.0)
+
+
+def test_break_axis_gap_list_pair_renders_the_tuple_pair_chart():
+    frame = pl.DataFrame({"a": ["u", "v", "w"], "b": [1.0, 2.0, 1000.0]})
+
+    def render(gap: Any) -> str:
+        chart = fm.Chart(frame).mark_bar().encode(x="a", y="b") + fm.BreakAxis(axis="y", gap=gap)
+        return chart.to_svg()
+
+    assert render([400, 900]) == render((400, 900))
+
+
+def test_break_axis_gap_list_of_pairs_and_temporal_list_pair():
+    assert fm.BreakAxis(axis="y", gap=[(1, 5), (6, 9)]).gap == [(1.0, 5.0), (6.0, 9.0)]
+    assert (
+        fm.BreakAxis(axis="x", gap=["2020-01-01", "2020-02-01"]).gap
+        == fm.BreakAxis(axis="x", gap=("2020-01-01", "2020-02-01")).gap
+    )
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [[10, 20, 30], [10], [[10, 20, 30], [40, 50]]],
+    ids=["three_bounds", "one_bound", "pair_of_three"],
+)
+def test_break_axis_gap_malformed_lists_are_still_refused(gap):
+    with pytest.raises(ValueError):
+        fm.BreakAxis(axis="y", gap=gap)

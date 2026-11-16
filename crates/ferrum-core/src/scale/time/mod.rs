@@ -7,6 +7,7 @@ use super::core::{continuous_common, resolve_continuous, scale_spec_to_py_dict, 
 use super::linear::LinearScaleData;
 use super::ticks::{calendar_ticks, minor_ticks_default, nice_calendar_interval, nice_time_interval_ms, CalendarInterval, Tick};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR, extract_scale_values, read_scale_items};
 
 /// Continuous temporal scale backed by Unix epoch milliseconds.
 ///
@@ -544,10 +545,7 @@ fn iso8601_string_epoch_ms(py: Python<'_>, s: &str) -> PyResult<f64> {
     )))
 }
 
-#[pymethods]
 impl TimeScale {
-    #[new]
-    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, utc = false, reverse = false))]
     fn new(
         domain: Option<Vec<TemporalDomainValue>>,
         range: Option<Vec<f64>>,
@@ -583,6 +581,32 @@ impl TimeScale {
         } else {
             Ok(s)
         }
+    }
+}
+
+#[pymethods]
+impl TimeScale {
+    #[new]
+    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, utc = false, reverse = false))]
+    fn py_new(
+        domain: Option<&Bound<'_, PyAny>>,
+        range: Option<&Bound<'_, PyAny>>,
+        clamp: bool,
+        nice: bool,
+        padding: Option<f64>,
+        utc: bool,
+        reverse: bool,
+    ) -> PyResult<Self> {
+        let domain = domain
+            .map(|v| {
+                read_scale_items("TimeScale", "domain", PAIR, v)?
+                    .iter()
+                    .map(|item| temporal_value_to_epoch_ms(item).map(TemporalDomainValue))
+                    .collect::<PyResult<Vec<_>>>()
+            })
+            .transpose()?;
+        let range = range.map(|v| extract_scale_values("TimeScale", "range", PAIR, v)).transpose()?;
+        Self::new(domain, range, clamp, nice, padding, utc, reverse)
     }
 
     /// Map an epoch-millisecond value ``x`` to its output range coordinate.

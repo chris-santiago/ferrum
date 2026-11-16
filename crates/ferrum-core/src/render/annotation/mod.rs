@@ -1778,7 +1778,8 @@ fn check_categories(
 /// dates, on the categorical axis `ordinal`. A line a helper wrote itself is
 /// refused in the helper's voice; under a projected coord (`projected`, the
 /// coord's public name) no category is a remedy; otherwise the label clause
-/// names the category the number's ordinal text spells (a date carries none).
+/// names the category the value's label text spells: a number's ordinal text, a
+/// date's instant label, an ISO string's own text (one equal to a label never reaches here).
 fn value_refusal(
     value: &CoordValue,
     ordinal: &crate::scale::ordinal::OrdinalScale,
@@ -1789,15 +1790,12 @@ fn value_refusal(
     if let Some(entry) = entry {
         return AnnotationRefusal::HelperOnCategoricalAxis { entry: entry.to_string(), axis };
     }
-    let (text, label) = match value {
-        CoordValue::Instant { text: Some(text), .. } => (text.clone(), None),
-        CoordValue::Instant { instant, .. } => (instant_label(*instant), None),
-        _ => {
-            let text = value.data_value().map(float_as_ordinal_str).unwrap_or_default();
-            let label = ordinal.ticks_internal().contains(&text).then(|| text.clone());
-            (text, label)
-        }
+    let text = match value {
+        CoordValue::Instant { text: Some(text), .. } => text.clone(),
+        CoordValue::Instant { instant, .. } => instant_label(*instant),
+        _ => value.data_value().map(float_as_ordinal_str).unwrap_or_default(),
     };
+    let label = ordinal.ticks_internal().contains(&text).then(|| text.clone());
     match projected {
         Some(coord) => AnnotationRefusal::ValueUnderCoord { value: text, axis, coord },
         None => AnnotationRefusal::ValueOnCategoricalAxis { value: text, axis, label },

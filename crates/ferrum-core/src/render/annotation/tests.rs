@@ -2666,6 +2666,29 @@ mod categories {
     }
 
     #[test]
+    fn an_instant_on_a_band_axis_that_spells_it_is_refused_naming_that_label() {
+        let spelled = band(&["a", "2020-01-02", "2020-01-01T12:00:00"], [50.0, 450.0], 0.0);
+        for (ms, label) in [(JAN_2, "2020-01-02"), (NOON, "2020-01-01T12:00:00")] {
+            let (built, _) = run(&[text(instant(ms), CoordValue::Data(1.0))], &spelled, &linear(), None);
+            assert_eq!(built.unwrap_err().to_string(), value_message(label, "x", Some(label)));
+        }
+        let (built, _) = run(&[text(CoordValue::Data(1.0), instant(JAN_2))], &linear(), &spelled, None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02", "y", Some("2020-01-02")));
+        let other = band(&["a", "2020-01-03"], [50.0, 450.0], 0.0);
+        let (built, _) = run(&[text(instant(JAN_2), CoordValue::Data(1.0))], &other, &linear(), None);
+        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02", "x", None));
+    }
+
+    #[test]
+    fn an_iso_string_equal_to_a_band_label_still_lands_on_its_band() {
+        let spelled = band(&["a", "2020-01-02"], [50.0, 450.0], 0.0);
+        let iso = CoordValue::Instant { instant: JAN_2, text: Some("2020-01-02".to_string()) };
+        let (built, warnings) = run(&[text(iso, CoordValue::Data(1.0))], &spelled, &linear(), None);
+        assert_eq!(built.unwrap().above_marks.len(), 1);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn an_unknown_category_is_skipped_on_the_break_path_too() {
         let panel = broken_panel(&[[300.0, 400.0]]);
         let x = band(&["a", "b"], [50.0, 550.0], 0.0);
@@ -2819,9 +2842,9 @@ mod categories {
         // Text that is not a label is refused quoting the text as written.
         let (built, _) = run(&[text(text_instant(JAN_2, "2020-01-02T00:00:00"), CoordValue::Data(1.0))], &x, &linear(), None);
         assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02T00:00:00", "x", None));
-        // The same instant without text is a date object: refused as a date.
+        // The same instant without text is a date object: refused as a date, naming the label it spells.
         let (built, _) = run(&[text(instant(JAN_2), CoordValue::Data(1.0))], &x, &linear(), None);
-        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02", "x", None));
+        assert_eq!(built.unwrap_err().to_string(), value_message("2020-01-02", "x", Some("2020-01-02")));
         // Under a projected coord the text is the category refused.
         let (built, _) = run(&[text(text_instant(JAN_2, "2020-01-02"), CoordValue::Data(1.0))], &x, &linear(), Some(&polar()));
         assert!(matches!(built, Err(AnnotationRefusal::CategoryUnderCoord { ref label, .. }) if label == "2020-01-02"));

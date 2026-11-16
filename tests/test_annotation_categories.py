@@ -1133,13 +1133,15 @@ def test_a_datetime_on_a_string_band_axis_is_refused_naming_its_full_text():
     _assert_refused_on_both_routes(chart, _value_message("2020-01-02T12:00:00", "x"))
 
 
-def test_a_date_on_a_string_band_axis_whose_category_spells_it_is_still_refused():
+def test_a_date_on_a_string_band_axis_whose_category_spells_it_is_refused_naming_that_label():
     """The axis holds the string ``'2020-01-02'``, which is not a date category: the date is
-    refused without a label clause, and the explicit category spelling lands on the band."""
+    refused naming the label that spells it, and the explicit category spelling lands on the
+    band."""
     df = pl.DataFrame({"c": ["2020-01-01", "2020-01-02", "2020-01-03"], "v": [1.0, 2.0, 3.0]})
     plain = fm.Chart(df).mark_bar().encode(x="c", y="v")
     _assert_refused_on_both_routes(
-        plain + ann.text(dt.date(2020, 1, 2), 2.0, "t"), _value_message("2020-01-02", "x")
+        plain + ann.text(dt.date(2020, 1, 2), 2.0, "t"),
+        _value_message("2020-01-02", "x", "2020-01-02"),
     )
     chart = plain + ann.text("2020-01-02", 2.0, "HELLO", color=_COLOUR["text"], anchor="middle")
     svg, shown = _render_capturing(chart.to_svg)
@@ -2127,3 +2129,142 @@ def test_an_iso_string_that_is_a_label_is_refused_under_polar_as_its_category():
     _assert_refused_on_both_routes(
         _iso_text_days() + span, _mixed_span_message("x", "start", "2020-01-02")
     )
+
+
+# ---------------------------------------------------------------------------
+# A date on a string band axis that holds a label spelling it is refused naming that label
+# ---------------------------------------------------------------------------
+
+# The middle label spells a date; its neighbours are plain text, so a helper layer that reads the
+# partner coordinate as a date column does not change what the axis holds.
+_LABEL_ONE, _LABEL_TWO, _LABEL_THREE = "a", "2021-01-02", "c"
+_LABEL_FRAME = pl.DataFrame({"c": [_LABEL_ONE, _LABEL_TWO, _LABEL_THREE], "v": [1.0, 2.0, 3.0]})
+_PAIR_SPELLINGS = {
+    "date": dt.date(2021, 1, 2),
+    "datetime": dt.datetime(2021, 1, 2),
+    "datetime64": np.datetime64("2021-01-02"),
+}
+
+
+def _label_bars(axis: str) -> fm.Chart:
+    """Bars over the three ISO-text labels on ``axis``."""
+    if axis == "x":
+        return fm.Chart(_LABEL_FRAME).mark_bar().encode(x="c", y="v")
+    return fm.Chart(_LABEL_FRAME).mark_bar().encode(x="v", y="c")
+
+
+def _date_on_category(kind: str, date: Any) -> Any:
+    """``kind`` with ``date`` on the category (x) axis and every other category coordinate a
+    label the axis holds."""
+    one, three = _LABEL_ONE, _LABEL_THREE
+    return {
+        "text": lambda: ann.text(date, 2.0, "t"),
+        "arrow": lambda: ann.arrow(date, 1.0, three, 3.0),
+        "arrow_end": lambda: ann.arrow(one, 1.0, date, 3.0),
+        "rect": lambda: ann.rect(one, 1.0, date, 3.0, fill="#eee"),
+        "rect_far_end": lambda: ann.rect(date, 1.0, three, 3.0, fill="#eee"),
+        "line": lambda: ann.line(one, 1.0, date, 3.0),
+        "span_start": lambda: ann.span("x", date, three, fill="#eee"),
+        "span_end": lambda: ann.span("x", one, date, fill="#eee"),
+        "bracket": lambda: ann.bracket(date, 3.0, three, 3.0, label="r"),
+        "callout_anchor": lambda: ann.callout(date, 3.0, "note", text_x=three, text_y=2.0),
+        "callout_text_x": lambda: ann.callout(one, 3.0, "note", text_x=date, text_y=2.0),
+        "image": lambda: ann.image(date, 3.0, _IMAGE_SRC, width=10, height=10),
+        "annotate_vline": lambda: fm.annotate_vline(date),
+        "annotate_text": lambda: fm.annotate_text(date, 2.0, "t"),
+        "annotate_rect": lambda: fm.annotate_rect(one, date, 1.0, 3.0),
+        "annotate_arrow": lambda: fm.annotate_arrow(date, 1.0, three, 3.0),
+    }[kind]()
+
+
+_DATE_KINDS = [
+    "text",
+    "arrow",
+    "arrow_end",
+    "rect",
+    "rect_far_end",
+    "line",
+    "span_start",
+    "span_end",
+    "bracket",
+    "callout_anchor",
+    "callout_text_x",
+    "image",
+    "annotate_vline",
+    "annotate_text",
+    "annotate_rect",
+    "annotate_arrow",
+]
+
+
+@pytest.mark.parametrize("spelling", sorted(_PAIR_SPELLINGS))
+@pytest.mark.parametrize("kind", _DATE_KINDS)
+def test_a_date_on_a_band_axis_names_the_label_that_spells_it_for_every_annotation_kind(
+    kind, spelling
+):
+    chart = _label_bars("x") + _date_on_category(kind, _PAIR_SPELLINGS[spelling])
+    _assert_refused_on_both_routes(chart, _value_message(_LABEL_TWO, "x", _LABEL_TWO))
+
+
+@pytest.mark.parametrize("spelling", sorted(_PAIR_SPELLINGS))
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda d: ann.text(2.0, d, "t"),
+        lambda d: fm.annotate_hline(d),
+        lambda d: ann.span("y", d, _LABEL_THREE, fill="#eee"),
+        lambda d: ann.rect(1.0, d, 3.0, _LABEL_THREE, fill="#eee"),
+    ],
+    ids=["text", "annotate_hline", "span", "rect"],
+)
+def test_a_date_on_a_vertical_band_axis_names_the_label_that_spells_it(build, spelling):
+    chart = _label_bars("y") + build(_PAIR_SPELLINGS[spelling])
+    _assert_refused_on_both_routes(chart, _value_message(_LABEL_TWO, "y", _LABEL_TWO))
+
+
+def test_a_date_naming_no_label_of_the_axis_gets_the_generic_remedy():
+    for date in (dt.date(2021, 2, 9), dt.datetime(2021, 1, 2, 12), np.datetime64("2021-02-09")):
+        text = date.isoformat() if hasattr(date, "isoformat") else str(date)
+        chart = _label_bars("x") + fm.annotate_vline(date)
+        _assert_refused_on_both_routes(chart, _value_message(text, "x"))
+
+
+def test_a_datetime_names_the_label_that_spells_its_full_instant():
+    noon = "2021-01-02T12:00:00"
+    frame = pl.DataFrame({"c": ["2021-01-02T00:00:00", noon], "v": [1.0, 2.0]})
+    chart = fm.Chart(frame).mark_bar().encode(x="c", y="v")
+    _assert_refused_on_both_routes(
+        chart + fm.annotate_vline(dt.datetime(2021, 1, 2, 12)), _value_message(noon, "x", noon)
+    )
+
+
+def test_an_iso_string_equal_to_a_label_still_lands_on_its_band_beside_the_named_refusal():
+    chart = _label_bars("x") + fm.annotate_vline(_LABEL_TWO, stroke="#ff0010")
+    svg, shown = _render_capturing(chart.to_svg)
+    assert shown == []
+    _near(float(_one(svg, "line", stroke="#ff0010").attrs["x1"]), _ticks(svg, "x")[_LABEL_TWO])
+
+
+_LABEL_DOORS: dict[str, Callable[[Any], Any]] = {
+    "plus": lambda a: _label_bars("x") + a,
+    "chart_layer": lambda a: (
+        fm.Chart(_LABEL_FRAME).encode(x="c", y="v").layer(fm.Layer(mark="bar")) + a
+    ),
+    "layer_chart": lambda a: fm.LayerChart(
+        _label_bars("x"), fm.Chart(_LABEL_FRAME).mark_point().encode(x="c", y="v") + a
+    ),
+    "hconcat_leaf": lambda a: (_label_bars("x") + a) | _label_bars("x"),
+    "break_axis": lambda a: _label_bars("x") + fm.BreakAxis(axis="y", gap=(1.2, 1.8)) + a,
+}
+
+
+@pytest.mark.parametrize("door", sorted(_LABEL_DOORS))
+def test_a_date_on_a_band_axis_names_its_label_through_every_door_on_both_routes(door):
+    chart = _LABEL_DOORS[door](ann.text(dt.date(2021, 1, 2), 2.0, "t"))
+    message = _value_message(_LABEL_TWO, "x", _LABEL_TWO)
+    with pytest.raises(ValueError) as static:
+        chart.to_svg()
+    assert str(static.value) == _STATIC_PREFIX.get(door, "") + message
+    with pytest.raises(ValueError) as interactive:
+        chart.interactive().to_html()
+    assert str(interactive.value) == _INTERACTIVE_PREFIX.get(door, "") + message

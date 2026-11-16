@@ -532,3 +532,87 @@ def test_conditional_spec_is_frozen():
     cond = sel.when(fm.Color("g")).otherwise(value("#ccc"))
     with pytest.raises(AttributeError):
         cond.selection_name = "modified"
+
+
+# ── 6. sequence parameters refuse what is not an ordered sequence of names ──
+
+
+def _name_sequence_refusal(door: str, param: str, value: object) -> str:
+    noun = {"fields": "field names", "encodings": "channel names"}[param]
+    if isinstance(value, dict):
+        return (
+            f"{door}: {param} must be a sequence of {noun}, got dict {value!r}; "
+            "pass a list of its keys, e.g. list(...)"
+        )
+    if isinstance(value, (set, frozenset)):
+        return (
+            f"{door}: {param} must be an ordered sequence of {noun}, "
+            f"got {type(value).__name__} {value!r}; a set has no order, so the output "
+            "would change from run to run; pass a list, e.g. sorted(...)"
+        )
+    if isinstance(value, str):
+        return (
+            f"{door}: {param} must be a sequence of {noun} (list or tuple), "
+            f"got a bare string {value!r}; iterating a string yields individual characters"
+        )
+    return (
+        f"{door}: {param} must be a sequence of {noun} (list or tuple), "
+        f"got {type(value).__name__} {value!r}; iterating it yields integers"
+    )
+
+
+# (the door the caller invoked, the voice its refusal speaks in): each refuses as the function
+# the caller wrote.
+_NAME_DOORS = [
+    (fm.selection_point, "selection_point"),
+    (fm.selection_single, "selection_single"),
+    (fm.selection_multi, "selection_multi"),
+    (fm.selection_interval, "selection_interval"),
+]
+_NAME_KINDS = [
+    {"cat": 1},
+    {"cat"},
+    frozenset({"cat"}),
+    "cat",
+    b"cat",
+    bytearray(b"cat"),
+]
+
+
+@pytest.mark.parametrize(("door", "voice"), _NAME_DOORS, ids=[v for _, v in _NAME_DOORS])
+@pytest.mark.parametrize("param", ["fields", "encodings"])
+@pytest.mark.parametrize("bad", _NAME_KINDS, ids=lambda v: type(v).__name__)
+def test_a_selection_sequence_parameter_refuses_a_non_sequence_kind(door, voice, param, bad):
+    with pytest.raises(ValueError) as caught:
+        door(**{param: bad})
+    assert str(caught.value) == _name_sequence_refusal(voice, param, bad)
+
+
+@pytest.mark.parametrize(("door", "voice"), _NAME_DOORS, ids=[v for _, v in _NAME_DOORS])
+def test_a_refused_fields_dict_never_reaches_a_render(door, voice):
+    # The dict used to be stored and then fail at render as a serde error.
+    with pytest.raises(ValueError):
+        door(fields={"g": 1})
+
+
+@pytest.mark.parametrize(("door", "voice"), _NAME_DOORS, ids=[v for _, v in _NAME_DOORS])
+def test_a_selection_sequence_parameter_reads_a_list_a_tuple_and_a_one_shot_iterable(door, voice):
+    from_list = door(fields=["g", "x"], encodings=["X", "Color"])
+    assert door(fields=("g", "x"), encodings=("X", "Color")).params == from_list.params
+    one_shot = door(fields=iter(["g", "x"]), encodings=iter(["X", "Color"]))
+    assert one_shot.params["fields"] == ["g", "x"]
+    assert one_shot.params["encodings"] == ["x", "color"]
+
+
+def test_a_selection_with_tuple_fields_renders_like_list_fields():
+    def render(fields):
+        sel = selection_point(fields=fields, name="s")
+        chart = (
+            fm.Chart(_small_df())
+            .mark_point()
+            .encode(x="x", y="y", color=sel.when(fm.Color("g")).otherwise(value("#ccc")))
+            .add_selection(sel)
+        )
+        return _render(chart)[0]
+
+    assert render(("g",)) == render(["g"])

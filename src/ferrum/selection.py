@@ -22,13 +22,13 @@ from __future__ import annotations
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from functools import partial
 from typing import Any, Literal
 
 from ferrum._validate import as_finite_real, is_none_color_sentinel, is_real_number
 from ferrum.encoding._channel_policy import _CONDITIONAL_CHANNELS
 from ferrum.marks.base import _normalize_stroke_dash
 from ferrum.parameter import Parameter, VariableParameter, _decode_param_ref, _normalize_bind
+from ferrum.transforms import _reject_bare_string
 
 
 @dataclass(frozen=True)
@@ -368,6 +368,34 @@ def selection_point(
 
     >>> sel = fm.selection_point(bind="legend")
     """
+    return _point_selection(
+        "selection_point",
+        fields=fields,
+        encodings=encodings,
+        nearest=nearest,
+        toggle=toggle,
+        on=on,
+        clear=clear,
+        resolve=resolve,
+        name=name,
+        bind=bind,
+    )
+
+
+def _point_selection(
+    door: str,
+    *,
+    fields: Any,
+    encodings: Any,
+    nearest: bool,
+    toggle: str,
+    on: str,
+    clear: str,
+    resolve: str,
+    name: str | None,
+    bind: str | None,
+) -> Selection:
+    """Build a point selection; *door* is the public call the refusals speak as."""
     sel_name = name or f"sel_{uuid.uuid4().hex[:8]}"
     params: dict[str, Any] = {
         "nearest": nearest,
@@ -377,9 +405,11 @@ def selection_point(
         "resolve": resolve,
     }
     if fields is not None:
-        params["fields"] = fields
+        params["fields"] = _name_sequence(fields, door=door, param="fields")
     if encodings is not None:
-        params["encodings"] = [e.lower() for e in encodings]
+        params["encodings"] = [
+            e.lower() for e in _name_sequence(encodings, door=door, param="encodings")
+        ]
     return Selection(name=sel_name, kind="point", params=params, bind=bind)
 
 
@@ -454,16 +484,30 @@ def selection_interval(
         "resolve": resolve,
     }
     if fields is not None:
-        params["fields"] = fields
+        params["fields"] = _name_sequence(fields, door="selection_interval", param="fields")
     if encodings is not None:
-        params["encodings"] = [e.lower() for e in encodings]
+        params["encodings"] = [
+            e.lower()
+            for e in _name_sequence(encodings, door="selection_interval", param="encodings")
+        ]
     if mark is not None:
         params["mark"] = mark.to_spec_dict()
     return Selection(name=sel_name, kind="interval", params=params)
 
 
-selection_single = partial(selection_point, toggle="false")
-selection_single.__doc__ = """Create a single-select point selection (no toggle).
+def selection_single(
+    *,
+    fields: list[str] | None = None,
+    encodings: list[str] | None = None,
+    nearest: bool = False,
+    toggle: str = "false",
+    on: str = "click",
+    clear: str = "mouseout",
+    resolve: Literal["global", "union", "intersect"] = "global",
+    name: str | None = None,
+    bind: str | None = None,
+) -> Selection:
+    """Create a single-select point selection (no toggle).
 
     A convenience alias for ``selection_point(toggle="false")``.  Clicking a
     new mark *replaces* the current selection rather than adding to it.
@@ -479,15 +523,41 @@ selection_single.__doc__ = """Create a single-select point selection (no toggle)
     Examples
     --------
     >>> import ferrum as fm
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "density": [0.5, 0.9]})
     >>> sel = fm.selection_single()
-    >>> fm.Chart(df).mark_point().encode(
+    >>> chart = fm.Chart(df).mark_point().encode(
     ...     x=fm.X("x"), y=fm.Y("y"),
     ...     opacity=sel.when(fm.Opacity("density")).otherwise(fm.value(0.2)),
     ... ).add_selection(sel)
     """
+    return _point_selection(
+        "selection_single",
+        fields=fields,
+        encodings=encodings,
+        nearest=nearest,
+        toggle=toggle,
+        on=on,
+        clear=clear,
+        resolve=resolve,
+        name=name,
+        bind=bind,
+    )
 
-selection_multi = partial(selection_point, toggle="event.shiftKey")
-selection_multi.__doc__ = """Create a multi-select point selection (shift-click to add).
+
+def selection_multi(
+    *,
+    fields: list[str] | None = None,
+    encodings: list[str] | None = None,
+    nearest: bool = False,
+    toggle: str = "event.shiftKey",
+    on: str = "click",
+    clear: str = "mouseout",
+    resolve: Literal["global", "union", "intersect"] = "global",
+    name: str | None = None,
+    bind: str | None = None,
+) -> Selection:
+    """Create a multi-select point selection (shift-click to add).
 
     A convenience alias for ``selection_point(toggle="event.shiftKey")``,
     making the default toggle behaviour explicit.  Shift-clicking a mark
@@ -503,12 +573,26 @@ selection_multi.__doc__ = """Create a multi-select point selection (shift-click 
     Examples
     --------
     >>> import ferrum as fm
+    >>> import polars as pl
+    >>> df = pl.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0], "category": ["a", "b"]})
     >>> sel = fm.selection_multi()
-    >>> fm.Chart(df).mark_point().encode(
+    >>> chart = fm.Chart(df).mark_point().encode(
     ...     x=fm.X("x"), y=fm.Y("y"),
     ...     color=sel.when(fm.Color("category")).otherwise(fm.value("#cccccc")),
     ... ).add_selection(sel)
     """
+    return _point_selection(
+        "selection_multi",
+        fields=fields,
+        encodings=encodings,
+        nearest=nearest,
+        toggle=toggle,
+        on=on,
+        clear=clear,
+        resolve=resolve,
+        name=name,
+        bind=bind,
+    )
 
 
 def value(v: Any) -> "_LiteralValue":
@@ -732,6 +816,21 @@ _EVENT_MAP = {
     "dblclick": "dblclick",
     "false": "click",
 }
+
+
+_NAME_NOUNS = {"fields": "field names", "encodings": "channel names"}
+
+
+def _name_sequence(value: Any, *, door: str, param: str) -> list[Any]:
+    """Return *value* as a list, or refuse a kind that is not an ordered sequence of names.
+
+    A bare string, bytes, a set and a mapping (a dict included, which has no
+    sequence form here) are refused in the words every other sequence-of-names
+    parameter uses (:func:`ferrum.transforms._reject_bare_string`); a one-shot
+    iterable is read once into a list so the stored value can be serialized.
+    """
+    _reject_bare_string(value, where=door, param=param, noun=_NAME_NOUNS[param])
+    return list(value)
 
 
 def _to_event_expr(s: str) -> str | dict[str, str]:

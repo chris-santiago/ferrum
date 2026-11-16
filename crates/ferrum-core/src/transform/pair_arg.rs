@@ -112,7 +112,9 @@ fn shape_refusal(voice: &str, param: &str, expected: &str, obj: &Bound<'_, PyAny
     }
 }
 
-const PAIR: &str = "a (lo, hi) pair of numbers";
+pub(crate) const PAIR: &str = "a (lo, hi) pair of numbers";
+/// A diverging domain: two ends, or the two ends with a midpoint between.
+pub(crate) const PAIR_OR_TRIPLE: &str = "a (lo, hi) pair or (lo, mid, hi) triple of numbers";
 const TWO_PAIRS: &str = "two (lo, hi) pairs of numbers, (xmin, xmax, ymin, ymax),";
 
 /// The `count` real-number ends of `obj`, or the shape refusal. Only a list,
@@ -162,6 +164,35 @@ fn checked_range(voice: &str, param: &str, lo: &End<'_>, hi: &End<'_>) -> PyResu
 pub(crate) fn extract_range(voice: &str, param: &str, obj: &Bound<'_, PyAny>) -> PyResult<(f64, f64)> {
     let ends = read_ends(voice, param, PAIR, 2, obj)?;
     checked_range(voice, param, &ends[0], &ends[1])
+}
+
+/// The items of a scale constructor's `domain=` or `range=`, whatever their
+/// count: only a list, tuple, `range` or 1-D numpy array is read (so a set,
+/// bytes, string, mapping or one-shot iterator is refused unread, in the pair
+/// words), and the caller's own length and value checks run on what comes back.
+/// A reversed order is kept.
+pub(crate) fn read_scale_items<'py>(
+    voice: &str,
+    param: &str,
+    expected: &str,
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    let refuse = || shape_refusal(voice, param, expected, obj);
+    if !is_ordered_kind(obj)? {
+        return Err(refuse());
+    }
+    let count = obj.len().map_err(|_| refuse())?;
+    (0..count).map(|i| obj.get_item(i)).collect()
+}
+
+/// [`read_scale_items`] with every item read as a float.
+pub(crate) fn extract_scale_values(
+    voice: &str,
+    param: &str,
+    expected: &str,
+    obj: &Bound<'_, PyAny>,
+) -> PyResult<Vec<f64>> {
+    read_scale_items(voice, param, expected, obj)?.iter().map(|item| item.extract::<f64>()).collect()
 }
 
 /// `obj` as the four values of two statistic ranges, `(xmin, xmax, ymin,
@@ -325,6 +356,47 @@ mod tests {
             let nan = eval(py, c_str!("(0, float('nan'))"));
             let err = extract_endpoints("ReferenceLine", "y", &nan).unwrap_err().value(py).to_string();
             assert_eq!(err, "ReferenceLine: y must be a (lo, hi) pair of finite numbers; got (0, nan)");
+        });
+    }
+
+    #[test]
+    fn scale_values_read_ordered_kinds_and_refuse_the_rest_in_the_pair_words() {
+        with_py(|py| {
+            for code in [c_str!("(9, 1)"), c_str!("[9, 1]"), c_str!("range(9, 0, -8)")] {
+                let read = extract_scale_values("LinearScale", "domain", PAIR, &eval(py, code)).ok();
+                assert_eq!(read, Some(vec![9.0, 1.0]), "{code:?}");
+            }
+            let three = eval(py, c_str!("[1, 2, 3]"));
+            assert_eq!(extract_scale_values("LinearScale", "domain", PAIR, &three).ok(), Some(vec![1.0, 2.0, 3.0]));
+            for (code, expected) in [
+                (c_str!("{9, 1}"), "set {9, 1}; a set has no order, so the ends would change from run to run"),
+                (c_str!("b'\\x01\\x04'"), "bytes b'\\x01\\x04'; iterating it yields integers"),
+                (c_str!("bytearray(b'\\x01')"), "bytearray bytearray(b'\\x01'); iterating it yields integers"),
+                (c_str!("'19'"), "str '19'"),
+                (c_str!("{1: 2}"), "dict {1: 2}"),
+            ] {
+                let err = extract_scale_values("LinearScale", "range", PAIR, &eval(py, code))
+                    .unwrap_err()
+                    .value(py)
+                    .to_string();
+                assert_eq!(
+                    err,
+                    format!("LinearScale: range must be a (lo, hi) pair of numbers as a list or tuple, got {expected}")
+                );
+            }
+            let set = eval(py, c_str!("{1, 2, 3}"));
+            let err = extract_scale_values("DivergingScale", "domain", PAIR_OR_TRIPLE, &set)
+                .unwrap_err()
+                .value(py)
+                .to_string();
+            assert_eq!(
+                err,
+                "DivergingScale: domain must be a (lo, hi) pair or (lo, mid, hi) triple of numbers as a list or \
+                 tuple, got set {1, 2, 3}; a set has no order, so the ends would change from run to run"
+            );
+            let gen_ = eval(py, c_str!("iter([1, 9])"));
+            assert!(extract_scale_values("LinearScale", "domain", PAIR, &gen_).is_err());
+            assert_eq!(gen_.call_method0("__next__").unwrap().extract::<i64>().unwrap(), 1);
         });
     }
 

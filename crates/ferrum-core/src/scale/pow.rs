@@ -7,6 +7,7 @@ use super::core::{
 };
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR, extract_scale_values};
 
 #[derive(Debug, Clone, PartialEq)]
 struct PowScaleData {
@@ -265,10 +266,7 @@ impl PowScale {
     }
 }
 
-#[pymethods]
 impl PowScale {
-    #[new]
-    #[pyo3(signature = (*, domain = None, range = None, exponent = 2.0, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
@@ -302,6 +300,25 @@ impl PowScale {
             domain_user_set: resolved.domain_user_set,
             reverse,
         })
+    }
+}
+
+#[pymethods]
+impl PowScale {
+    #[new]
+    #[pyo3(signature = (*, domain = None, range = None, exponent = 2.0, clamp = false, nice = false, padding = None, reverse = false))]
+    fn py_new(
+        domain: Option<&Bound<'_, PyAny>>,
+        range: Option<&Bound<'_, PyAny>>,
+        exponent: f64,
+        clamp: bool,
+        nice: bool,
+        padding: Option<f64>,
+        reverse: bool,
+    ) -> PyResult<Self> {
+        let domain = domain.map(|v| extract_scale_values("PowScale", "domain", PAIR, v)).transpose()?;
+        let range = range.map(|v| extract_scale_values("PowScale", "range", PAIR, v)).transpose()?;
+        Self::new(domain, range, exponent, clamp, nice, padding, reverse)
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
@@ -444,10 +461,7 @@ impl SqrtScale {
     }
 }
 
-#[pymethods]
 impl SqrtScale {
-    #[new]
-    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
@@ -475,6 +489,24 @@ impl SqrtScale {
             domain_user_set: resolved.domain_user_set,
             reverse,
         })
+    }
+}
+
+#[pymethods]
+impl SqrtScale {
+    #[new]
+    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, reverse = false))]
+    fn py_new(
+        domain: Option<&Bound<'_, PyAny>>,
+        range: Option<&Bound<'_, PyAny>>,
+        clamp: bool,
+        nice: bool,
+        padding: Option<f64>,
+        reverse: bool,
+    ) -> PyResult<Self> {
+        let domain = domain.map(|v| extract_scale_values("SqrtScale", "domain", PAIR, v)).transpose()?;
+        let range = range.map(|v| extract_scale_values("SqrtScale", "range", PAIR, v)).transpose()?;
+        Self::new(domain, range, clamp, nice, padding, reverse)
     }
 
     /// Map a single input value ``x`` to its output range coordinate.

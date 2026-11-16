@@ -84,8 +84,8 @@ class BreakAxis:
     axis : str
         Which axis to break: ``"x"`` or ``"y"``.
     gap : tuple or list
-        A single ``(start, end)`` break region or a sequence of
-        ``(start, end)`` pairs for multiple breaks. Each bound is either
+        A single ``(start, end)`` break region (a tuple or a list of two
+        bounds) or a sequence of ``(start, end)`` pairs for multiple breaks. Each bound is either
         numeric (``int``/``float`` or a numpy scalar — ``np.int64``,
         ``np.float32``, ... — data-space) or temporal (``str`` ISO-8601 date/
         datetime, ``datetime.date``, ``datetime.datetime``,
@@ -139,7 +139,7 @@ class BreakAxis:
 def _normalize_break_gaps(gap: Any) -> list[Any]:
     """Classify *gap* as a single ``(start, end)`` pair or a list of pairs.
 
-    A bare ``(start, end)`` tuple is one break region; anything else is
+    A bare ``(start, end)`` tuple or list is one break region; anything else is
     treated as a list of break regions. This is the single owner of that
     classification heuristic — ``ferrum._render.Chart._serialize_structural``
     calls this instead of hand-rolling its own copy, so the construction-time
@@ -150,7 +150,7 @@ def _normalize_break_gaps(gap: Any) -> list[Any]:
     Elements are returned as-is (not coerced to ``list``); a caller that needs
     JSON-safe output does that conversion itself.
     """
-    if isinstance(gap, tuple) and len(gap) == 2 and not isinstance(gap[0], (list, tuple)):
+    if isinstance(gap, (tuple, list)) and len(gap) == 2 and not isinstance(gap[0], (list, tuple)):
         return [gap]
     return list(gap)
 
@@ -259,7 +259,8 @@ def _coerce_and_validate_break_gaps(gap: Any) -> tuple | list:
     Returns the coerced gap in the same shape AND the same container type as
     the input, for ``BreakAxis.__post_init__`` to store back onto the frozen
     dataclass so temporal bounds never reach wire serialization unconverted:
-    a bare ``(start, end)`` stays bare, a tuple of pairs stays a tuple, a list
+    a bare ``(start, end)`` stays bare (a bare ``[start, end]`` list is the
+    same pair and is stored as the tuple), a tuple of pairs stays a tuple, a list
     of pairs stays a list. The container type is load-bearing, not cosmetic —
     ``BreakAxis`` is a frozen dataclass, so rebuilding a tuple-spelled ``gap``
     as a list silently made the instance UNHASHABLE (design review F3;

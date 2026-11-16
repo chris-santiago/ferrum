@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use super::core::{scale_spec_to_py_dict, validate_band_point_range};
 use super::discrete::{check_align, BandPadding, BandPaddingError, DiscreteGeometry, DiscreteLayout};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR, extract_scale_values};
 
 #[derive(Debug, Clone, PartialEq)]
 struct BandScaleData {
@@ -147,10 +148,7 @@ impl BandScale {
     }
 }
 
-#[pymethods]
 impl BandScale {
-    #[new]
-    #[pyo3(signature = (*, domain = None, padding = None, padding_inner = None, padding_outer = None, align = 0.5, range = None))]
     fn new(
         domain: Option<Vec<String>>,
         padding: Option<f64>,
@@ -176,6 +174,23 @@ impl BandScale {
             data: BandScaleData { domain: domain.unwrap_or_default(), padding, layout },
             range: r,
         })
+    }
+}
+
+#[pymethods]
+impl BandScale {
+    #[new]
+    #[pyo3(signature = (*, domain = None, padding = None, padding_inner = None, padding_outer = None, align = 0.5, range = None))]
+    fn py_new(
+        domain: Option<Vec<String>>,
+        padding: Option<f64>,
+        padding_inner: Option<f64>,
+        padding_outer: Option<f64>,
+        align: f64,
+        range: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        let range = range.map(|v| extract_scale_values("BandScale", "range", PAIR, v)).transpose()?;
+        Self::new(domain, padding, padding_inner, padding_outer, align, range)
     }
 
     /// Map a category label to the leading pixel edge of its slot.

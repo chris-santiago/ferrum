@@ -6,6 +6,7 @@ use super::core::{
 };
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR, extract_scale_values};
 
 /// Internal data for a linear-affine scale. Shared by [`LinearScale`] and
 /// [`super::time::TimeScale`] (time scales use the same domain-to-range
@@ -307,10 +308,7 @@ impl LinearScale {
     }
 }
 
-#[pymethods]
 impl LinearScale {
-    #[new]
-    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
@@ -338,6 +336,24 @@ impl LinearScale {
             reverse,
             nice,
         })
+    }
+}
+
+#[pymethods]
+impl LinearScale {
+    #[new]
+    #[pyo3(signature = (*, domain = None, range = None, clamp = false, nice = false, padding = None, reverse = false))]
+    fn py_new(
+        domain: Option<&Bound<'_, PyAny>>,
+        range: Option<&Bound<'_, PyAny>>,
+        clamp: bool,
+        nice: bool,
+        padding: Option<f64>,
+        reverse: bool,
+    ) -> PyResult<Self> {
+        let domain = domain.map(|v| extract_scale_values("LinearScale", "domain", PAIR, v)).transpose()?;
+        let range = range.map(|v| extract_scale_values("LinearScale", "range", PAIR, v)).transpose()?;
+        Self::new(domain, range, clamp, nice, padding, reverse)
     }
 
     /// Map a single input value ``x`` to its output range coordinate.

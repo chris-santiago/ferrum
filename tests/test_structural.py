@@ -208,7 +208,7 @@ class TestBreakAxisGapValidation:
 
     def test_malformed_scalar_entry_in_list_raises(self):
         with pytest.raises(ValueError, match=r"pair of length 2"):
-            BreakAxis(axis="y", gap=[10, 20])
+            BreakAxis(axis="y", gap=[10, 20, 30])
 
     def test_empty_gap_list_raises(self):
         with pytest.raises(ValueError, match="at least one"):

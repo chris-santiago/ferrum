@@ -7,6 +7,7 @@ use super::core::{
 };
 use super::ticks::{minor_ticks_default, nice_step, nice_ticks, Tick};
 use crate::spec::encoding::ScaleSpec;
+use crate::transform::pair_arg::{PAIR, extract_scale_values};
 
 pub(crate) fn symlog_fwd(x: f64, c: f64) -> f64 {
     x.signum() * (x.abs() / c).ln_1p()
@@ -273,10 +274,7 @@ impl SymlogScale {
     }
 }
 
-#[pymethods]
 impl SymlogScale {
-    #[new]
-    #[pyo3(signature = (*, domain = None, range = None, constant = 1.0, clamp = false, nice = false, padding = None, reverse = false))]
     fn new(
         domain: Option<Vec<f64>>,
         range: Option<Vec<f64>>,
@@ -311,6 +309,25 @@ impl SymlogScale {
             reverse,
             nice,
         })
+    }
+}
+
+#[pymethods]
+impl SymlogScale {
+    #[new]
+    #[pyo3(signature = (*, domain = None, range = None, constant = 1.0, clamp = false, nice = false, padding = None, reverse = false))]
+    fn py_new(
+        domain: Option<&Bound<'_, PyAny>>,
+        range: Option<&Bound<'_, PyAny>>,
+        constant: f64,
+        clamp: bool,
+        nice: bool,
+        padding: Option<f64>,
+        reverse: bool,
+    ) -> PyResult<Self> {
+        let domain = domain.map(|v| extract_scale_values("SymlogScale", "domain", PAIR, v)).transpose()?;
+        let range = range.map(|v| extract_scale_values("SymlogScale", "range", PAIR, v)).transpose()?;
+        Self::new(domain, range, constant, clamp, nice, padding, reverse)
     }
 
     /// Map a single input value ``x`` to its output range coordinate.
